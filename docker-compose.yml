@@ -1,0 +1,85 @@
+name: l2aiserver
+
+x-acis-image: &acis-image
+  image: l2aiserver/acis:${ACIS_REVISION}
+  build:
+    context: ./acis
+    args:
+      ACIS_COMMIT: ${ACIS_COMMIT}
+      JDK_VERSION: ${JDK_VERSION}
+
+x-db-credentials: &db-credentials
+  LOGIN_DB_NAME: ${LOGIN_DB_NAME}
+  LOGIN_DB_USER: ${LOGIN_DB_USER}
+  LOGIN_DB_PASSWORD: ${LOGIN_DB_PASSWORD}
+  GAME_DB_NAME: ${GAME_DB_NAME}
+  GAME_DB_USER: ${GAME_DB_USER}
+  GAME_DB_PASSWORD: ${GAME_DB_PASSWORD}
+
+services:
+  db:
+    image: mariadb:11.4
+    environment:
+      <<: *db-credentials
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+    command: ["--innodb-buffer-pool-size=256M"]
+    volumes:
+      - db-data:/var/lib/mysql
+      - ./mariadb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    mem_limit: 768m
+    restart: unless-stopped
+
+  db-init:
+    <<: *acis-image
+    command: ["init-db"]
+    environment: *db-credentials
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  login:
+    <<: *acis-image
+    command: ["login"]
+    environment:
+      <<: *db-credentials
+      LOGIN_JAVA_OPTS: ${LOGIN_JAVA_OPTS}
+    ports:
+      - "127.0.0.1:2106:2106"
+    volumes:
+      - ./logs/login:/opt/acis/login/log
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    mem_limit: 256m
+    restart: unless-stopped
+
+  game:
+    <<: *acis-image
+    command: ["game"]
+    environment:
+      <<: *db-credentials
+      GAME_JAVA_OPTS: ${GAME_JAVA_OPTS}
+      GAME_PUBLIC_HOST: ${GAME_PUBLIC_HOST}
+    ports:
+      - "127.0.0.1:7777:7777"
+    volumes:
+      - ./geodata:/opt/acis/geodata
+      - ./logs/game:/opt/acis/gameserver/log
+      - game-state:/opt/acis/gameserver/state
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      login:
+        condition: service_started
+    mem_limit: 3g
+    restart: unless-stopped
+
+volumes:
+  db-data:
+  game-state:
