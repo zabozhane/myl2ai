@@ -1,3 +1,5 @@
 /logs/
 /geodata/*
 !/geodata/.gitkeep
+/client/*
+!/client/.gitkeep
