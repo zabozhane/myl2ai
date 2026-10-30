@@ -94,7 +94,7 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - `GroupChat`: party chat is a teammate's suggestion, never an order. "assist me", "rest", "buff",
     "let's move", "brb", "bye" (Russian or English keywords) are weighed against the party's state and answered
     in the player's language.
-  - `GroupFinder` (`groupFinderEnabled`, every 30 s): team players in 60% of sessions from level 18, regulars in
+  - `GroupFinder` (`groupFinderEnabled`, every 30 s): team players in 60% of sessions from `groupFinderMinLevel` (10), regulars in
     25%, and anyone who keeps dying look for a group. Lookers of one map region within 5 levels team up behind
     the most sociable one: a healer from level 25 (or damage dealers after 5 minutes without one), then tank,
     buffer, spoiler and damage dealers, 3-5 members, people they dislike left out. At most
