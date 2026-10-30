@@ -88,6 +88,8 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - Every 10 minutes one `Autobots economy summary:` line counts the deals by kind and shows the bots online
     (average and max level, adena, stores, farming, needsGroup). `scripts/economy-report.sh [since]` prints those
     summaries, deal counts with samples, bot errors and the game container's load.
+  - `HuntingSpots`: cells of 2500x2500 per floor (1000 of height), so a village above and catacombs below are separate
+    spots; a spot with aggressive monsters more than 5 levels above the hunter is never picked.
   - Every bot death prints an `Autobots death:` line (with `economyLog`): the killer, its level and whether it is
     aggressive, the monsters on the bot, potions left, mode, hunt level, spot, party size, weapon grade, coordinates.
   Professions (`behaviors/classes/`): every Interlude class plays now. Healers (Cleric line, Elven and Shillien
