@@ -2111,10 +2111,10 @@ index 0000000..a47de5d
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 new file mode 100644
-index 0000000..761833a
+index 0000000..bb7b6ff
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-@@ -0,0 +1,221 @@
+@@ -0,0 +1,238 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -2128,11 +2128,12 @@ index 0000000..761833a
 +import net.sf.l2j.commons.random.Rnd
 +import net.sf.l2j.gameserver.data.ItemTable
 +import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.enums.IntentionType
 +import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.actor.Creature
 +import net.sf.l2j.gameserver.model.actor.Npc
 +import net.sf.l2j.gameserver.model.actor.Player
 +import net.sf.l2j.gameserver.model.item.instance.ItemInstance
-+import net.sf.l2j.gameserver.model.location.Location
 +
 +/** When a bot should leave its hunting spot for town, and what it can afford there. */
 +internal object Errands {
@@ -2237,7 +2238,7 @@ index 0000000..761833a
 +        for (item in Gear.surplus(bot)) {
 +            if (visits >= MAX_STORE_VISITS) return
 +            val offer = Market.buyOffers(bot, item.itemId).firstOrNull { it.tradeItem.price > Market.npcSellPrice(item.itemId) } ?: continue
-+            if (!walkTo(offer.owner)) continue
++            if (!walkTo(offer.owner, "to sell ${item.itemName}")) continue
 +            visits++
 +            val live = bot.inventory.getItemByObjectId(item.objectId) ?: continue
 +            Market.sellToStore(bot, offer, live, minOf(live.count, offer.tradeItem.count))
@@ -2253,7 +2254,7 @@ index 0000000..761833a
 +            val limit = Market.npcPrice(itemId) ?: (Market.fairValue(itemId) * 1.3).toInt()
 +            val offer = Market.sellOffers(bot, itemId).firstOrNull { it.tradeItem.price < limit } ?: continue
 +            val count = minOf(offer.tradeItem.count, wantedCount, Errands.spendable(bot) / offer.tradeItem.price.coerceAtLeast(1))
-+            if (count <= 0 || !walkTo(offer.owner)) continue
++            if (count <= 0 || !walkTo(offer.owner, "to buy ${offer.tradeItem.item.name}")) continue
 +            visits++
 +            if (Market.buyFromStore(bot, offer, count)) {
 +                bot.inventory.getItemByItemId(itemId)?.takeIf { it.isEquipable && !it.isEquipped }?.let {
@@ -2267,34 +2268,37 @@ index 0000000..761833a
 +    private suspend fun sellToNpc(items: List<ItemInstance>) {
 +        if (items.isEmpty()) return
 +        val shop = Market.closestShop(bot) ?: return EconomyLog.skip(bot, "no shop in town to sell to")
-+        if (!walkTo(shop.merchant)) return EconomyLog.skip(bot, "couldn't reach ${shop.merchant.name} to sell")
++        if (!walkTo(shop.merchant, "to sell")) return
 +        Market.sellToNpc(bot, shop, items)
 +    }
 +
 +    private suspend fun buySupplies() {
 +        // Shares of what the bot can spend now: a scroll home comes first, potions are cheap insurance,
-+        // and the rest stays for gear.
-+        buy(Gear.SCROLL_OF_ESCAPE, target = 2, budgetShare = 1.0, onlyBelow = 1)
++        // and the rest stays for gear. The reserve is travel money, and a scroll or a potion is exactly what it is
++        // kept for, so essentials may use all of the adena.
++        buy(Gear.SCROLL_OF_ESCAPE, target = 2, budgetShare = 1.0, onlyBelow = 1, essential = true)
 +        if (bot.level >= 20 || Errands.spendable(bot) >= 5000) {
 +            buy(Gear.shotId(bot), target = shotsFor(bot.level), budgetShare = 0.4, onlyBelow = shotsFor(bot.level) / 3)
 +        }
 +        // A bow without arrows can't hunt at all.
-+        if (Gear.isArcher(bot)) buy(Gear.arrowId(bot), target = 1500, budgetShare = 0.6, onlyBelow = 500)
++        if (Gear.isArcher(bot)) buy(Gear.arrowId(bot), target = 1500, budgetShare = 0.6, onlyBelow = 500, essential = true)
 +        // No town shop sells mana potions in Interlude: mages rest, as players did.
 +        val potions = Gear.HEALING_POTIONS.sumOf { Gear.count(bot, it) }
 +        val potion = Gear.HEALING_POTIONS.firstOrNull { Market.findProduct(bot, it) != null }
-+        if (potion != null) buy(potion, target = 10, budgetShare = 0.5, onlyBelow = 3, have = potions)
++        if (potion != null) buy(potion, target = 10, budgetShare = 0.5, onlyBelow = 3, have = potions, essential = true)
 +    }
 +
 +    /** Buys up to [target] pieces when the bot has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */
-+    private suspend fun buy(itemId: Int, target: Int, budgetShare: Double, onlyBelow: Int, have: Int = Gear.count(bot, itemId)) {
++    private suspend fun buy(itemId: Int, target: Int, budgetShare: Double, onlyBelow: Int, have: Int = Gear.count(bot, itemId),
++                            essential: Boolean = false) {
 +        if (have >= onlyBelow) return
 +        val name = ItemTable.getInstance().getTemplate(itemId)?.name ?: "$itemId"
 +        val (shop, product) = Market.findProduct(bot, itemId) ?: return EconomyLog.skip(bot, "no shop in town sells $name")
 +        val price = Market.priceWithTax(shop, product).coerceAtLeast(1)
-+        val count = minOf(target - have, (Errands.spendable(bot) * budgetShare / price).toInt())
-+        if (count <= 0) return EconomyLog.skip(bot, "can't afford $name at $price (adena ${bot.adena}, reserve ${Errands.reserve(bot)})")
-+        if (!walkTo(shop.merchant)) return EconomyLog.skip(bot, "couldn't reach ${shop.merchant.name} for $name")
++        val budget = if (essential) bot.adena else Errands.spendable(bot)
++        val count = minOf(target - have, (budget * budgetShare / price).toInt())
++        if (count <= 0) return EconomyLog.skip(bot, "can't afford $name at $price (adena ${bot.adena}, reserve ${if (essential) 0 else Errands.reserve(bot)})")
++        if (!walkTo(shop.merchant, "for $name")) return
 +        Market.buyFromNpc(bot, shop, product, count)
 +    }
 +
@@ -2302,32 +2306,45 @@ index 0000000..761833a
 +        val wish = Errands.affordableUpgrade(bot) ?: return
 +        val (shop, product) = Market.findProduct(bot, wish.itemId) ?: return
 +        if (Market.priceWithTax(shop, product) > Errands.spendable(bot)) return
-+        if (!walkTo(shop.merchant)) return EconomyLog.skip(bot, "couldn't reach ${shop.merchant.name} for ${product.item.name}")
++        if (!walkTo(shop.merchant, "for ${product.item.name}")) return
 +        if (!Market.buyFromNpc(bot, shop, product, 1)) return
 +        val item = bot.inventory.getItemsByItemId(wish.itemId).firstOrNull { !it.isEquipped } ?: return
 +        Gear.equip(bot, item)
 +        Chatter.maybeSay(bot, Chatter.BOUGHT_UPGRADE, item.itemName)
 +    }
 +
-+    /** Walks up to an NPC or a store and pauses like a player reading the window. */
-+    private suspend fun walkTo(target: Npc): Boolean = walkTo(target.location(), target)
-+
-+    private suspend fun walkTo(target: Player): Boolean = walkTo(target.location(), target)
-+
-+    private suspend fun walkTo(location: Location, target: net.sf.l2j.gameserver.model.actor.Creature): Boolean {
++    /**
++     * Walks up to an NPC or a store and pauses like a player reading the window. The last steps are a click on the
++     * target, as a player would do: the server's own approach with pathfinding gets around counters, stairs and doors
++     * that straight walking legs bump into.
++     */
++    private suspend fun walkTo(target: Creature, purpose: String = ""): Boolean {
 +        if (bot.isDead) return false
-+        if (distance(bot, target) > Npc.INTERACTION_DISTANCE) {
-+            WalkToSequence(bot, location, Npc.INTERACTION_DISTANCE - 50) {}.definition()
++        if (!inReach(target)) WalkToSequence(bot, target.location(), APPROACH_RADIUS) {}.definition()
++        if (!inReach(target) && !bot.isDead) {
++            bot.ai.setIntention(IntentionType.INTERACT, target)
++            for (second in 1..FINAL_APPROACH_SECONDS) {
++                delay(1000)
++                if (inReach(target) || bot.isDead) break
++            }
 +        }
-+        if (distance(bot, target) > Npc.INTERACTION_DISTANCE * 1.5) return false
++        if (!inReach(target)) {
++            EconomyLog.skip(bot, "couldn't reach ${target.name} $purpose (${distance(bot, target).toInt()} away, " +
++                    "dz ${target.z - bot.z}, bot at ${bot.x},${bot.y},${bot.z})")
++            return false
++        }
 +        bot.target = target
 +        delay(Rnd.get(2000, 5000).toLong())
 +        return !bot.isDead
 +    }
 +
++    private fun inReach(target: Creature) = target.isInsideRadius(bot, Npc.INTERACTION_DISTANCE, true, false)
++
 +    companion object {
 +        private const val MAX_STORE_VISITS = 4
 +        private const val SHOTS_PER_TRIP = 1000
++        private const val APPROACH_RADIUS = 300
++        private const val FINAL_APPROACH_SECONDS = 15
 +
 +        private fun shotsFor(level: Int) = when {
 +            level < 20 -> 300
