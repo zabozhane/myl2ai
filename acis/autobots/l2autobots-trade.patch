@@ -1,11 +1,11 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index 321ba03..2bc3c29 100644
+index ee0728c..7cdc9fa 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -54,4 +54,13 @@
-        compare shop, store and workshop prices. crafterArtisanPercent of dwarves take the Artisan line at level 20. -->
-   <craftEnabled>true</craftEnabled>
-   <crafterArtisanPercent>60</crafterArtisanPercent>
+@@ -64,4 +64,13 @@
+   <raidsEnabled>true</raidsEnabled>
+   <raidChancePercent>100</raidChancePercent>
+   <raidLog>true</raidLog>
 +  <!-- Social trading (needs economyEnabled): bots swap and sell items to each other and to players through the trade
 +       window, lend adena and spare gear to people they trust and get it back. scammerPercent of bots scam (keep loans,
 +       sell lookalikes), opportunistPercent keep a valuable loan from someone they barely trust. A loan overdue by
@@ -38,10 +38,10 @@ index 0000000..5a986cd
 +  KEY `borrower` (`borrower_id`)
 +) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
-index f103e8a..3f33b29 100644
+index 015c95f..c18b35d 100644
 --- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
-@@ -627,7 +627,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -628,7 +628,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
  
      override fun onTradeFinish(successfull: Boolean) {
          super.onTradeFinish(successfull)
@@ -97,15 +97,15 @@ index b04b0ec..beb96d6 100644
                  delay(2000)
                  bot.answerTradeRequest(true)
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index da987de..d9bc4bd 100644
+index d272712..e0fc229 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -51,7 +51,12 @@ internal data class AutobotSettings(
-         @JsonProperty("craftEnabled") var craftEnabled: Boolean = true,
-         @JsonProperty("crafterArtisanPercent") var crafterArtisanPercent: Int = 60,
-         @JsonProperty("questsEnabled") var questsEnabled: Boolean = true,
--        @JsonProperty("questLog") var questLog: Boolean = true
-+        @JsonProperty("questLog") var questLog: Boolean = true,
+@@ -55,7 +55,12 @@ internal data class AutobotSettings(
+         @JsonProperty("questLog") var questLog: Boolean = true,
+         @JsonProperty("raidsEnabled") var raidsEnabled: Boolean = true,
+         @JsonProperty("raidChancePercent") var raidChancePercent: Int = 100,
+-        @JsonProperty("raidLog") var raidLog: Boolean = true
++        @JsonProperty("raidLog") var raidLog: Boolean = true,
 +        @JsonProperty("socialTradeEnabled") var socialTradeEnabled: Boolean = true,
 +        @JsonProperty("scammerPercent") var scammerPercent: Int = 5,
 +        @JsonProperty("opportunistPercent") var opportunistPercent: Int = 10,
@@ -115,10 +115,10 @@ index da987de..d9bc4bd 100644
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
          setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-index 8d64c1f..b4f435a 100644
+index d28efbb..5614d6b 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-@@ -16,6 +16,9 @@ import dev.l2j.autobots.population.quests.QuestLog
+@@ -17,6 +17,9 @@ import dev.l2j.autobots.population.quests.QuestLog
  import dev.l2j.autobots.population.skills.SkillLog
  import dev.l2j.autobots.population.group.GroupFinder
  import dev.l2j.autobots.population.group.Relations
@@ -128,7 +128,7 @@ index 8d64c1f..b4f435a 100644
  import dev.l2j.autobots.utils.giveItemsByClassAndLevel
  import dev.l2j.autobots.utils.Klock
  import dev.l2j.autobots.utils.getRandomAppearance
-@@ -54,6 +57,7 @@ internal object PopulationManager {
+@@ -55,6 +58,7 @@ internal object PopulationManager {
          if (settings.populationSize <= 0) return
  
          CoScopes.generalScope.launch {
@@ -136,7 +136,7 @@ index 8d64c1f..b4f435a 100644
              AutobotsDao.loadPopulationMembers().forEach {
                  addMember(it.objectId, it.name, Instant.ofEpochMilli(it.creationTime).atZone(zone).toLocalDate())
              }
-@@ -74,7 +78,10 @@ internal object PopulationManager {
+@@ -75,7 +79,10 @@ internal object PopulationManager {
  
              offline.mapNotNull { AutobotsManager.activeBots[it.name] }
                      .filter { it.controller == null && !it.isInCombat && it.life?.keepsOnline() != true }
@@ -146,9 +146,9 @@ index 8d64c1f..b4f435a 100644
 +                        logout(it)
 +                    }
  
-             playing.filter { !AutobotsManager.activeBots.containsKey(it.name) }
-                     .shuffled()
-@@ -86,12 +93,14 @@ internal object PopulationManager {
+             // Bots learn when their session ends, so they can head back to town before logging out.
+             val nowMillis = System.currentTimeMillis()
+@@ -94,6 +101,7 @@ internal object PopulationManager {
                  EconomyLog.summary(bots)
                  QuestLog.summary(bots)
                  SkillLog.summary(bots)
@@ -156,6 +156,7 @@ index 8d64c1f..b4f435a 100644
              }
              if ((ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
                  GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
+@@ -102,6 +110,7 @@ internal object PopulationManager {
              }
              val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
              if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
@@ -217,7 +218,7 @@ index d38ff04..938cbd7 100644
          }
      }
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-index 6fe5bc5..432e3d4 100644
+index 4b122b7..25e211d 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 @@ -1,5 +1,7 @@
@@ -862,7 +863,7 @@ index 0000000..8108e00
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt
 new file mode 100644
-index 0000000..74fbd4e
+index 0000000..1546b9d
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt
 @@ -0,0 +1,514 @@
@@ -930,7 +931,7 @@ index 0000000..74fbd4e
 +
 +    fun isPopulation(player: Player?): Boolean = player is Autobot && player.life != null
 +
-+    fun free(bot: Player): Boolean = bot.objectId !in busy && TradeWindow.canTrade(bot)
++    fun free(bot: Player): Boolean = bot.objectId !in busy && TradeWindow.canTrade(bot) && !bot.isInCombat
 +
 +    /** Runs [block] with both bots marked busy, so no other deal grabs them meanwhile. */
 +    suspend fun <T> dealing(vararg bots: Player, block: suspend () -> T): T? {
@@ -1441,10 +1442,10 @@ index 0000000..683d357
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt
 new file mode 100644
-index 0000000..4f26fb4
+index 0000000..2f1041c
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,157 @@
 +package dev.l2j.autobots.population.trade
 +
 +import dev.l2j.autobots.Autobot
@@ -1506,8 +1507,8 @@ index 0000000..4f26fb4
 +        return distance(bot, other) <= Npc.INTERACTION_DISTANCE
 +    }
 +
-+    fun canTrade(bot: Player): Boolean = !bot.isDead && !bot.isInStoreMode && !bot.isProcessingTransaction && !bot.isInCombat &&
-+            !bot.isInOlympiadMode && bot.isOnline
++    /** What the core itself would refuse; a fight is the caller's call (a quick trade before logging out is fine). */
++    fun canTrade(bot: Player): Boolean = !bot.isDead && !bot.isInStoreMode && !bot.isProcessingTransaction && !bot.isInOlympiadMode && bot.isOnline
 +
 +    /** Two bots: one asks, the other answers right away (their decision is made before). */
 +    fun open(a: Autobot, b: Autobot): Boolean {
@@ -1570,16 +1571,20 @@ index 0000000..4f26fb4
 +    suspend fun exchange(a: Autobot, b: Autobot, aGives: List<Pair<ItemInstance, Int>>, bGives: List<Pair<ItemInstance, Int>>,
 +                         bExpects: List<Promise>, fast: Boolean = false): Outcome {
 +        suspend fun pause(min: Long, max: Long) = delay(if (fast) 200 else Rnd.get(min, max))
-+        if (!approach(a, b)) return Outcome.Failed
-+        if (!open(a, b)) return Outcome.Failed
++        fun failed(step: String): Outcome {
++            TradeLog.note(a, "trade with ${b.name} failed: $step")
++            return Outcome.Failed
++        }
++        if (!approach(a, b)) return failed("too far (${distance(a, b).toInt()})")
++        if (!open(a, b)) return failed("no window (busy=${!canTrade(a)}/${!canTrade(b)})")
 +        try {
 +            pause(1000, 2500)
 +            for ((item, count) in aGives) {
-+                if (!put(a, item, count)) return Outcome.Failed.also { a.cancelActiveTrade() }
++                if (!put(a, item, count)) return failed("couldn't put ${item.itemName}").also { a.cancelActiveTrade() }
 +                pause(500, 1500)
 +            }
 +            for ((item, count) in bGives) {
-+                if (!put(b, item, count)) return Outcome.Failed.also { b.cancelActiveTrade() }
++                if (!put(b, item, count)) return failed("partner couldn't put ${item.itemName}").also { b.cancelActiveTrade() }
 +                pause(500, 1500)
 +            }
 +            pause(1000, 3000)
@@ -1588,10 +1593,11 @@ index 0000000..4f26fb4
 +                return Outcome.Noticed
 +            }
 +            val bBefore = snapshot(b, aGives.map { it.first.itemId })
-+            a.activeTradeList?.confirm() ?: return Outcome.Failed
++            a.activeTradeList?.confirm() ?: return failed("window closed before confirming")
 +            pause(500, 2000)
-+            b.activeTradeList?.confirm() ?: return Outcome.Failed
-+            return if (gained(b, bBefore, aGives.groupBy { it.first.itemId }.mapValues { (_, v) -> v.sumOf { it.second } })) Outcome.Done else Outcome.Failed
++            b.activeTradeList?.confirm() ?: return failed("partner's window closed before confirming")
++            return if (gained(b, bBefore, aGives.groupBy { it.first.itemId }.mapValues { (_, v) -> v.sumOf { it.second } })) Outcome.Done
++            else failed("exchange refused by the core (weight, slots or a changed item)")
 +        } finally {
 +            if (a.activeTradeList != null) a.cancelActiveTrade()
 +        }
