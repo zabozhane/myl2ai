@@ -871,10 +871,10 @@ index 0000000..076dec8
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 new file mode 100644
-index 0000000..574727c
+index 0000000..ba32df1
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,137 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.Autobot
@@ -942,6 +942,12 @@ index 0000000..574727c
 +            return
 +        }
 +
++        // A crowded spot is left between fights, like a player who would rather walk on than wait for respawns.
++        if (bot.target == null && bot.getKnownTypeInRadius(Player::class.java, SPOT_RADIUS).size > MAX_PLAYERS_AT_SPOT) {
++            abandon(target)
++            return
++        }
++
 +        bot.combatBehavior.onUpdate()
 +        if (bot.target == null && !bot.isMoving && !bot.isSitting) idleTicks++ else idleTicks = 0
 +        if (idleTicks >= MAX_IDLE_TICKS) abandon(target)
@@ -1000,6 +1006,7 @@ index 0000000..574727c
 +    companion object {
 +        private const val AFK_SESSION_PERCENT = 10
 +        private const val SPOT_RADIUS = 1500
++        private const val MAX_PLAYERS_AT_SPOT = 6
 +        private const val MIN_WALK_SAVED_BY_TELEPORT = 12000
 +        // About 20 seconds at the default think interval.
 +        private const val MAX_IDLE_TICKS = 60

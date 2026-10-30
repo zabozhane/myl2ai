@@ -35,7 +35,8 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     opens with `populationSize` of them at once.
   - `LifeBehavior`: a session is hunting (90%) or AFK. Hunting spots come from monster spawns (2500 cells
     with 4+ monsters of level -4..+2), weighted towards close and less crowded ones. Far spots are reached by
-    a paid gatekeeper teleport, near ones on foot; empty or unreachable spots are dropped.
+    a paid gatekeeper teleport, near ones on foot; empty, crowded (6+ players) or unreachable spots are
+    dropped and another one is picked.
   - Nothing from thin air any more: no gear on spawn or level up, no free shots, potions, arrows, buffs or
     mana; bots use what they own and sit down to regenerate (`Rester`).
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
