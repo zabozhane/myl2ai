@@ -218,7 +218,7 @@ index d38ff04..938cbd7 100644
          }
      }
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-index 4b122b7..25e211d 100644
+index 9f6e11e..66e384a 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 @@ -1,5 +1,7 @@
@@ -444,10 +444,10 @@ index 0000000..bd4125d
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
 new file mode 100644
-index 0000000..8108e00
+index 0000000..9f8e5ca
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
-@@ -0,0 +1,413 @@
+@@ -0,0 +1,415 @@
 +package dev.l2j.autobots.population.trade
 +
 +import dev.l2j.autobots.Autobot
@@ -455,6 +455,7 @@ index 0000000..8108e00
 +import dev.l2j.autobots.population.economy.Errands
 +import dev.l2j.autobots.population.economy.Gear
 +import dev.l2j.autobots.population.economy.Market
++import dev.l2j.autobots.population.economy.MarketBook
 +import dev.l2j.autobots.population.economy.StoreKeeper
 +import dev.l2j.autobots.population.group.Relations
 +import dev.l2j.autobots.utils.distance
@@ -685,6 +686,7 @@ index 0000000..8108e00
 +                            "sold ${agreed.item.itemName} +${agreed.item.enchantLevel} as +${agreed.claimedEnchant} to ${player.name} for ${value(bot, items)}")
 +                    else {
 +                        SocialTrade.honestDeal(bot, player)
++                        MarketBook.recordSale(agreed.item.itemId, (agreed.price / agreed.count / Worth.enchantFactor(agreed.item.enchantLevel)).toInt(), agreed.count)
 +                        TradeLog.log(bot, TradeDeal.Sale, "sold ${agreed.count} ${agreed.item.itemName} to ${player.name} for ${value(bot, items)}")
 +                    }
 +                }
@@ -863,10 +865,10 @@ index 0000000..8108e00
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt
 new file mode 100644
-index 0000000..1546b9d
+index 0000000..09d9532
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt
-@@ -0,0 +1,514 @@
+@@ -0,0 +1,516 @@
 +package dev.l2j.autobots.population.trade
 +
 +import dev.l2j.autobots.Autobot
@@ -876,6 +878,7 @@ index 0000000..1546b9d
 +import dev.l2j.autobots.population.economy.Errands
 +import dev.l2j.autobots.population.economy.Gear
 +import dev.l2j.autobots.population.economy.Market
++import dev.l2j.autobots.population.economy.MarketBook
 +import dev.l2j.autobots.population.economy.StoreKeeper
 +import dev.l2j.autobots.population.group.Relations
 +import dev.l2j.autobots.utils.distance
@@ -1209,6 +1212,7 @@ index 0000000..1546b9d
 +        } ?: return
 +        if (outcome == TradeWindow.Outcome.Done) {
 +            honestDeal(buyer, seller)
++            MarketBook.recordSale(item.itemId, (price / count / Worth.enchantFactor(item.enchantLevel)).toInt(), count)
 +            TradeLog.log(buyer, if (barter != null) TradeDeal.Swap else TradeDeal.Sale,
 +                    "got $label from ${seller.name} for ${listOfNotNull(barter?.itemName, adena.takeIf { it > 0 }?.let { "$it adena" }).joinToString(" + ")}")
 +            buyer.inventory.getItemsByItemId(item.itemId).firstOrNull { it.isEquipable && !it.isEquipped }?.let { Gear.equipUpgradesFromInventory(buyer) }
@@ -1442,16 +1446,17 @@ index 0000000..683d357
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt
 new file mode 100644
-index 0000000..2f1041c
+index 0000000..3087178
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,159 @@
 +package dev.l2j.autobots.population.trade
 +
 +import dev.l2j.autobots.Autobot
 +import dev.l2j.autobots.extensions.moveTo
 +import dev.l2j.autobots.population.economy.Gear
 +import dev.l2j.autobots.population.economy.Market
++import dev.l2j.autobots.population.economy.MarketBook
 +import dev.l2j.autobots.population.economy.StoreKeeper
 +import dev.l2j.autobots.utils.distance
 +import kotlinx.coroutines.delay
@@ -1469,8 +1474,9 @@ index 0000000..2f1041c
 +internal object Worth {
 +    fun enchantFactor(enchant: Int): Double = 1 + 0.25 * enchant
 +
++    /** What [count] pieces are worth on today's market (MarketBook), more for an enchanted item. */
 +    fun of(itemId: Int, enchant: Int, count: Int): Long =
-+            if (itemId == Loan.ADENA) count.toLong() else (Market.fairValue(itemId) * enchantFactor(enchant) * count).toLong()
++            if (itemId == Loan.ADENA) count.toLong() else (MarketBook.value(itemId) * enchantFactor(enchant) * count).toLong()
 +
 +    /** What [bot] would ask for its own item: its store price, so a direct deal is never worse than its store. */
 +    fun asking(bot: Autobot, item: ItemInstance, count: Int): Long =

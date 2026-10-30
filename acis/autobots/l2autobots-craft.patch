@@ -154,7 +154,7 @@ index d64fe1a..cdb5929 100644
 +/** Loot a bot goes looking for: dropped items, or items given by Sweeper after a spoil. */
 +internal class WantedLoot(val items: Set<Int>, val spoil: Boolean)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index f9231e3..5b7d75c 100644
+index 98b1721..ddf477f 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 @@ -5,13 +5,18 @@ import dev.l2j.autobots.Autobot
@@ -187,7 +187,7 @@ index f9231e3..5b7d75c 100644
      suspend fun onUpdate() {
          if (bot.isInStoreMode) return
          if (AutobotData.settings.groupsEnabled && bot.isInParty && updateInParty()) return
-@@ -113,6 +122,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -131,6 +140,7 @@ internal class LifeBehavior(private val bot: Autobot) {
          spot?.let { HuntingSpots.leave(it) }
          spot = null
          StoreKeeper.close(bot)
@@ -195,7 +195,7 @@ index f9231e3..5b7d75c 100644
      }
  
      /**
-@@ -122,7 +132,9 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -140,7 +150,9 @@ internal class LifeBehavior(private val bot: Autobot) {
      fun keepsOnline(): Boolean {
          if (!lingerDecided) {
              lingerDecided = true
@@ -206,7 +206,7 @@ index f9231e3..5b7d75c 100644
                  lingerUntil = System.currentTimeMillis() + Rnd.get(LINGER_MIN_MINUTES, LINGER_MAX_MINUTES) * 60_000L
                  activity = Activity.Trade
                  bot.cancelSequence()
-@@ -133,7 +145,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -151,7 +163,8 @@ internal class LifeBehavior(private val bot: Autobot) {
  
      private fun chooseActivity(): Activity {
          val chosen = when {
@@ -216,7 +216,7 @@ index f9231e3..5b7d75c 100644
              economy && StoreKeeper.hasBusiness(bot) -> Activity.Trade
              else -> Activity.Afk
          }
-@@ -235,7 +248,10 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -253,7 +266,10 @@ internal class LifeBehavior(private val bot: Autobot) {
          }
  
          current?.let { HuntingSpots.leave(it) }
@@ -228,7 +228,7 @@ index f9231e3..5b7d75c 100644
          next?.let { HuntingSpots.join(it) }
          spot = next
          spotLevel = level
-@@ -303,6 +319,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -321,6 +337,8 @@ internal class LifeBehavior(private val bot: Autobot) {
          private const val MAX_IDLE_TICKS = 60
          private const val TOWN_RETRY_MS = 10 * 60 * 1000L
          private const val LINGER_PERCENT = 30
@@ -384,7 +384,7 @@ index 54e0f4f..1e58189 100644
      }
  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
-index eabb9c1..6fb2d19 100644
+index ae2860e..dbcca31 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
 @@ -1,6 +1,10 @@
@@ -406,8 +406,8 @@ index eabb9c1..6fb2d19 100644
 +    private const val WORKSHOP_PERCENT = 40
      private const val MIN_DISTANCE_TO_OTHER_STORE = 150
      private const val MAX_TITLE = 29
- 
-@@ -35,7 +41,10 @@ internal object StoreKeeper {
+     private const val NOVICE_LEVEL = 20
+@@ -36,7 +42,10 @@ internal object StoreKeeper {
  
      /** Surplus worth selling in a store rather than to an NPC. */
      fun storeGoods(bot: Autobot): List<ItemInstance> = Gear.surplus(bot)
@@ -419,7 +419,7 @@ index eabb9c1..6fb2d19 100644
  
      /** Items the bot is looking for that town shops don't sell: the next gear piece and scrolls for its gear. */
      fun wanted(bot: Autobot): List<Int> {
-@@ -45,16 +54,24 @@ internal object StoreKeeper {
+@@ -46,10 +55,16 @@ internal object StoreKeeper {
                  .keys
          // Summoners buy crystals from dwarves' stores: no town shop sells them.
          val crystals = listOfNotNull(Gear.summonCrystal(bot)?.takeIf { Gear.count(bot, it) < Crystals.WANTED })
@@ -436,18 +436,20 @@ index eabb9c1..6fb2d19 100644
 -    fun hasBusiness(bot: Autobot): Boolean = storeGoods(bot).isNotEmpty() || (bot.adena > 0 && wanted(bot).any { bidPrice(bot, it) in 1..bot.adena })
 +    fun hasBusiness(bot: Autobot): Boolean = storeGoods(bot).isNotEmpty() || (CraftBook.isCrafter(bot) && Workshop.offer(bot).isNotEmpty()) || (bot.adena > 0 && wanted(bot).any { bidPrice(bot, it) in 1..bot.adena })
  
-     fun askingPrice(bot: Autobot, itemId: Int): Int {
-         val inShops = Market.npcPrice(itemId) != null
-         val base = Market.fairValue(itemId) * roll(bot.objectId, itemId, if (inShops) 0.65..0.9 else 0.8..1.5)
-         val discount = 0.9.pow(unsold[bot.objectId]?.get(itemId) ?: 0)
+     /**
+      * What the bot asks for one piece: the market value, more from a greedy bot, below the shop price for what shops
+@@ -63,7 +78,9 @@ internal object StoreKeeper {
+         val spread = (if (inShops) 0.15 else 0.3) * if (bot.level < NOVICE_LEVEL) 2 else 1
+         val base = MarketBook.value(itemId) * roll(bot.objectId, itemId, low..low + spread)
+         val discount = (0.85 + 0.1 * TradeTemper.patience(bot)).pow(unsold[bot.objectId]?.get(itemId) ?: 0)
 -        return (base * discount).toInt().coerceAtLeast(Market.npcSellPrice(itemId))
 +        // A crafter never sells its work below what the materials cost it.
 +        val floor = maxOf(Market.npcSellPrice(itemId), (Crafter.costFloor(bot, itemId) * 1.1).toInt())
 +        return (base * discount).toInt().coerceAtLeast(floor)
      }
  
-     fun bidPrice(bot: Autobot, itemId: Int): Int {
-@@ -65,7 +82,22 @@ internal object StoreKeeper {
+     /** What the bot offers in a buy store: below the market value, lower from a greedy bot. */
+@@ -83,7 +100,22 @@ internal object StoreKeeper {
      /** Opens a sell store if there is valuable surplus, otherwise a buy store if the bot wants something. */
      fun open(bot: Autobot): Boolean {
          if (!canOpenHere(bot)) return false
@@ -471,7 +473,7 @@ index eabb9c1..6fb2d19 100644
      }
  
      fun canOpenHere(bot: Player): Boolean = !bot.isInsideZone(ZoneId.NO_STORE) && !bot.isInCombat &&
-@@ -100,7 +132,8 @@ internal object StoreKeeper {
+@@ -118,7 +150,8 @@ internal object StoreKeeper {
              val price = bidPrice(bot, itemId)
              if (price <= 0) continue
              val template = ItemTable.getInstance().getTemplate(itemId) ?: continue
@@ -482,7 +484,7 @@ index eabb9c1..6fb2d19 100644
              list.addItemByItemId(itemId, count, price)
              budget -= price.toLong() * count
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-index 538f966..6dcab7b 100644
+index fc919ef..85a76d0 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 @@ -5,6 +5,9 @@ import dev.l2j.autobots.behaviors.sequences.Sequence
@@ -495,7 +497,7 @@ index 538f966..6dcab7b 100644
  import dev.l2j.autobots.utils.CancellationToken
  import dev.l2j.autobots.utils.distance
  import kotlinx.coroutines.delay
-@@ -98,12 +101,15 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+@@ -106,12 +109,15 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
          Gear.equipUpgradesFromInventory(bot)
          Crystals.crystallizeJunk(bot)
          tradeWithStores()
@@ -512,7 +514,7 @@ index 538f966..6dcab7b 100644
          sellToNpc((leftovers + heavy).distinct().filter { bot.inventory.getItemByObjectId(it.objectId) != null })
          Enchanter.enchantWorn(bot, cautious)
          bot.refreshOverloaded()
-@@ -119,10 +125,10 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+@@ -128,10 +134,10 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
          delay(Rnd.get(1000, 3000).toLong())
      }
  
@@ -525,15 +527,15 @@ index 538f966..6dcab7b 100644
      }
  
      private suspend fun tradeWithStores() {
-@@ -146,7 +152,7 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+@@ -155,7 +161,7 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
          if (Gear.wishes(bot).isEmpty()) needs += StoreKeeper.wanted(bot).map { it to 1 }
          for ((itemId, wantedCount) in needs) {
              if (visits >= MAX_STORE_VISITS) return
--            val limit = Market.npcPrice(itemId) ?: (Market.fairValue(itemId) * 1.3).toInt()
-+            val limit = Sourcing.storeLimit(bot, itemId, Market.npcPrice(itemId) ?: (Market.fairValue(itemId) * 1.3).toInt())
-             val offer = Market.sellOffers(bot, itemId).firstOrNull { it.tradeItem.price < limit } ?: continue
-             val count = minOf(offer.tradeItem.count, wantedCount, Errands.spendable(bot) / offer.tradeItem.price.coerceAtLeast(1))
-             if (count <= 0 || !walkTo(offer.owner, "to buy ${offer.tradeItem.item.name}")) continue
+-            val limit = StoreKeeper.buyLimit(bot, itemId)
++            val limit = Sourcing.storeLimit(bot, itemId, StoreKeeper.buyLimit(bot, itemId))
+             val offers = Market.sellOffers(bot, itemId)
+             MarketBook.searched(bot, itemId)
+             // A store a bit over the limit is worth a word with its owner: bots haggle with each other.
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftBook.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftBook.kt
 new file mode 100644
 index 0000000..f0e6778

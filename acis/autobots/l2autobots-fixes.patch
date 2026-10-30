@@ -53,6 +53,21 @@ index ef03838..0d7d68d 100644
 +  <!-- Test only: a newly created population bot starts at this level (0 = level 1, like a real newbie). -->
 +  <populationTestLevel>0</populationTestLevel>
  </settings>
+diff --git a/sql/autobot_market.sql b/sql/autobot_market.sql
+new file mode 100644
+index 0000000..be117b8
+--- /dev/null
++++ b/sql/autobot_market.sql
+@@ -0,0 +1,9 @@
++CREATE TABLE IF NOT EXISTS autobot_market (
++  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
++  `item_id` INT UNSIGNED NOT NULL,
++  `price` INT UNSIGNED NOT NULL,
++  `count` INT UNSIGNED NOT NULL,
++  `sale_time` BIGINT UNSIGNED NOT NULL,
++  PRIMARY KEY (`id`),
++  KEY `sale_time` (`sale_time`)
++) ENGINE=InnoDB DEFAULT CHARSET=utf8;
 diff --git a/sql/autobot_relations.sql b/sql/autobot_relations.sql
 new file mode 100644
 index 0000000..e07f23a
@@ -2862,12 +2877,323 @@ index 0000000..54e0f4f
 +                "adena=$adena adenaPerBot=${adena / bots.size} stores=$stores farming=$farming needsGroup=$needGroup roles=${roles.ifEmpty { "-" }}")
 +    }
 +}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt
+new file mode 100644
+index 0000000..3ba79b1
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt
+@@ -0,0 +1,305 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.group.Relations
++import dev.l2j.autobots.utils.Klock
++import kotlinx.coroutines.delay
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.enums.actors.StoreType
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Player
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.ConcurrentLinkedQueue
++import kotlin.math.pow
++
++/**
++ * How a character trades, fixed for life like the rest of its character: greedy ones ask more, bid less and give
++ * little away when haggling; impatient ones cut the price of what doesn't sell quickly.
++ */
++internal object TradeTemper {
++    /** 0 (easy-going) to 1 (greedy). */
++    fun greed(player: Player): Double = Math.floorMod(player.objectId * 48271 + 11, 1000) / 1000.0
++
++    /** 0 (sells off fast) to 1 (waits for a buyer). */
++    fun patience(player: Player): Double = Math.floorMod(player.objectId * 69621 + 7, 1000) / 1000.0
++}
++
++/**
++ * The market as everybody in town sees it: what sells and for how much, what is on offer in stores and what people
++ * look for. Every minute the private stores of everyone online (bots and players) are read: listings give supply
++ * and demand, and listings that shrank are sales. Bots that look for an item add to its demand whether they find it
++ * or not. Sales are kept in `autobot_market` for a week, so prices survive a restart.
++ */
++internal object MarketBook {
++    private class Sale(val price: Int, val count: Int, val time: Long)
++    private class Listing(val itemId: Int, val count: Int, val price: Int, val owned: Int)
++
++    private const val SNAPSHOT_MS = 60_000L
++    private const val SUMMARY_EVERY_SNAPSHOTS = 10
++    private const val PRICE_WINDOW_MS = 3 * 24 * 3600_000L
++    private const val KEEP_MS = 7 * 24 * 3600_000L
++    private const val DEMAND_WINDOW_MS = 24 * 3600_000L
++    private const val MAX_SALES_PER_ITEM = 30
++    /** Sales it takes for the market price to replace the book value altogether. */
++    private const val TRUSTED_SALES = 5
++
++    private val sales = ConcurrentHashMap<Int, ArrayDeque<Sale>>()
++    /** itemId -> who looked for it and when: one entry per character, refreshed on every search. */
++    private val searches = ConcurrentHashMap<Int, ConcurrentHashMap<Int, Long>>()
++    @Volatile private var supply: Map<Int, Int> = emptyMap()
++    @Volatile private var wanted: Map<Int, Int> = emptyMap()
++    /** Store listings seen in the last snapshot: (owner, object id) for sell stores, (owner, -item id) for buy stores. */
++    private val listings = ConcurrentHashMap<Pair<Int, Int>, Listing>()
++    private val unsaved = ConcurrentLinkedQueue<Pair<Int, Sale>>()
++    private var snapshots = 0
++    private var salesSinceSummary = 0
++    private var haggles = 0
++
++    /** A deal two characters agreed on below the asking price, counted for the summary. */
++    fun haggled() {
++        haggles++
++    }
++
++    private val enabled get() = AutobotData.settings.economyEnabled
++
++    init {
++        load()
++        Klock.start("market", SNAPSHOT_MS, SNAPSHOT_MS, CoScopes.generalScope) { snapshot() }
++    }
++
++    /** A deal made outside the stores the book reads, e.g. through the trade window. */
++    fun recordSale(itemId: Int, unitPrice: Int, count: Int) {
++        if (unitPrice <= 0 || count <= 0) return
++        val sale = Sale(unitPrice, count, System.currentTimeMillis())
++        val list = sales.getOrPut(itemId) { ArrayDeque() }
++        synchronized(list) {
++            list.addLast(sale)
++            while (list.size > MAX_SALES_PER_ITEM) list.removeFirst()
++        }
++        unsaved += itemId to sale
++        salesSinceSummary++
++    }
++
++    /** [player] looked for [itemId] in the stores around: demand, whether or not they found it. */
++    fun searched(player: Player, itemId: Int) {
++        searches.getOrPut(itemId) { ConcurrentHashMap() }[player.objectId] = System.currentTimeMillis()
++    }
++
++    /** A store closed by its owner: what is gone from it was not sold. */
++    fun storeClosed(owner: Player) {
++        listings.keys.removeIf { it.first == owner.objectId }
++    }
++
++    /**
++     * What one piece is worth on this market. The book value (shop price, else reference price) gives way to the
++     * median of recent sales as they pile up; scarcity (more people looking than selling) raises it, a flooded market
++     * lowers it. Never more than a shop charges, never less than a shop pays.
++     */
++    fun value(itemId: Int): Int {
++        val book = Market.fairValue(itemId)
++        if (book <= 0) return 0
++        val now = System.currentTimeMillis()
++        val recent = sales[itemId]?.let { list -> synchronized(list) { list.filter { now - it.time < PRICE_WINDOW_MS }.map { it.price } } }.orEmpty()
++        val anchor = if (recent.isEmpty()) book.toDouble() else {
++            val median = recent.sorted()[recent.size / 2]
++            book + (median - book) * minOf(recent.size, TRUSTED_SALES) / TRUSTED_SALES.toDouble()
++        }
++        val price = anchor * pressure(itemId)
++        val ceiling = Market.npcPrice(itemId)?.toDouble() ?: book * 4.0
++        return price.coerceAtMost(ceiling).coerceAtLeast(Market.npcSellPrice(itemId).toDouble()).toInt()
++    }
++
++    /** People looking for an item against stores selling it, damped: from 0.75 (flooded) to 1.5 (sought after). */
++    fun pressure(itemId: Int): Double {
++        val ratio = (demand(itemId) + 1.0) / ((supply[itemId] ?: 0) + 1.0)
++        return ratio.pow(0.2).coerceIn(0.75, 1.5)
++    }
++
++    fun demand(itemId: Int): Int {
++        val since = System.currentTimeMillis() - DEMAND_WINDOW_MS
++        return (searches[itemId]?.values?.count { it > since } ?: 0) + (wanted[itemId] ?: 0)
++    }
++
++    private fun snapshot() {
++        if (!enabled) return
++        val now = System.currentTimeMillis()
++        val seen = HashMap<Pair<Int, Int>, Listing>()
++        val selling = HashMap<Int, Int>()
++        val buying = HashMap<Int, Int>()
++        val online = World.getInstance().players.associateBy { it.objectId }
++
++        for (owner in online.values) {
++            when (owner.storeType) {
++                StoreType.SELL, StoreType.PACKAGE_SELL -> owner.sellList.items.forEach {
++                    val itemId = it.item.itemId
++                    seen[owner.objectId to it.objectId] = Listing(itemId, it.count, it.price, owner.inventory.getItemByObjectId(it.objectId)?.count ?: 0)
++                    selling.merge(itemId, 1, Int::plus)
++                }
++                StoreType.BUY -> owner.buyList.items.forEach {
++                    val itemId = it.item.itemId
++                    seen[owner.objectId to -itemId] = Listing(itemId, it.count, it.price, owner.inventory.getInventoryItemCount(itemId, -1))
++                    buying.merge(itemId, 1, Int::plus)
++                }
++                else -> {}
++            }
++        }
++
++        // A listing that shrank was sold from; one that vanished was sold out if the goods left the owner too.
++        for ((key, before) in listings) {
++            val owner = online[key.first] ?: continue
++            val after = seen[key]
++            val sold = when {
++                after != null && after.price == before.price -> before.count - after.count
++                after != null -> 0
++                key.second > 0 -> before.owned - (owner.inventory.getItemByObjectId(key.second)?.count ?: 0)
++                else -> owner.inventory.getInventoryItemCount(before.itemId, -1) - before.owned
++            }.coerceIn(0, before.count)
++            if (sold > 0) recordSale(before.itemId, before.price, sold)
++        }
++        listings.clear()
++        listings.putAll(seen)
++        supply = selling
++        wanted = buying
++
++        searches.values.forEach { who -> who.values.removeIf { now - it > DEMAND_WINDOW_MS } }
++        save()
++        if (++snapshots % SUMMARY_EVERY_SNAPSHOTS == 0) summary()
++    }
++
++    /** One line every 10 minutes: sales since the last line and the items whose price moved most from book value. */
++    private fun summary() {
++        if (!AutobotData.settings.economyLog) return
++        val items = (sales.keys + supply.keys + wanted.keys + searches.keys).toSet()
++        val moved = items.mapNotNull { itemId ->
++            val book = Market.fairValue(itemId)
++            if (book <= 0) null else Triple(itemId, book, value(itemId))
++        }.sortedByDescending { (_, book, value) -> kotlin.math.abs(value - book).toDouble() / book }.take(5)
++        println("Autobots market: sales=$salesSinceSummary haggles=$haggles listings=${supply.values.sum()} wanted=${wanted.values.sum()} " +
++                "sought=${searches.count { (_, who) -> who.isNotEmpty() }} moved: " + moved.joinToString { (itemId, book, value) ->
++            "${ItemTable.getInstance().getTemplate(itemId)?.name ?: itemId} $book->$value (demand ${demand(itemId)}, supply ${supply[itemId] ?: 0})"
++        })
++        salesSinceSummary = 0
++        haggles = 0
++    }
++
++    private fun load() {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("DELETE FROM autobot_market WHERE sale_time < ?").use { ps ->
++                    ps.setLong(1, System.currentTimeMillis() - KEEP_MS)
++                    ps.executeUpdate()
++                }
++                con.prepareStatement("SELECT item_id, price, count, sale_time FROM autobot_market ORDER BY sale_time").use { ps ->
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) {
++                            val list = sales.getOrPut(rs.getInt(1)) { ArrayDeque() }
++                            list.addLast(Sale(rs.getInt(2), rs.getInt(3), rs.getLong(4)))
++                            if (list.size > MAX_SALES_PER_ITEM) list.removeFirst()
++                        }
++                    }
++                }
++            }
++            println("Autobots market: ${sales.values.sumOf { it.size }} recent sales of ${sales.size} items loaded.")
++        } catch (e: Exception) {
++            println("Autobots market: could not load sales: ${e.message}")
++        }
++    }
++
++    private fun save() {
++        if (unsaved.isEmpty()) return
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("INSERT INTO autobot_market (item_id, price, count, sale_time) VALUES (?,?,?,?)").use { ps ->
++                    while (true) {
++                        val (itemId, sale) = unsaved.poll() ?: break
++                        ps.setInt(1, itemId)
++                        ps.setInt(2, sale.price)
++                        ps.setInt(3, sale.count)
++                        ps.setLong(4, sale.time)
++                        ps.addBatch()
++                    }
++                    ps.executeBatch()
++                }
++            }
++        } catch (e: Exception) {
++            println("Autobots market: could not save sales: ${e.message}")
++        }
++    }
++}
++
++/**
++ * Haggling over a price, the way players do it in whispers: the buyer names a lower price, the seller takes it,
++ * meets them halfway or refuses. How far a seller goes down depends on its greed, on the market (no discount on
++ * something scarce priced below its value), on how long the item has been sitting unsold and on how it likes the buyer.
++ */
++internal object MarketHaggle {
++    /** A buyer haggles only over prices up to this much above what it would pay. */
++    const val REACH = 1.35
++
++    /**
++     * The lowest unit price [seller] would accept for [itemId] it asks [asked] for, from [buyer].
++     * [unsoldSessions] is how many times the item has already been on offer without selling.
++     */
++    fun floor(seller: Player, buyer: Player, itemId: Int, asked: Int, unsoldSessions: Int = 0): Int {
++        val greed = TradeTemper.greed(seller)
++        var give = 0.05 + 0.2 * (1 - greed) + 0.03 * minOf(unsoldSessions, 3)
++        if (asked <= MarketBook.value(itemId)) give /= 2
++        if (Relations.affinity(seller, buyer) >= Relations.FRIEND) give += 0.1
++        return maxOf(Market.npcSellPrice(itemId), (asked * (1 - give)).toInt())
++    }
++
++    /**
++     * The unit price two characters settle on, or null when the seller won't go down to what the buyer can pay.
++     * A greedy seller ends up closer to the buyer's limit, an easy-going one closer to its own floor.
++     */
++    fun settle(buyer: Player, seller: Player, itemId: Int, asked: Int, buyerLimit: Int, unsoldSessions: Int = 0): Int? {
++        if (buyerLimit >= asked) return asked
++        val floor = floor(seller, buyer, itemId, asked, unsoldSessions)
++        if (buyerLimit < floor) return null
++        return (floor + (buyerLimit - floor) * (0.3 + 0.4 * TradeTemper.greed(seller))).toInt().coerceAtMost(asked)
++    }
++
++    /**
++     * The conversation around [settle] between a buying bot and a bot's store, a few whispers with pauses.
++     * @return the agreed unit price, or null without a deal.
++     */
++    suspend fun haggle(buyer: Autobot, seller: Player, itemId: Int, asked: Int, buyerLimit: Int, unsoldSessions: Int = 0): Int? {
++        val russian = Rnd.get(100) < 60
++        // A greedy buyer opens low.
++        val opening = (buyerLimit * (0.95 - 0.15 * TradeTemper.greed(buyer))).toInt()
++        val name = ItemTable.getInstance().getTemplate(itemId)?.name ?: return null
++        buyer.tell(seller.name, if (russian) listOf("скинь $name до ${short(opening)}?", "${short(opening)} за $name отдашь?", "$name за ${short(opening)}?").random()
++                else listOf("${short(opening)} for $name?", "can u do ${short(opening)} for $name?", "$name ${short(opening)} ok?").random())
++        delay(Rnd.get(2000L, 5000L))
++
++        val sellerBot = seller as? Autobot
++        val price = settle(buyer, seller, itemId, asked, buyerLimit, unsoldSessions)
++        when {
++            opening >= floor(seller, buyer, itemId, asked, unsoldSessions) -> {
++                sellerBot?.tell(buyer.name, if (russian) listOf("ок, забирай", "ладно", "договорились").random() else listOf("ok deal", "ok", "fine").random())
++                return opening
++            }
++            price == null -> {
++                sellerBot?.tell(buyer.name, if (russian) listOf("нет, цена нормальная", "не, дешевле не отдам", "нет").random() else listOf("no, price is fine", "nope", "no sry").random())
++                return null
++            }
++            else -> {
++                sellerBot?.tell(buyer.name, if (russian) "давай за ${short(price)}" else "${short(price)} and its yours")
++                delay(Rnd.get(1500L, 4000L))
++                buyer.tell(seller.name, if (russian) listOf("ок", "идёт", "ладно, беру").random() else listOf("ok", "deal", "k").random())
++                return price
++            }
++        }
++    }
++
++    /** Prices the way players write them: 45k, 1.2kk. */
++    fun short(price: Int): String = when {
++        price >= 1_000_000 -> String.format(java.util.Locale.US, "%.1fkk", price / 1_000_000.0).replace(".0kk", "kk")
++        price >= 10_000 -> "${price / 1000}k"
++        else -> "$price"
++    }
++}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
 new file mode 100644
-index 0000000..eabb9c1
+index 0000000..ae2860e
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,168 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -2894,6 +3220,7 @@ index 0000000..eabb9c1
 +    const val MIN_STORE_STACK_VALUE = 2000
 +    private const val MIN_DISTANCE_TO_OTHER_STORE = 150
 +    private const val MAX_TITLE = 29
++    private const val NOVICE_LEVEL = 20
 +
 +    // Unsold sessions per bot and item: each one cuts the asking price by 10%. Lost on restart, like a player's memory.
 +    private val unsold = ConcurrentHashMap<Int, MutableMap<Int, Int>>()
@@ -2920,17 +3247,34 @@ index 0000000..eabb9c1
 +
 +    fun hasBusiness(bot: Autobot): Boolean = storeGoods(bot).isNotEmpty() || (bot.adena > 0 && wanted(bot).any { bidPrice(bot, it) in 1..bot.adena })
 +
++    /**
++     * What the bot asks for one piece: the market value, more from a greedy bot, below the shop price for what shops
++     * sell (or nobody would come). A novice guesses with a wider spread. Each session without a sale cuts the price,
++     * by 15% for an impatient bot down to 5% for a patient one.
++     */
 +    fun askingPrice(bot: Autobot, itemId: Int): Int {
 +        val inShops = Market.npcPrice(itemId) != null
-+        val base = Market.fairValue(itemId) * roll(bot.objectId, itemId, if (inShops) 0.65..0.9 else 0.8..1.5)
-+        val discount = 0.9.pow(unsold[bot.objectId]?.get(itemId) ?: 0)
++        val greed = TradeTemper.greed(bot)
++        val low = if (inShops) 0.6 + 0.15 * greed else 0.8 + 0.4 * greed
++        val spread = (if (inShops) 0.15 else 0.3) * if (bot.level < NOVICE_LEVEL) 2 else 1
++        val base = MarketBook.value(itemId) * roll(bot.objectId, itemId, low..low + spread)
++        val discount = (0.85 + 0.1 * TradeTemper.patience(bot)).pow(unsold[bot.objectId]?.get(itemId) ?: 0)
 +        return (base * discount).toInt().coerceAtLeast(Market.npcSellPrice(itemId))
 +    }
 +
++    /** What the bot offers in a buy store: below the market value, lower from a greedy bot. */
 +    fun bidPrice(bot: Autobot, itemId: Int): Int {
 +        val inShops = Market.npcPrice(itemId) != null
-+        return (Market.fairValue(itemId) * roll(bot.objectId, itemId + 1, if (inShops) 0.55..0.8 else 0.6..1.0)).toInt()
++        val greed = TradeTemper.greed(bot)
++        val high = if (inShops) 0.85 - 0.15 * greed else 1.05 - 0.25 * greed
++        return (MarketBook.value(itemId) * roll(bot.objectId, itemId + 1, high - 0.2..high)).toInt()
 +    }
++
++    /** The most the bot pays a store per piece: up to the shop price, or somewhat over the market value for the rest. */
++    fun buyLimit(bot: Autobot, itemId: Int): Int =
++            Market.npcPrice(itemId) ?: (MarketBook.value(itemId) * (1.1 + 0.3 * (1 - TradeTemper.greed(bot)))).toInt()
++
++    fun unsoldSessions(bot: Player, itemId: Int): Int = unsold[bot.objectId]?.get(itemId) ?: 0
 +
 +    /** Opens a sell store if there is valuable surplus, otherwise a buy store if the bot wants something. */
 +    fun open(bot: Autobot): Boolean {
@@ -2949,7 +3293,7 @@ index 0000000..eabb9c1
 +        val list = bot.sellList
 +        list.clear()
 +        list.isPackaged = false
-+        for (item in goods) list.addItem(item.objectId, item.count, askingPrice(bot, item.itemId))
++        for (item in goods) list.addItem(item.objectId, item.count, priceAgainstNeighbours(bot, item.itemId))
 +        if (list.items.isEmpty()) return false
 +        list.title = title("WTS", goods.first().itemName, goods.size)
 +
@@ -2986,6 +3330,14 @@ index 0000000..eabb9c1
 +        return true
 +    }
 +
++    /** An easy-going seller undercuts a store nearby that sells the same thing cheaper; a greedy one keeps its price. */
++    private fun priceAgainstNeighbours(bot: Autobot, itemId: Int): Int {
++        val own = askingPrice(bot, itemId)
++        if (TradeTemper.greed(bot) >= 0.5) return own
++        val cheapest = Market.sellOffers(bot, itemId).firstOrNull()?.tradeItem?.price ?: return own
++        return if (cheapest < own) maxOf((cheapest * 0.97).toInt(), Market.npcSellPrice(itemId) + 1) else own
++    }
++
 +    /** Closes the store and remembers what didn't sell, so it's offered cheaper next time. */
 +    fun close(bot: Autobot) {
 +        if (!bot.isInStoreMode) return
@@ -2993,6 +3345,7 @@ index 0000000..eabb9c1
 +            val memory = unsold.computeIfAbsent(bot.objectId) { ConcurrentHashMap() }
 +            bot.sellList.items.forEach { memory.merge(it.item.itemId, 1, Int::plus) }
 +        }
++        MarketBook.storeClosed(bot)
 +        bot.sellList.clear()
 +        bot.buyList.clear()
 +        bot.storeType = StoreType.NONE
@@ -3011,10 +3364,10 @@ index 0000000..eabb9c1
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 new file mode 100644
-index 0000000..95c8a2c
+index 0000000..fc919ef
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,316 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -3172,11 +3525,17 @@ index 0000000..95c8a2c
 +        if (Gear.wishes(bot).isEmpty()) needs += StoreKeeper.wanted(bot).map { it to 1 }
 +        for ((itemId, wantedCount) in needs) {
 +            if (visits >= MAX_STORE_VISITS) return
-+            val limit = Market.npcPrice(itemId) ?: (Market.fairValue(itemId) * 1.3).toInt()
-+            val offer = Market.sellOffers(bot, itemId).firstOrNull { it.tradeItem.price < limit } ?: continue
-+            val count = minOf(offer.tradeItem.count, wantedCount, Errands.spendable(bot) / offer.tradeItem.price.coerceAtLeast(1))
++            val limit = StoreKeeper.buyLimit(bot, itemId)
++            val offers = Market.sellOffers(bot, itemId)
++            MarketBook.searched(bot, itemId)
++            // A store a bit over the limit is worth a word with its owner: bots haggle with each other.
++            val offer = offers.firstOrNull { it.tradeItem.price < limit }
++                    ?: offers.firstOrNull { it.owner is Autobot && it.tradeItem.price < limit * MarketHaggle.REACH }
++                    ?: continue
++            val count = minOf(offer.tradeItem.count, wantedCount, Errands.spendable(bot) / minOf(offer.tradeItem.price, limit).coerceAtLeast(1))
 +            if (count <= 0 || !walkTo(offer.owner, "to buy ${offer.tradeItem.item.name}")) continue
 +            visits++
++            if (offer.tradeItem.price >= limit && !haggle(offer, limit)) continue
 +            if (Market.buyFromStore(bot, offer, count)) {
 +                bot.inventory.getItemByItemId(itemId)?.takeIf { it.isEquipable && !it.isEquipped }?.let {
 +                    Gear.equip(bot, it)
@@ -3184,6 +3543,22 @@ index 0000000..95c8a2c
 +                }
 +            }
 +        }
++    }
++
++    /** Talks the store's price down to what the bot pays; the owner lowers it in its store when they agree. */
++    private suspend fun haggle(offer: StoreOffer, limit: Int): Boolean {
++        val owner = offer.owner
++        val itemId = offer.tradeItem.item.itemId
++        val price = MarketHaggle.haggle(bot, owner, itemId, offer.tradeItem.price, limit, StoreKeeper.unsoldSessions(owner, itemId))
++        if (price == null) {
++            EconomyLog.skip(bot, "${owner.name} wouldn't go down to $limit for ${offer.tradeItem.item.name} (asks ${offer.tradeItem.price})")
++            return false
++        }
++        if (owner.storeType != net.sf.l2j.gameserver.enums.actors.StoreType.SELL || offer.tradeItem !in owner.sellList.items) return false
++        MarketBook.haggled()
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): haggled ${owner.name} down from ${offer.tradeItem.price} to $price for ${offer.tradeItem.item.name}")
++        offer.tradeItem.price = price
++        return true
 +    }
 +
 +    private suspend fun sellToNpc(items: List<ItemInstance>) {
