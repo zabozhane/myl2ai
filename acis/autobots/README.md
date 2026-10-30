@@ -36,7 +36,7 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     2-30 days, 30% chance to quit after each period. Both are derived from the object id, nothing is stored.
   - Newbies replace inactive players, up to `populationNewbiesPerDay` spread over the day; a fresh server
     opens with `populationSize` of them at once.
-  - `LifeBehavior`: a session is hunting (90%) or AFK. Hunting spots come from monster spawns (2500 cells
+  - `LifeBehavior`: a session is a chain of segments (see `l2autobots-sessions.patch`). Hunting spots come from monster spawns (2500 cells
     with 4+ monsters of level -4..+2), weighted towards close and less crowded ones. Far spots are reached by
     a paid gatekeeper teleport, near ones on foot; empty, crowded (6+ players) or unreachable spots are
     dropped and another one is picked.
@@ -169,7 +169,7 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     `crafters workshops recipes adenaPerCrafter adenaPerOtherSameLevel`.
 - `l2autobots-raids.patch` - raid bosses (stage 4v, spec in `docs/raids.md`).
   - A bot never picks a raid boss or its minion as prey (`isWorthTargeting`); it only fights one that attacks it.
-- `l2autobots-partysize.patch` - adaptive party size (`PartySize`), applied last. A bot-led party wants from its
+- `l2autobots-partysize.patch` - adaptive party size (`PartySize`), applied after sessions. A bot-led party wants from its
   kind's minimum (full 5, casual 3) up to 9 people. It starts at the size it was formed with and measures what a member
   earns, exp and adena per minute, over 10-minute windows with the same people at the same spot (another spot, more
   than 3000 away, starts over). It tries one more (50% per window) when nobody died and the last step up didn't cost
@@ -191,3 +191,18 @@ Review of upstream code: no process execution or hidden network calls; the only 
 GM character (access level 7+), type `//a b` in game: the dashboard creates, spawns and controls bots.
 Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) toggles auto hunt, `AutoHuntSet`
 (`.autofarm menu`) opens its settings.
+- `l2autobots-sessions.patch` - a play session made of segments (`population/SessionPlan.kt`), applied after raids; it
+  replaces the one-activity-per-session choice (90% hunting, otherwise AFK or a store for the whole session).
+  - Segments: hunting (quests and town trips included), trading in a store, AFK, and going home. Each bot has a
+    stable style from its object id: grinder 30% (hunts 60-120 min, rare breaks, rarely trades), casual 50%
+    (30-75 min, more breaks), trader 20% (20-50 min of hunting, stores of 30-90 min); crafters are always traders.
+  - Segments end on time or for a player's reasons: after a death (a break or a store), a new level (a short break),
+    a town trip that leaves goods to sell (a trader stays behind a store). The longer a bot hunts without a break,
+    the likelier the next segment is AFK; at night (01-06 Moscow) breaks are twice as likely and 1.5x longer.
+  - Never AFK the whole session: AFK lasts 3-25 min, never follows AFK, is 2-8 min right after login, and a bot with
+    a pending profession quest (`QuestRunner.hasBusiness`) only takes 2-8 min breaks after hunting and opens no stores.
+  - A fight is finished before switching. AFK outside town steps away from aggressive monsters first (up to 3 times).
+    10-20 min before the scheduled end (`DailySchedule.minutesLeft`) a bot walks or escapes to town, visits the shops
+    and waits for the logout there (or keeps a store, as before). AFK and going-home bots do not join parties.
+  - `populationSessionLog` prints every switch with its reason (`Autobots session: <name> lv N Hunt -> Afk for 12 min
+    (died)`); `Autobots session summary:` every 10 minutes counts hunting, trading, AFK, going home and party bots.

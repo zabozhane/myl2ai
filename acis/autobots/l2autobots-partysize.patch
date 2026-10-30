@@ -12,10 +12,10 @@ index 95d3eac..f0b19de 100644
      var breakUpAt: Long? = null
  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-index df4b036..6055732 100644
+index f7f30a5..2352012 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-@@ -10,6 +10,7 @@ import kotlinx.coroutines.launch
+@@ -11,6 +11,7 @@ import kotlinx.coroutines.launch
  import net.sf.l2j.commons.random.Rnd
  import net.sf.l2j.gameserver.data.xml.MapRegionData
  import net.sf.l2j.gameserver.enums.LootRule
@@ -23,7 +23,7 @@ index df4b036..6055732 100644
  import net.sf.l2j.gameserver.model.actor.Player
  import net.sf.l2j.gameserver.model.group.Party
  import net.sf.l2j.gameserver.network.serverpackets.AskJoinParty
-@@ -24,7 +25,8 @@ import java.util.concurrent.ConcurrentHashMap
+@@ -25,7 +26,8 @@ import java.util.concurrent.ConcurrentHashMap
   * a tank and a healer at least, a buffer and a spoiler when there are any, damage dealers up to [PartyKind.Full]'s size.
   * Such a bot waits [WAIT_FOR_FULL_MS] for the roles to turn up and then settles for a casual party: whoever is around,
   * any professions, which hunts for an hour or so and goes separate ways. A bot-led party with free places shouts for
@@ -33,7 +33,7 @@ index df4b036..6055732 100644
   */
  internal object GroupFinder {
      const val FULL_FROM_LEVEL = 20
-@@ -49,6 +51,9 @@ internal object GroupFinder {
+@@ -50,6 +52,9 @@ internal object GroupFinder {
      /** A leader's whispered offer to a looking player: their answer is taken as a request to join for a while. */
      private val offers = ConcurrentHashMap<Int, Pair<Int, Long>>()
      private const val OFFER_VALID_MS = 5 * 60_000L
@@ -43,7 +43,7 @@ index df4b036..6055732 100644
  
      private val settings get() = AutobotData.settings
      private val enabled get() = settings.groupsEnabled && settings.groupFinderEnabled
-@@ -94,6 +99,7 @@ internal object GroupFinder {
+@@ -95,6 +100,7 @@ internal object GroupFinder {
          pendingPlayer.remove(bot.objectId)
          smallSince.remove(bot.objectId)
          offers.remove(bot.objectId)
@@ -51,7 +51,7 @@ index df4b036..6055732 100644
      }
  
      fun offered(leader: Autobot, player: Player) {
-@@ -116,6 +122,7 @@ internal object GroupFinder {
+@@ -117,6 +123,7 @@ internal object GroupFinder {
              fullSeekers.remove(it.objectId)
          }
  
@@ -59,7 +59,7 @@ index df4b036..6055732 100644
          for ((_, regionLookers) in lookers.groupBy { MapRegionData.getInstance().getMapRegion(it.x, it.y) }) {
              val pool = regionLookers.sortedWith(compareByDescending<Autobot> { Sociability.of(it).ordinal }.thenByDescending { it.level }).toMutableList()
              // Full parties first: they need particular people, a casual party takes whoever is left.
-@@ -135,9 +142,15 @@ internal object GroupFinder {
+@@ -136,9 +143,15 @@ internal object GroupFinder {
                  form(leader, members, PartyKind.Casual)
                  grouped += members.size + 1
              }
@@ -76,7 +76,7 @@ index df4b036..6055732 100644
          remember(online)
      }
  
-@@ -160,7 +173,7 @@ internal object GroupFinder {
+@@ -161,7 +174,7 @@ internal object GroupFinder {
          wipes = 0
          for (party in parties) {
              val leader = party.leader
@@ -85,7 +85,7 @@ index df4b036..6055732 100644
                  "${it.name} ${Role.of(it.classId)} ${distance(leader, it).toInt()}${if (it.isDead) " dead" else ""} ${(it as? Autobot)?.activeSequence?.javaClass?.simpleName ?: it.ai.desire.intention}"
              } + " | leader ${(leader as? Autobot)?.activeSequence?.javaClass?.simpleName ?: leader.ai.desire.intention}" + if (leader.isDead) " (leader dead)" else "")
          }
-@@ -234,6 +247,7 @@ internal object GroupFinder {
+@@ -237,6 +250,7 @@ internal object GroupFinder {
          leader.party?.let { party ->
              val state = PartyPlan.state(party)
              state.kind = kind
@@ -93,7 +93,7 @@ index df4b036..6055732 100644
              state.breakUpAt = if (kind == PartyKind.Casual) System.currentTimeMillis() + Rnd.get(CASUAL_MIN_MS, CASUAL_MAX_MS) else null
          }
          nextShout[leader.objectId] = System.currentTimeMillis() + Rnd.get(SHOUT_MIN_MS, SHOUT_MAX_MS)
-@@ -266,12 +280,63 @@ internal object GroupFinder {
+@@ -269,12 +283,63 @@ internal object GroupFinder {
              }
          } else smallSince.remove(leader.objectId)
  
@@ -158,7 +158,7 @@ index df4b036..6055732 100644
      /** What the party lacks most, as a player would put it in a shout. A casual party takes anybody. */
      fun needs(party: Party): List<Role> {
          if (PartyPlan.state(party).kind == PartyKind.Casual) return listOf(Role.Damage)
-@@ -288,7 +353,7 @@ internal object GroupFinder {
+@@ -291,7 +356,7 @@ internal object GroupFinder {
  
      /** A party a looking player could join: led by a bot of this region, with room and levels that fit. */
      fun partiesFor(player: Player, online: Collection<Autobot>): List<Party> = online
@@ -167,7 +167,7 @@ index df4b036..6055732 100644
              .filter { MapRegionData.getInstance().getMapRegion(it.x, it.y) == MapRegionData.getInstance().getMapRegion(player.x, player.y) }
              .map { it.party }
              .filter { p -> kotlin.math.abs(p.members.sumOf { it.level } / p.membersCount - player.level) <= MAX_LEVEL_SPREAD }
-@@ -306,7 +371,7 @@ internal object GroupFinder {
+@@ -309,7 +374,7 @@ internal object GroupFinder {
          if (player.karma > 0) return GroupChat.Line.NoPk
          val role = Role.of(player.classId)
          val roles = party.members.map { Role.of(it.classId) }
