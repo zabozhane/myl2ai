@@ -1,0 +1,1302 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 0d7d68d..84c1891 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -46,4 +46,8 @@
+   <groupLog>true</groupLog>
+   <!-- Test only: a newly created population bot starts at this level (0 = level 1, like a real newbie). -->
+   <populationTestLevel>0</populationTestLevel>
++  <!-- Crafting (needs economyEnabled): dwarves learn recipes, craft and run workshops, spoilers supply them, other bots
++       compare shop, store and workshop prices. crafterArtisanPercent of dwarves take the Artisan line at level 20. -->
++  <craftEnabled>true</craftEnabled>
++  <crafterArtisanPercent>60</crafterArtisanPercent>
+ </settings>
+diff --git a/sql/autobots_recipebook.sql b/sql/autobots_recipebook.sql
+new file mode 100644
+index 0000000..aa9b186
+--- /dev/null
++++ b/sql/autobots_recipebook.sql
+@@ -0,0 +1,7 @@
++-- Recipe books of autobots. The core's character_recipebook is cleaned on startup of every charId missing from
++-- `characters`, and bots live in `autobots`, so their books are kept here.
++CREATE TABLE IF NOT EXISTS `autobots_recipebook` (
++  `charId` INT UNSIGNED NOT NULL DEFAULT 0,
++  `recipeId` SMALLINT NOT NULL DEFAULT 0,
++  PRIMARY KEY (`charId`,`recipeId`)
++) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index a2f93b7..0d3c68e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -47,7 +47,9 @@ internal data class AutobotSettings(
+         @JsonProperty("groupFinderMinLevel") var groupFinderMinLevel: Int = 10,
+         @JsonProperty("groupMaxPopulationPercent") var groupMaxPopulationPercent: Int = 40,
+         @JsonProperty("groupLog") var groupLog: Boolean = true,
+-        @JsonProperty("populationTestLevel") var populationTestLevel: Int = 0
++        @JsonProperty("populationTestLevel") var populationTestLevel: Int = 0,
++        @JsonProperty("craftEnabled") var craftEnabled: Boolean = true,
++        @JsonProperty("crafterArtisanPercent") var crafterArtisanPercent: Int = 60
+ ){
+     @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
+         setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+diff --git a/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt b/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt
+index 02ab43f..a4ac63a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt
++++ b/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt
+@@ -1,6 +1,7 @@
+ package dev.l2j.autobots.extensions
+ 
+ import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.population.group.Role
+ import net.sf.l2j.commons.random.Rnd
+ import dev.l2j.autobots.utils.getSupportedClasses
+@@ -29,7 +30,7 @@ internal fun Autobot.getNewClassId(currentClassId: ClassId) : ClassId? {
+     if(classLevels == 0)
+         return currentClassId
+ 
+-    val newClassId = (if(currentClassId.level() < 2) pickWeighted(ClassId.values().filter { it.parent == currentClassId && getSupportedClasses.contains(it) }) else ClassId.values().firstOrNull { it.parent == currentClassId })
++    val newClassId = (if(currentClassId == ClassId.DWARVEN_FIGHTER && life != null) dwarfBranch() else if(currentClassId.level() < 2) pickWeighted(ClassId.values().filter { it.parent == currentClassId && getSupportedClasses.contains(it) }) else ClassId.values().firstOrNull { it.parent == currentClassId })
+             ?: return null
+ 
+     if(newClassId.level() == getClassLevelForPlayerLevel(level)) {
+@@ -51,3 +52,7 @@ internal fun pickWeighted(choices: List<ClassId>): ClassId? {
+     }
+     return choices.last()
+ }
++
++/** Population dwarves split into crafters and spoilers by a trait of the object id, so the share is predictable. */
++private fun Autobot.dwarfBranch(): ClassId =
++        if (Math.floorMod(objectId * 977 + 3, 100) < AutobotData.settings.crafterArtisanPercent) ClassId.ARTISAN else ClassId.SCAVENGER
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index d64fe1a..cdb5929 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -11,8 +11,25 @@ import java.util.concurrent.atomic.AtomicInteger
+ import kotlin.math.exp
+ 
+ /** A patch of the map where monsters spawn, with the levels of those monsters. */
+-internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>) {
++internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>, private val npcIds: List<Int> = emptyList()) {
+     fun monstersFor(level: Int): Int = HuntingSpots.suitableLevels(level).let { range -> monsterLevels.count { it in range } }
++
++    /** Monsters of [level] that drop (or, with [spoil], give when spoiled) any of [items]. */
++    fun monstersWith(level: Int, items: Set<Int>, spoil: Boolean): Int {
++        val range = HuntingSpots.suitableLevels(level)
++        return npcIds.indices.count { i -> monsterLevels[i] in range && LootTable.yields(npcIds[i], spoil).any { it in items } }
++    }
++}
++
++/** What each monster template drops and gives when spoiled, as item ids. */
++internal object LootTable {
++    private val drops = java.util.concurrent.ConcurrentHashMap<Int, Set<Int>>()
++    private val spoils = java.util.concurrent.ConcurrentHashMap<Int, Set<Int>>()
++
++    fun yields(npcId: Int, spoil: Boolean): Set<Int> = (if (spoil) spoils else drops).computeIfAbsent(npcId) {
++        val template = net.sf.l2j.gameserver.data.xml.NpcData.getInstance().getTemplate(npcId) ?: return@computeIfAbsent emptySet()
++        template.dropData.filter { it.isSweep == spoil }.flatMap { category -> category.allDrops.map { it.itemId } }.toSet()
++    }
+ }
+ 
+ /**
+@@ -34,10 +51,10 @@ internal object HuntingSpots {
+     fun isSuitable(spot: HuntingSpot, level: Int): Boolean = spot.monstersFor(level) >= MIN_SUITABLE_MONSTERS
+ 
+     /** Picks a spot with monsters for [level], which is below the bot's own when it falls back to easier hunting. */
+-    fun choose(bot: Player, level: Int, excluded: Set<Long>): HuntingSpot? {
++    fun choose(bot: Player, level: Int, excluded: Set<Long>, wanted: WantedLoot? = null): HuntingSpot? {
+         val candidates = spots.asSequence()
+                 .filter { it.key !in excluded && isSuitable(it, level) }
+-                .map { it to score(it, bot, level) }
++                .map { it to score(it, bot, level) * lootBonus(it, level, wanted) }
+                 .sortedByDescending { it.second }
+                 .take(CANDIDATES)
+                 .toList()
+@@ -64,14 +81,24 @@ internal object HuntingSpots {
+         return spot.monstersFor(level) * exp(-distance(bot.location(), spot.location) / DISTANCE_DECAY) / (1 + crowd)
+     }
+ 
+-    private class MonsterSpawn(val x: Int, val y: Int, val z: Int, val level: Int)
++    /**
++     * A bot farming for specific loot (a spoiler after materials crafters want, a hunter after the parts of its next
++     * weapon) prefers spots whose monsters yield it, up to 5 times over an ordinary spot.
++     */
++    private fun lootBonus(spot: HuntingSpot, level: Int, wanted: WantedLoot?): Double {
++        if (wanted == null || wanted.items.isEmpty()) return 1.0
++        val matching = spot.monstersWith(level, wanted.items, wanted.spoil)
++        return 1.0 + 4.0 * matching / spot.monstersFor(level).coerceAtLeast(1)
++    }
++
++    private class MonsterSpawn(val x: Int, val y: Int, val z: Int, val level: Int, val npcId: Int)
+ 
+     private fun buildSpots(): List<HuntingSpot> = SpawnTable.getInstance().spawns
+             .filter { it.template.isType("Monster") }
+             .mapNotNull { spawn ->
+                 // Territory spawns have no fixed location; the monster they placed tells where they are.
+                 val loc = spawn.loc ?: spawn.npc?.position ?: return@mapNotNull null
+-                MonsterSpawn(loc.x, loc.y, loc.z, spawn.template.level.toInt())
++                MonsterSpawn(loc.x, loc.y, loc.z, spawn.template.level.toInt(), spawn.template.npcId)
+             }
+             .groupBy { cellKey(it.x, it.y) }
+             .map { (key, spawns) ->
+@@ -79,9 +106,12 @@ internal object HuntingSpots {
+                 val centerY = spawns.map { it.y }.average()
+                 // A real spawn point is known to be walkable ground, unlike the bare cell center.
+                 val anchor = spawns.minByOrNull { (it.x - centerX) * (it.x - centerX) + (it.y - centerY) * (it.y - centerY) }!!
+-                HuntingSpot(key, Location(anchor.x, anchor.y, anchor.z), spawns.map { it.level })
++                HuntingSpot(key, Location(anchor.x, anchor.y, anchor.z), spawns.map { it.level }, spawns.map { it.npcId })
+             }
+             .also { println("Autobots population: ${it.size} hunting spots.") }
+ 
+     private fun cellKey(x: Int, y: Int): Long = (Math.floorDiv(x, CELL_SIZE).toLong() shl 32) or (Math.floorDiv(y, CELL_SIZE).toLong() and 0xffffffffL)
+ }
++
++/** Loot a bot goes looking for: dropped items, or items given by Sweeper after a spoil. */
++internal class WantedLoot(val items: Set<Int>, val spoil: Boolean)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index f9231e3..5b7d75c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -5,13 +5,18 @@ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.behaviors.sequences.TravelByGatekeeperSequence
+ import dev.l2j.autobots.behaviors.sequences.WalkToSequence
+ import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.population.economy.EconomyLog
+ import dev.l2j.autobots.population.economy.Errands
++import net.sf.l2j.gameserver.data.ItemTable
+ import dev.l2j.autobots.population.economy.Fitness
+ import dev.l2j.autobots.population.economy.GoToTownSequence
+ import dev.l2j.autobots.population.economy.StoreKeeper
+ import dev.l2j.autobots.population.economy.TownTrip
+ import dev.l2j.autobots.population.group.PartyBehavior
+ import dev.l2j.autobots.population.group.PartyPlan
++import dev.l2j.autobots.population.economy.craft.CraftBook
++import dev.l2j.autobots.population.economy.craft.Prospecting
++import dev.l2j.autobots.population.economy.craft.RecipeBookDao
+ import dev.l2j.autobots.utils.distance
+ import net.sf.l2j.commons.random.Rnd
+ import net.sf.l2j.gameserver.data.xml.TeleportLocationData
+@@ -62,6 +67,10 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private var lingerUntil = 0L
+     private var storeAttempts = 0
+ 
++    init {
++        if (economy && CraftBook.enabled) RecipeBookDao.load(bot)
++    }
++
+     suspend fun onUpdate() {
+         if (bot.isInStoreMode) return
+         if (AutobotData.settings.groupsEnabled && bot.isInParty && updateInParty()) return
+@@ -113,6 +122,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         spot?.let { HuntingSpots.leave(it) }
+         spot = null
+         StoreKeeper.close(bot)
++        if (economy && CraftBook.enabled && bot.dwarvenRecipeBook.isNotEmpty()) RecipeBookDao.save(bot)
+     }
+ 
+     /**
+@@ -122,7 +132,9 @@ internal class LifeBehavior(private val bot: Autobot) {
+     fun keepsOnline(): Boolean {
+         if (!lingerDecided) {
+             lingerDecided = true
+-            if (economy && Rnd.get(100) < LINGER_PERCENT && StoreKeeper.storeGoods(bot).isNotEmpty()) {
++            val crafter = CraftBook.isCrafter(bot)
++            val hasGoods = if (crafter) StoreKeeper.hasBusiness(bot) else StoreKeeper.storeGoods(bot).isNotEmpty()
++            if (economy && Rnd.get(100) < (if (crafter) CRAFTER_LINGER_PERCENT else LINGER_PERCENT) && hasGoods) {
+                 lingerUntil = System.currentTimeMillis() + Rnd.get(LINGER_MIN_MINUTES, LINGER_MAX_MINUTES) * 60_000L
+                 activity = Activity.Trade
+                 bot.cancelSequence()
+@@ -133,7 +145,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     private fun chooseActivity(): Activity {
+         val chosen = when {
+-            Rnd.get(100) >= AFK_SESSION_PERCENT -> Activity.Hunt
++            // Crafters spend more of their time behind a store than hunters do.
++            Rnd.get(100) >= (if (CraftBook.isCrafter(bot)) CRAFTER_TRADE_SESSION_PERCENT else AFK_SESSION_PERCENT) -> Activity.Hunt
+             economy && StoreKeeper.hasBusiness(bot) -> Activity.Trade
+             else -> Activity.Afk
+         }
+@@ -235,7 +248,10 @@ internal class LifeBehavior(private val bot: Autobot) {
+         }
+ 
+         current?.let { HuntingSpots.leave(it) }
+-        val next = HuntingSpots.choose(bot, level, badSpots)
++        val wanted = if (economy) Prospecting.wantedLoot(bot) else null
++        val next = HuntingSpots.choose(bot, level, badSpots, wanted)
++        if (next != null && wanted != null) EconomyLog.note(bot, "farming for ${if (wanted.spoil) "spoil" else "drops"} " +
++                "${wanted.items.take(5).joinToString { ItemTable.getInstance().getTemplate(it)?.name ?: "$it" }} at ${next.location}")
+         next?.let { HuntingSpots.join(it) }
+         spot = next
+         spotLevel = level
+@@ -303,6 +319,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+         private const val MAX_IDLE_TICKS = 60
+         private const val TOWN_RETRY_MS = 10 * 60 * 1000L
+         private const val LINGER_PERCENT = 30
++        private const val CRAFTER_LINGER_PERCENT = 60
++        private const val CRAFTER_TRADE_SESSION_PERCENT = 30
+         private const val LINGER_MIN_MINUTES = 30
+         private const val LINGER_MAX_MINUTES = 90
+         private const val MAX_STORE_ATTEMPTS = 5
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Chatter.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Chatter.kt
+index ee3f10d..dfb5146 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Chatter.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Chatter.kt
+@@ -10,6 +10,8 @@ internal object Chatter {
+     val ENCHANT_RESET = listOf("blessed failed... back to 0 from %s", "lost %s, at least not broken")
+     val ENCHANT_BREAK = listOf("damn, broke at %s", "%s and boom", "nooo %s gone", "f... crystals again")
+     val BOUGHT_UPGRADE = listOf("new %s :)", "finally got %s", "saved up for %s")
++    val CRAFT_SUCCESS = listOf("made %s", "%s done", "crafted %s :)")
++    val CRAFT_FAIL = listOf("craft failed, %s mats gone", "argh, %s failed", "%s... failed again")
+ 
+     private const val CHANCE_PERCENT = 40
+ 
+@@ -17,4 +19,18 @@ internal object Chatter {
+         if (!AutobotData.settings.economyChat || Rnd.get(100) >= CHANCE_PERCENT) return
+         bot.say(lines.random().format(arg))
+     }
++
++    private const val TRADE_CHAT = 8
++    private const val MIN_AD_INTERVAL_MS = 15 * 60_000L
++    private val lastAd = java.util.concurrent.ConcurrentHashMap<Int, Long>()
++
++    /** A store ad in trade chat (`+`), at most every 15-30 minutes per bot, as a merchant who doesn't spam. */
++    fun advertise(bot: Autobot, text: String) {
++        if (!AutobotData.settings.economyChat) return
++        val now = System.currentTimeMillis()
++        val last = lastAd[bot.objectId] ?: 0L
++        if (now - last < MIN_AD_INTERVAL_MS + Math.floorMod(bot.objectId, 15) * 60_000L) return
++        lastAd[bot.objectId] = now
++        net.sf.l2j.gameserver.handler.ChatHandler.getInstance().getHandler(TRADE_CHAT)?.handleChat(TRADE_CHAT, bot, null, text)
++    }
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Crystals.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Crystals.kt
+index 6fb6559..fb49ccb 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Crystals.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Crystals.kt
+@@ -1,5 +1,7 @@
+ package dev.l2j.autobots.population.economy
+ 
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.population.economy.craft.Crafter
+ import net.sf.l2j.gameserver.enums.items.CrystalType
+ import net.sf.l2j.gameserver.model.L2Skill
+ import net.sf.l2j.gameserver.model.actor.Player
+@@ -21,6 +23,8 @@ internal object Crystals {
+             if (!item.isEquipable || item.isHeroItem || item.isShadowItem || !template.isCrystallizable || template.crystalCount <= 0) continue
+             // The same grade limits as RequestCrystallizeItem: level 1 breaks D, each level one grade more.
+             if (template.crystalType == CrystalType.NONE || template.crystalType.id > skillLevel) continue
++            // A crafter's own work is for sale, not for the furnace.
++            if (bot is Autobot && Crafter.costFloor(bot, item.itemId) > 0) continue
+ 
+             val count = item.crystalCount
+             val removed = bot.inventory.destroyItem("Crystalize", item.objectId, item.count, bot, null) ?: continue
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index 698845b..2918ff5 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -4,6 +4,7 @@ import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.behaviors.attributes.PetOwner
+ import dev.l2j.autobots.behaviors.preferences.PetOwnerPreferences
+ import dev.l2j.autobots.extensions.getCombatBehavior
++import dev.l2j.autobots.population.economy.craft.CraftStock
+ import net.sf.l2j.gameserver.data.ItemTable
+ import net.sf.l2j.gameserver.enums.items.ArmorType
+ import net.sf.l2j.gameserver.enums.items.CrystalType
+@@ -189,6 +190,8 @@ internal object Gear {
+         // Enchant scrolls for the gear the bot wears are kept for itself; others are for sale.
+         val worn = bot.inventory.paperdollItems
+         keep += AbstractEnchantPacket._scrolls.filter { (_, scroll) -> worn.any { scroll.isValid(it) } }.keys
++        // Recipes, materials and parts for the bot's own crafts or workshop orders.
++        keep += CraftStock.keep(bot)
+         return bot.inventory.items.filter {
+             !it.isEquipped && it.itemId !in keep && !it.isQuestItem && !it.isHeroItem && !it.isShadowItem &&
+                     it.referencePrice >= 2 && (it.isSellable || it.isTradable)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+index 54e0f4f..1e58189 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+@@ -4,6 +4,7 @@ import dev.l2j.autobots.population.group.Role
+ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.population.economy.craft.CraftBook
+ import dev.l2j.autobots.utils.distance
+ import net.sf.l2j.gameserver.data.ItemTable
+ import net.sf.l2j.gameserver.data.manager.BuyListManager
+@@ -153,8 +154,9 @@ internal object Market {
+ 
+     private fun buildShops(): List<Shop> = SpawnTable.getInstance().spawns
+             .mapNotNull { it.npc as? Merchant }
+-            // Clan hall stewards serve their clan only; the world's shops are the town merchants.
+-            .filter { !it.title.contains("Steward", ignoreCase = true) }
++            // Clan hall stewards serve their clan only; the world's shops are the town merchants. The Ivory Tower
++            // sales cat sells crystals, recipes and materials of every grade (a GM shop): never a source, even if spawned.
++            .filter { !it.title.contains("Steward", ignoreCase = true) && it.npcId !in MAGIC_SHOPS }
+             .mapNotNull { merchant ->
+                 val products = BuyListManager.getInstance().getBuyListsByNpcId(merchant.npcId)
+                         .flatMap { it.products }
+@@ -166,10 +168,13 @@ internal object Market {
+             .also { println("Autobots economy: ${it.size} shops indexed.") }
+ 
+     fun location(shop: Shop) = shop.merchant.location()
++
++    private val MAGIC_SHOPS = setOf(31075)
+ }
+ 
+ /** Kinds of economy events, counted for the periodic summary. */
+-internal enum class Deal { NpcBuy, NpcSell, StoreBuy, StoreSell, Equip, EnchantSuccess, EnchantReset, EnchantBreak, SellStore, BuyStore, ModeChange, Crystallize }
++internal enum class Deal { NpcBuy, NpcSell, StoreBuy, StoreSell, Equip, EnchantSuccess, EnchantReset, EnchantBreak, SellStore, BuyStore, ModeChange, Crystallize,
++    Craft, CraftFail, CraftOrder, RecipeLearn, Workshop }
+ 
+ internal object EconomyLog {
+     private val counts = ConcurrentHashMap<Deal, AtomicInteger>()
+@@ -184,6 +189,11 @@ internal object EconomyLog {
+         if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): skipped: $reason")
+     }
+ 
++    /** A decision worth seeing in the log (which route a bot chose and why), not counted as a deal. */
++    fun note(bot: Player, message: String) {
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): $message")
++    }
++
+     /**
+      * One line about the whole population since the last summary, so a run can be judged without reading every deal:
+      * deals by kind, then the state of the bots online.
+@@ -204,6 +214,19 @@ internal object EconomyLog {
+         val roles = bots.filter { it.level >= 20 }.groupingBy { if (Role.isSummoner(it.classId)) "Summoner" else Role.of(it.classId).name }.eachCount()
+                 .entries.sortedBy { it.key }.joinToString(",") { "${it.key}:${it.value}" }
+         println("Autobots economy summary: $deals online=${bots.size} avgLevel=$avgLevel maxLevel=$maxLevel " +
+-                "adena=$adena adenaPerBot=${adena / bots.size} stores=$stores farming=$farming needsGroup=$needGroup roles=${roles.ifEmpty { "-" }}")
++                "adena=$adena adenaPerBot=${adena / bots.size} stores=$stores farming=$farming needsGroup=$needGroup roles=${roles.ifEmpty { "-" }}" + craftSummary(bots))
++    }
++
++    /** Crafters against everyone else of the same level band: is crafting paying off? */
++    private fun craftSummary(bots: Collection<Autobot>): String {
++        val crafters = bots.filter { CraftBook.isCrafter(it) }
++        if (crafters.isEmpty()) return " crafters=0"
++        val levels = crafters.minOf { it.level }..crafters.maxOf { it.level }
++        val others = bots.filter { !CraftBook.isCrafter(it) && it.level in levels }
++        val workshops = bots.count { it.storeType == StoreType.MANUFACTURE }
++        val recipes = crafters.sumOf { it.dwarvenRecipeBook.size }
++        val perCrafter = crafters.sumOf { it.adena.toLong() } / crafters.size
++        val perOther = if (others.isEmpty()) 0 else others.sumOf { it.adena.toLong() } / others.size
++        return " crafters=${crafters.size} workshops=$workshops recipes=$recipes adenaPerCrafter=$perCrafter adenaPerOtherSameLevel=$perOther"
+     }
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
+index eabb9c1..6fb2d19 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
+@@ -1,6 +1,10 @@
+ package dev.l2j.autobots.population.economy
+ 
+ import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.population.economy.craft.CraftBook
++import dev.l2j.autobots.population.economy.craft.CraftPlanner
++import dev.l2j.autobots.population.economy.craft.Crafter
++import dev.l2j.autobots.population.economy.craft.Workshop
+ import net.sf.l2j.commons.random.Rnd
+ import net.sf.l2j.gameserver.data.ItemTable
+ import net.sf.l2j.gameserver.enums.ZoneId
+@@ -22,6 +26,8 @@ import kotlin.math.pow
+ internal object StoreKeeper {
+     /** A stack worth less than this to an NPC is not worth a store slot; it goes to the shop. */
+     const val MIN_STORE_STACK_VALUE = 2000
++    private const val MIN_CRAFT_GOODS_STACK_VALUE = 300
++    private const val WORKSHOP_PERCENT = 40
+     private const val MIN_DISTANCE_TO_OTHER_STORE = 150
+     private const val MAX_TITLE = 29
+ 
+@@ -35,7 +41,10 @@ internal object StoreKeeper {
+ 
+     /** Surplus worth selling in a store rather than to an NPC. */
+     fun storeGoods(bot: Autobot): List<ItemInstance> = Gear.surplus(bot)
+-            .filter { it.isTradable && askingPrice(bot, it.itemId).toLong() * it.count >= MIN_STORE_STACK_VALUE && askingPrice(bot, it.itemId) > Market.npcSellPrice(it.itemId) }
++            .filter { it.isTradable && askingPrice(bot, it.itemId).toLong() * it.count >= minStack(it.itemId) && askingPrice(bot, it.itemId) > Market.npcSellPrice(it.itemId) }
++
++    /** Materials and recipes are what crafters shop for, so even a small stack is worth a store slot. */
++    private fun minStack(itemId: Int): Int = if (CraftBook.enabled && CraftBook.isCraftGoods(itemId)) MIN_CRAFT_GOODS_STACK_VALUE else MIN_STORE_STACK_VALUE
+ 
+     /** Items the bot is looking for that town shops don't sell: the next gear piece and scrolls for its gear. */
+     fun wanted(bot: Autobot): List<Int> {
+@@ -45,16 +54,24 @@ internal object StoreKeeper {
+                 .keys
+         // Summoners buy crystals from dwarves' stores: no town shop sells them.
+         val crystals = listOfNotNull(Gear.summonCrystal(bot)?.takeIf { Gear.count(bot, it) < Crystals.WANTED })
+-        return (gear + crystals + scrolls).distinct()
++        return (gear + crystals + scrolls + craftWants(bot).keys).distinct()
++    }
++
++    /** A crafter's buy store bids on the materials of its next crafts and on recipes in demand it could learn. */
++    private fun craftWants(bot: Autobot): Map<Int, Int> {
++        if (!CraftBook.isCrafter(bot)) return emptyMap()
++        return CraftPlanner.shoppingList(bot) + CraftPlanner.wantedRecipes(bot).associateWith { 1 }
+     }
+ 
+-    fun hasBusiness(bot: Autobot): Boolean = storeGoods(bot).isNotEmpty() || (bot.adena > 0 && wanted(bot).any { bidPrice(bot, it) in 1..bot.adena })
++    fun hasBusiness(bot: Autobot): Boolean = storeGoods(bot).isNotEmpty() || (CraftBook.isCrafter(bot) && Workshop.offer(bot).isNotEmpty()) || (bot.adena > 0 && wanted(bot).any { bidPrice(bot, it) in 1..bot.adena })
+ 
+     fun askingPrice(bot: Autobot, itemId: Int): Int {
+         val inShops = Market.npcPrice(itemId) != null
+         val base = Market.fairValue(itemId) * roll(bot.objectId, itemId, if (inShops) 0.65..0.9 else 0.8..1.5)
+         val discount = 0.9.pow(unsold[bot.objectId]?.get(itemId) ?: 0)
+-        return (base * discount).toInt().coerceAtLeast(Market.npcSellPrice(itemId))
++        // A crafter never sells its work below what the materials cost it.
++        val floor = maxOf(Market.npcSellPrice(itemId), (Crafter.costFloor(bot, itemId) * 1.1).toInt())
++        return (base * discount).toInt().coerceAtLeast(floor)
+     }
+ 
+     fun bidPrice(bot: Autobot, itemId: Int): Int {
+@@ -65,7 +82,22 @@ internal object StoreKeeper {
+     /** Opens a sell store if there is valuable surplus, otherwise a buy store if the bot wants something. */
+     fun open(bot: Autobot): Boolean {
+         if (!canOpenHere(bot)) return false
+-        return openSellStore(bot) || openBuyStore(bot)
++        // A crafter sometimes sits as a workshop first; it sells its goods or buys materials the other sessions.
++        val opened = if (CraftBook.isCrafter(bot) && Rnd.get(100) < WORKSHOP_PERCENT) Workshop.open(bot) || openSellStore(bot) || openBuyStore(bot)
++        else openSellStore(bot) || openBuyStore(bot) || (CraftBook.isCrafter(bot) && Workshop.open(bot))
++        if (opened && CraftBook.isCrafter(bot)) advertise(bot)
++        return opened
++    }
++
++    /** Crafters announce their store in trade chat, the way players do in town. */
++    private fun advertise(bot: Autobot) {
++        val text = when (bot.storeType) {
++            StoreType.MANUFACTURE -> bot.createList?.storeName
++            StoreType.SELL -> bot.sellList.items.firstOrNull()?.let { "WTS ${it.item.name} ${it.price}a" }
++            StoreType.BUY -> bot.buyList.items.firstOrNull()?.let { "WTB ${it.item.name} ${it.price}a" }
++            else -> null
++        } ?: return
++        Chatter.advertise(bot, "$text, ${net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getClosestTownName(bot.x, bot.y)}")
+     }
+ 
+     fun canOpenHere(bot: Player): Boolean = !bot.isInsideZone(ZoneId.NO_STORE) && !bot.isInCombat &&
+@@ -100,7 +132,8 @@ internal object StoreKeeper {
+             val price = bidPrice(bot, itemId)
+             if (price <= 0) continue
+             val template = ItemTable.getInstance().getTemplate(itemId) ?: continue
+-            val count = if (template.isStackable) (budget / price).coerceAtMost(Rnd.get(1, 3).toLong()).toInt() else if (budget >= price) 1 else 0
++            val wantedCount = craftWants(bot)[itemId]?.toLong() ?: Rnd.get(1, 3).toLong()
++            val count = if (template.isStackable) (budget / price).coerceAtMost(wantedCount).toInt() else if (budget >= price) 1 else 0
+             if (count <= 0) continue
+             list.addItemByItemId(itemId, count, price)
+             budget -= price.toLong() * count
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index 538f966..6dcab7b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -5,6 +5,9 @@ import dev.l2j.autobots.behaviors.sequences.Sequence
+ import dev.l2j.autobots.behaviors.sequences.WalkToSequence
+ import dev.l2j.autobots.extensions.location
+ import dev.l2j.autobots.extensions.useItem
++import dev.l2j.autobots.population.economy.craft.CraftBook
++import dev.l2j.autobots.population.economy.craft.Crafter
++import dev.l2j.autobots.population.economy.craft.Sourcing
+ import dev.l2j.autobots.utils.CancellationToken
+ import dev.l2j.autobots.utils.distance
+ import kotlinx.coroutines.delay
+@@ -98,12 +101,15 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         Gear.equipUpgradesFromInventory(bot)
+         Crystals.crystallizeJunk(bot)
+         tradeWithStores()
++        // Workshop orders when cheaper than shops and stores, then the dwarf's own crafting.
++        Sourcing.orderCheapest(bot) { walkTo(it, "to a workshop or store") }
++        Crafter.work(bot)
+         sellToNpc(junk())
+         buySupplies()
+         buyGear()
+         // What the new gear replaced is junk now, and so are store goods if the bag is still heavy.
+         val leftovers = Gear.equipUpgradesFromInventory(bot) + junk()
+-        val heavy = if (Errands.loadPercent(bot) >= 40) StoreKeeper.storeGoods(bot) else emptyList()
++        val heavy = if (Errands.loadPercent(bot) >= 40) StoreKeeper.storeGoods(bot) + Gear.surplus(bot).filter { it.isSellable } else emptyList()
+         sellToNpc((leftovers + heavy).distinct().filter { bot.inventory.getItemByObjectId(it.objectId) != null })
+         Enchanter.enchantWorn(bot, cautious)
+         bot.refreshOverloaded()
+@@ -119,10 +125,10 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         delay(Rnd.get(1000, 3000).toLong())
+     }
+ 
+-    /** Cheap surplus that isn't worth a store slot. */
++    /** Cheap surplus that isn't worth a store slot. Recipes and materials are never junk: crafters buy them. */
+     private fun junk(): List<ItemInstance> {
+         val goods = StoreKeeper.storeGoods(bot).map { it.objectId }.toSet()
+-        return Gear.surplus(bot).filter { it.isSellable && it.objectId !in goods }
++        return Gear.surplus(bot).filter { it.isSellable && it.objectId !in goods && !(CraftBook.enabled && CraftBook.isCraftGoods(it.itemId) && it.isTradable) }
+     }
+ 
+     private suspend fun tradeWithStores() {
+@@ -146,7 +152,7 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         if (Gear.wishes(bot).isEmpty()) needs += StoreKeeper.wanted(bot).map { it to 1 }
+         for ((itemId, wantedCount) in needs) {
+             if (visits >= MAX_STORE_VISITS) return
+-            val limit = Market.npcPrice(itemId) ?: (Market.fairValue(itemId) * 1.3).toInt()
++            val limit = Sourcing.storeLimit(bot, itemId, Market.npcPrice(itemId) ?: (Market.fairValue(itemId) * 1.3).toInt())
+             val offer = Market.sellOffers(bot, itemId).firstOrNull { it.tradeItem.price < limit } ?: continue
+             val count = minOf(offer.tradeItem.count, wantedCount, Errands.spendable(bot) / offer.tradeItem.price.coerceAtLeast(1))
+             if (count <= 0 || !walkTo(offer.owner, "to buy ${offer.tradeItem.item.name}")) continue
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftBook.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftBook.kt
+new file mode 100644
+index 0000000..f0e6778
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftBook.kt
+@@ -0,0 +1,61 @@
++package dev.l2j.autobots.population.economy.craft
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.population.economy.Market
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.data.xml.RecipeData
++import net.sf.l2j.gameserver.enums.actors.ClassId
++import net.sf.l2j.gameserver.model.L2Skill
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.Recipe
++
++/**
++ * The dwarven recipes of `recipes.xml`, indexed the ways bots ask about them: what makes an item, which items are
++ * crafting inputs, which item is a recipe. Common craft (food, fishing) is left out.
++ */
++internal object CraftBook {
++    // recipes.xml ids run from 1 to under a thousand; RecipeData has no list getter.
++    private const val MAX_RECIPE_ID = 5000
++
++    /** Player level at which Create Item reaches a level, from the dwarf skill trees (Artisan 20-36, Warsmith 43-70). */
++    private val PLAYER_LEVEL_FOR_SKILL = intArrayOf(0, 5, 20, 28, 36, 43, 49, 55, 62, 70)
++
++    val recipes: List<Recipe> by lazy {
++        (1..MAX_RECIPE_ID).mapNotNull { RecipeData.getInstance().getRecipeList(it) }
++                .filter { it.isDwarven && ItemTable.getInstance().getTemplate(it.product.id) != null }
++                .also { println("Autobots economy: ${it.size} dwarven recipes indexed.") }
++    }
++
++    private val byProduct: Map<Int, List<Recipe>> by lazy { recipes.groupBy { it.product.id } }
++    private val byRecipeItem: Map<Int, Recipe> by lazy { recipes.associateBy { it.recipeId } }
++    private val inputs: Set<Int> by lazy { recipes.flatMap { recipe -> recipe.materials.map { it.id } }.toSet() }
++
++    fun forProduct(itemId: Int): List<Recipe> = byProduct[itemId].orEmpty()
++
++    fun byRecipeItem(itemId: Int): Recipe? = byRecipeItem[itemId]
++
++    fun isRecipeItem(itemId: Int): Boolean = itemId in byRecipeItem
++
++    /** A material, key part, crystal or gemstone some recipe consumes. */
++    fun isInput(itemId: Int): Boolean = itemId in inputs
++
++    fun isCraftGoods(itemId: Int): Boolean = isInput(itemId) || isRecipeItem(itemId)
++
++    val enabled: Boolean get() = AutobotData.settings.economyEnabled && AutobotData.settings.craftEnabled
++
++    fun skillLevel(bot: Player): Int = bot.getSkillLevel(L2Skill.SKILL_CREATE_DWARVEN)
++
++    fun playerLevelFor(recipeLevel: Int): Int = PLAYER_LEVEL_FOR_SKILL.getOrElse(recipeLevel) { Int.MAX_VALUE }
++
++    /** Artisan line: the dwarves who make crafting their trade. */
++    fun isCrafter(bot: Player): Boolean = enabled && skillLevel(bot) > 0 && bot.classId.equalsOrChildOf(ClassId.ARTISAN)
++
++    /** Scavenger line: spoilers who supply the crafters. */
++    fun isSupplier(bot: Player): Boolean = enabled && bot.classId.equalsOrChildOf(ClassId.SCAVENGER)
++
++    /** Any dwarf from level 5 crafts No-grade recipes; the Artisan line goes further. */
++    fun canCraft(bot: Player): Boolean = enabled && skillLevel(bot) > 0
++
++    /** What one piece of a product is worth on the market: the shop price if shops sell it, otherwise its reference price. */
++    fun productValue(itemId: Int): Int = Market.fairValue(itemId)
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftPlanner.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftPlanner.kt
+new file mode 100644
+index 0000000..7e0ee3e
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftPlanner.kt
+@@ -0,0 +1,153 @@
++package dev.l2j.autobots.population.economy.craft
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotsManager
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.economy.Market
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.enums.actors.StoreType
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.Recipe
++
++/**
++ * The crafter's arithmetic: what a craft costs with the materials at hand and the prices in town, what it earns,
++ * what is in demand among the bots online, and what to buy for the next crafts.
++ */
++internal object CraftPlanner {
++    /** How many crafts of a good recipe a crafter stocks materials for. */
++    private const val CRAFTS_TO_STOCK = 3
++    private const val RECIPES_TO_STOCK = 4
++    private const val DEMAND_REFRESH_MS = 60_000L
++
++    @Volatile private var demandAt = 0L
++    @Volatile private var demandCache: Map<Int, Int> = emptyMap()
++
++    /**
++     * Items the population online is looking for, with how many bots want each: the next pieces of their kits and
++     * the shots for their weapons. Refreshed once a minute; this is what any player would learn from trade chat.
++     */
++    fun demand(): Map<Int, Int> {
++        val now = System.currentTimeMillis()
++        if (now - demandAt < DEMAND_REFRESH_MS) return demandCache
++        val wanted = HashMap<Int, Int>()
++        for (bot in AutobotsManager.activeBots.values) {
++            if (bot.life == null || !bot.isOnline) continue
++            Gear.wishes(bot).forEach { wanted.merge(it.itemId, 1, Int::plus) }
++            wanted.merge(Gear.shotId(bot), 1, Int::plus)
++        }
++        demandCache = wanted
++        demandAt = now
++        return wanted
++    }
++
++    /** What the crafter gives up by using a piece it owns: what an NPC would pay for it. */
++    fun ownValue(itemId: Int): Int = Market.npcSellPrice(itemId)
++
++    /** The cheapest price of one piece in town (shop or private store), or null if nobody here sells it. */
++    fun buyPrice(bot: Player, itemId: Int): Int? {
++        val shop = Market.findProduct(bot, itemId)?.let { (shop, product) -> Market.priceWithTax(shop, product) }
++        val store = Market.sellOffers(bot, itemId).firstOrNull()?.tradeItem?.price
++        return listOfNotNull(shop, store).minOrNull()
++    }
++
++    /**
++     * Expected cost of one successful craft: owned materials at what an NPC pays, missing ones at the best price in
++     * town, divided by the success chance (a failure burns the materials). Null when a missing material isn't sold here.
++     */
++    fun craftCost(bot: Player, recipe: Recipe, fee: Int = 0): Long? {
++        var cost = fee.toLong()
++        for (material in recipe.materials) {
++            val have = Gear.count(bot, material.id).coerceAtMost(material.value)
++            val missing = material.value - have
++            cost += have.toLong() * ownValue(material.id)
++            if (missing > 0) cost += missing.toLong() * (buyPrice(bot, material.id) ?: return null)
++        }
++        return cost * 100 / recipe.successRate.coerceAtLeast(1)
++    }
++
++    /** What a craft earns: the product's market value minus the expected cost; null when it can't be made here. */
++    fun margin(bot: Player, recipe: Recipe): Long? {
++        val cost = craftCost(bot, recipe) ?: return null
++        return CraftBook.productValue(recipe.product.id).toLong() * recipe.product.value - cost
++    }
++
++    /** Value of the product with the materials valued at what NPCs pay: the margin a crafter could hope for at best. */
++    fun potential(recipe: Recipe): Long {
++        val materials = recipe.materials.sumOf { it.value.toLong() * ownValue(it.id) }
++        return CraftBook.productValue(recipe.product.id).toLong() * recipe.product.value * recipe.successRate / 100 - materials
++    }
++
++    fun knownRecipes(bot: Player): List<Recipe> = bot.dwarvenRecipeBook.filter { it.level <= CraftBook.skillLevel(bot) }
++
++    /** Known recipes worth making, best first: in demand, then by potential margin. */
++    fun ranked(bot: Player): List<Recipe> {
++        val demand = demand()
++        return knownRecipes(bot)
++                .filter { potential(it) > 0 || (demand[it.product.id] ?: 0) > 0 }
++                .sortedWith(compareByDescending<Recipe> { demand[it.product.id] ?: 0 }.thenByDescending { potential(it) })
++    }
++
++    /** True when a known recipe consumes [itemId], directly or through a known intermediate recipe. */
++    fun usesInput(bot: Player, itemId: Int): Boolean = knownRecipes(bot).any { recipe -> recipe.materials.any { it.id == itemId } }
++
++    /**
++     * Materials the crafter lacks for the next few crafts of its best recipes, with counts: what its buy store bids on
++     * and what spoilers go looking for.
++     */
++    fun shoppingList(bot: Player): Map<Int, Int> {
++        val wanted = HashMap<Int, Int>()
++        for (recipe in ranked(bot).take(RECIPES_TO_STOCK)) {
++            for (material in recipe.materials) {
++                val need = material.value * CRAFTS_TO_STOCK - Gear.count(bot, material.id)
++                // A material a known recipe makes is crafted, not bought, when its own inputs are at hand.
++                if (need > 0 && knownRecipes(bot).none { it.product.id == material.id && hasMaterials(bot, it) }) wanted.merge(material.id, need, Int::plus)
++            }
++        }
++        return wanted
++    }
++
++    /** Recipes in demand the crafter could learn now and doesn't know: worth a bid in its buy store. */
++    fun wantedRecipes(bot: Player): List<Int> {
++        val skill = CraftBook.skillLevel(bot)
++        if (bot.dwarvenRecipeBook.size >= bot.dwarfRecipeLimit) return emptyList()
++        return demand().keys.asSequence()
++                .flatMap { CraftBook.forProduct(it).asSequence() }
++                .filter { it.level <= skill && !bot.hasRecipeList(it.id) && potential(it) > 0 }
++                .map { it.recipeId }
++                .distinct()
++                .take(3)
++                .toList()
++    }
++
++    fun hasMaterials(bot: Player, recipe: Recipe, crafts: Int = 1): Boolean =
++            recipe.materials.all { Gear.count(bot, it.id) >= it.value * crafts }
++
++    /** Weight of one craft's product: it must fit the bag before the craft is started. */
++    fun productWeight(recipe: Recipe): Int = (ItemTable.getInstance().getTemplate(recipe.product.id)?.weight ?: 0) * recipe.product.value
++
++    /** Workshops around [bot] that make [recipe], cheapest fee first. */
++    fun workshopsFor(bot: Player, recipe: Recipe): List<Pair<Player, Int>> = Market.storesNear(bot)
++            .filter { it.storeType == StoreType.MANUFACTURE && it.createList != null }
++            .mapNotNull { owner -> owner.createList.list.firstOrNull { it.id == recipe.id }?.let { owner to it.value } }
++            .sortedBy { it.second }
++
++    /** Items the crafting population wants: crafters' shopping lists plus whatever buy stores around the world bid on. */
++    fun wantedMaterials(): Set<Int> {
++        val now = System.currentTimeMillis()
++        if (now - wantedAt < DEMAND_REFRESH_MS) return wantedCache
++        val wanted = HashSet<Int>()
++        for (bot in AutobotsManager.activeBots.values) {
++            if (bot.life == null || !bot.isOnline) continue
++            if (CraftBook.isCrafter(bot)) wanted += shoppingList(bot).keys
++            if (bot.storeType == StoreType.BUY) wanted += bot.buyList.items.map { it.item.itemId }.filter { CraftBook.isInput(it) }
++        }
++        wantedCache = wanted
++        wantedAt = now
++        return wanted
++    }
++
++    @Volatile private var wantedAt = 0L
++    @Volatile private var wantedCache: Set<Int> = emptySet()
++
++    fun isPopulationCrafter(bot: Autobot): Boolean = bot.life != null && CraftBook.isCrafter(bot)
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftStock.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftStock.kt
+new file mode 100644
+index 0000000..78e0090
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftStock.kt
+@@ -0,0 +1,32 @@
++package dev.l2j.autobots.population.economy.craft
++
++import dev.l2j.autobots.Autobot
++import net.sf.l2j.gameserver.model.actor.Player
++
++/**
++ * Craft goods a bot holds on to instead of selling: a crafter keeps the inputs of its known recipes and the recipes
++ * it will soon learn, anyone keeps the parts of its next kit piece. All of it within [Crafter.STOCK_WEIGHT_PERCENT]
++ * of the weight limit, heaviest stacks given up first; there is no warehouse yet.
++ */
++internal object CraftStock {
++    fun keep(bot: Player): Set<Int> {
++        if (bot !is Autobot || bot.life == null || !CraftBook.enabled) return emptySet()
++        val wanted = HashSet(Sourcing.inputsForWishes(bot))
++        if (CraftBook.canCraft(bot)) {
++            CraftPlanner.knownRecipes(bot).forEach { recipe -> recipe.materials.forEach { wanted += it.id } }
++            wanted += Crafter.recipesToKeep(bot)
++        }
++        if (wanted.isEmpty()) return wanted
++
++        val budget = bot.maxLoad.toLong() * Crafter.STOCK_WEIGHT_PERCENT / 100
++        var used = 0L
++        val kept = HashSet<Int>()
++        for (item in bot.inventory.items.filter { it.itemId in wanted && !it.isEquipped }.sortedBy { it.item.weight.toLong() * it.count }) {
++            val weight = item.item.weight.toLong() * item.count
++            if (used + weight > budget) break
++            used += weight
++            kept += item.itemId
++        }
++        return kept
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Crafter.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Crafter.kt
+new file mode 100644
+index 0000000..89a51d0
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Crafter.kt
+@@ -0,0 +1,173 @@
++package dev.l2j.autobots.population.economy.craft
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.population.economy.Chatter
++import dev.l2j.autobots.population.economy.Deal
++import dev.l2j.autobots.population.economy.EconomyLog
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.economy.Market
++import kotlinx.coroutines.delay
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.enums.items.EtcItemType
++import net.sf.l2j.gameserver.handler.ItemHandler
++import net.sf.l2j.gameserver.model.craft.RecipeItemMaker
++import net.sf.l2j.gameserver.model.item.Recipe
++import java.util.concurrent.ConcurrentHashMap
++
++/**
++ * A dwarf's work in town: learn the recipes it carries, buy the materials it lacks, then craft what earns money.
++ * Every step goes through the code a client request would run: the `Recipes` item handler and `RecipeItemMaker`.
++ */
++internal object Crafter {
++    private const val MAX_CRAFTS_PER_VISIT = 40
++    private const val MAX_MP_WAIT_SECONDS = 90
++    /** Craft goods a bot keeps may weigh up to this share of its limit; the rest goes to the market. */
++    const val STOCK_WEIGHT_PERCENT = 25
++    /** A recipe a few levels out of reach is kept for later, like a player saving it for the next skill level. */
++    private const val KEEP_RECIPE_LEVELS_AHEAD = 5
++
++    // What each crafter paid per piece of what it made: its sell store never goes below that.
++    private val costs = ConcurrentHashMap<Int, MutableMap<Int, Int>>()
++
++    fun costFloor(bot: Autobot, itemId: Int): Int = costs[bot.objectId]?.get(itemId) ?: 0
++
++    suspend fun work(bot: Autobot) {
++        if (!CraftBook.canCraft(bot) || bot.isInStoreMode) return
++        learnRecipes(bot)
++        if (CraftBook.isCrafter(bot)) {
++            buyMaterials(bot)
++        }
++        craft(bot)
++    }
++
++    /** Recipe items the bot carries that it can't learn yet but will soon: kept instead of sold. */
++    fun recipesToKeep(bot: Autobot): List<Int> {
++        if (!CraftBook.isCrafter(bot)) return emptyList()
++        return bot.inventory.items.mapNotNull { item ->
++            val recipe = CraftBook.byRecipeItem(item.itemId) ?: return@mapNotNull null
++            item.itemId.takeIf { !bot.hasRecipeList(recipe.id) && CraftBook.playerLevelFor(recipe.level) - bot.level <= KEEP_RECIPE_LEVELS_AHEAD }
++        }
++    }
++
++    private fun learnRecipes(bot: Autobot) {
++        for (item in bot.inventory.items.filter { it.item.itemType == EtcItemType.RECIPE }) {
++            val recipe = CraftBook.byRecipeItem(item.itemId) ?: continue
++            if (bot.hasRecipeList(recipe.id) || recipe.level > CraftBook.skillLevel(bot)) continue
++            if (bot.dwarvenRecipeBook.size >= bot.dwarfRecipeLimit) return
++            val handler = ItemHandler.getInstance().getHandler(item.etcItem) ?: continue
++            handler.useItem(bot, item, false)
++            if (bot.hasRecipeList(recipe.id)) {
++                EconomyLog.log(bot, Deal.RecipeLearn, "learned ${item.itemName} (book ${bot.dwarvenRecipeBook.size}/${bot.dwarfRecipeLimit})")
++                RecipeBookDao.save(bot)
++            }
++        }
++    }
++
++    /** Buys missing materials in town where the price still leaves the craft profitable. */
++    private fun buyMaterials(bot: Autobot) {
++        for ((itemId, need) in CraftPlanner.shoppingList(bot)) {
++            var left = need
++            val value = CraftBook.productValue(itemId)
++            // Private stores first, at no more than the market value.
++            for (offer in Market.sellOffers(bot, itemId).filter { it.tradeItem.price <= value }) {
++                if (left <= 0) break
++                val count = minOf(left, offer.tradeItem.count, Errands.spendable(bot) / offer.tradeItem.price.coerceAtLeast(1))
++                if (count <= 0 || !fits(bot, itemId, count)) break
++                if (Market.buyFromStore(bot, offer, count)) left -= count
++            }
++            if (left <= 0) continue
++            // Then a town shop if one sells it (Soul Ore is the only material they do).
++            val (shop, product) = Market.findProduct(bot, itemId) ?: continue
++            val price = Market.priceWithTax(shop, product).coerceAtLeast(1)
++            val count = minOf(left, Errands.spendable(bot) / 2 / price)
++            if (count > 0 && fits(bot, itemId, count)) Market.buyFromNpc(bot, shop, product, count)
++        }
++    }
++
++    private fun fits(bot: Autobot, itemId: Int, count: Int): Boolean {
++        val weight = (ItemTable.getInstance().getTemplate(itemId)?.weight ?: 0).toLong() * count
++        return weight <= Int.MAX_VALUE && bot.inventory.validateWeight(weight.toInt()) && bot.inventory.validateCapacityByItemId(itemId)
++    }
++
++    /**
++     * Crafts while materials and MP last: intermediates a better recipe is short of, then the best recipe that earns
++     * money or that some bot online wants. Waits sitting for MP like a player does.
++     */
++    private suspend fun craft(bot: Autobot) {
++        var crafts = 0
++        while (crafts < MAX_CRAFTS_PER_VISIT && !bot.isDead && !bot.isInStoreMode) {
++            val recipe = nextCraft(bot) ?: return
++            if (bot.currentMp < recipe.mpCost && !waitForMp(bot, recipe.mpCost)) return
++            if (!makeOne(bot, recipe)) return
++            crafts++
++            delay(Rnd.get(1500, 3500).toLong())
++        }
++    }
++
++    private fun nextCraft(bot: Autobot): Recipe? {
++        val demand = CraftPlanner.demand()
++        val ranked = CraftPlanner.ranked(bot)
++        for (recipe in ranked) {
++            // Don't flood the market: stop at a few pieces of gear nobody asks for, keep going on shots and materials.
++            val stock = Gear.count(bot, recipe.product.id)
++            val wanted = demand[recipe.product.id] ?: 0
++            val product = ItemTable.getInstance().getTemplate(recipe.product.id) ?: continue
++            if (!product.isStackable && stock >= maxOf(1, wanted)) continue
++            if (CraftPlanner.hasMaterials(bot, recipe)) {
++                if ((CraftPlanner.margin(bot, recipe) ?: 0) > 0 || wanted > 0) return recipe.takeIf { fitsProduct(bot, it) }
++                continue
++            }
++            // Short of a material a known recipe makes from what is at hand: make that first.
++            for (material in recipe.materials.filter { Gear.count(bot, it.id) < it.value }) {
++                val intermediate = CraftPlanner.knownRecipes(bot).firstOrNull { it.product.id == material.id && CraftPlanner.hasMaterials(bot, it) }
++                if (intermediate != null && fitsProduct(bot, intermediate)) return intermediate
++            }
++        }
++        return null
++    }
++
++    private fun fitsProduct(bot: Autobot, recipe: Recipe): Boolean =
++            bot.inventory.validateWeight(CraftPlanner.productWeight(recipe)) && bot.inventory.validateCapacityByItemId(recipe.product.id)
++
++    private suspend fun waitForMp(bot: Autobot, mp: Int): Boolean {
++        if (bot.maxMp < mp) return false
++        if (!bot.isSitting) bot.sitDown()
++        repeat(MAX_MP_WAIT_SECONDS) {
++            delay(1000)
++            if (bot.isDead || bot.isInCombat) return false
++            if (bot.currentMp >= mp) {
++                bot.standUp()
++                return true
++            }
++        }
++        bot.standUp()
++        return false
++    }
++
++    /** One craft on the bot itself, through the same maker the client's RequestRecipeItemMakeSelf uses. */
++    private fun makeOne(bot: Autobot, recipe: Recipe): Boolean {
++        if (bot.isCrafting || bot.isInStoreMode) return false
++        val productId = recipe.product.id
++        val cost = CraftPlanner.craftCost(bot, recipe) ?: 0
++        val before = Gear.count(bot, productId)
++        val maker = RecipeItemMaker(bot, recipe, bot)
++        if (!maker._isValid) {
++            bot.isCrafting = false
++            return false
++        }
++        maker.run()
++        val made = Gear.count(bot, productId) - before
++        val name = ItemTable.getInstance().getTemplate(productId).name
++        if (made > 0) {
++            costs.computeIfAbsent(bot.objectId) { ConcurrentHashMap() }[productId] = (cost / made).toInt().coerceAtLeast(1)
++            EconomyLog.log(bot, Deal.Craft, "crafted ${made}x $name (cost $cost, worth ${CraftBook.productValue(productId).toLong() * made})")
++            if (!ItemTable.getInstance().getTemplate(productId).isStackable) Chatter.maybeSay(bot, Chatter.CRAFT_SUCCESS, name)
++        } else {
++            EconomyLog.log(bot, Deal.CraftFail, "failed to craft $name (${recipe.successRate}%), lost materials worth $cost")
++            Chatter.maybeSay(bot, Chatter.CRAFT_FAIL, name)
++        }
++        return true
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Prospecting.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Prospecting.kt
+new file mode 100644
+index 0000000..5a975bb
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Prospecting.kt
+@@ -0,0 +1,34 @@
++package dev.l2j.autobots.population.economy.craft
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.population.WantedLoot
++import dev.l2j.autobots.population.economy.Gear
++
++/**
++ * Who farms on purpose and for what. Like a chronotype, it's a trait derived from the object id: half of the
++ * spoilers go where monsters give the materials crafters are short of, a fifth of other hunters go where the parts
++ * of their next kit piece drop; everyone else just hunts by level and sells what falls.
++ */
++internal object Prospecting {
++    private const val TARGETED_SPOILER_PERCENT = 50
++    private const val TARGETED_HUNTER_PERCENT = 20
++
++    private fun trait(bot: Autobot): Int = Math.floorMod(bot.objectId * 131 + 17, 100)
++
++    fun wantedLoot(bot: Autobot): WantedLoot? {
++        if (!CraftBook.enabled) return null
++        if (CraftBook.isSupplier(bot)) {
++            if (trait(bot) >= TARGETED_SPOILER_PERCENT) return null
++            return WantedLoot(CraftPlanner.wantedMaterials(), spoil = true).takeIf { it.items.isNotEmpty() }
++        }
++        if (trait(bot) >= TARGETED_HUNTER_PERCENT) return null
++        // Parts and patterns for the next kit piece, minus those already in the bag in full.
++        val needed = Gear.wishes(bot).take(1)
++                .flatMap { wish -> CraftBook.forProduct(wish.itemId).flatMap { it.materials } }
++                .filter { Gear.count(bot, it.id) < it.value }
++                .map { it.id }
++                .toSet()
++        return WantedLoot(needed, spoil = false).takeIf { it.items.isNotEmpty() }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/RecipeBookDao.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/RecipeBookDao.kt
+new file mode 100644
+index 0000000..b926a54
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/RecipeBookDao.kt
+@@ -0,0 +1,54 @@
++package dev.l2j.autobots.population.economy.craft
++
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.data.xml.RecipeData
++import net.sf.l2j.gameserver.model.actor.Player
++
++/**
++ * The recipe book of a population bot, in `autobots_recipebook`: the core's `character_recipebook` is purged at
++ * startup of every id not in `characters`, which bots aren't. Loaded at login, saved on change and on logout.
++ */
++internal object RecipeBookDao {
++    private const val SELECT = "SELECT recipeId FROM autobots_recipebook WHERE charId=?"
++    private const val DELETE = "DELETE FROM autobots_recipebook WHERE charId=?"
++    private const val INSERT = "INSERT INTO autobots_recipebook (charId, recipeId) VALUES (?,?)"
++
++    fun load(bot: Player) {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement(SELECT).use { ps ->
++                    ps.setInt(1, bot.objectId)
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) {
++                            val recipe = RecipeData.getInstance().getRecipeList(rs.getInt("recipeId")) ?: continue
++                            if (recipe.isDwarven) bot.registerDwarvenRecipeList(recipe) else bot.registerCommonRecipeList(recipe)
++                        }
++                    }
++                }
++            }
++        } catch (e: Exception) {
++            println("Autobots economy: couldn't load the recipe book of ${bot.name}: $e")
++        }
++    }
++
++    fun save(bot: Player) {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement(DELETE).use { ps ->
++                    ps.setInt(1, bot.objectId)
++                    ps.execute()
++                }
++                con.prepareStatement(INSERT).use { ps ->
++                    for (recipe in bot.dwarvenRecipeBook + bot.commonRecipeBook) {
++                        ps.setInt(1, bot.objectId)
++                        ps.setInt(2, recipe.id)
++                        ps.addBatch()
++                    }
++                    ps.executeBatch()
++                }
++            }
++        } catch (e: Exception) {
++            println("Autobots economy: couldn't save the recipe book of ${bot.name}: $e")
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Sourcing.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Sourcing.kt
+new file mode 100644
+index 0000000..e563b71
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Sourcing.kt
+@@ -0,0 +1,129 @@
++package dev.l2j.autobots.population.economy.craft
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.population.economy.Chatter
++import dev.l2j.autobots.population.economy.EconomyLog
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.economy.Market
++import dev.l2j.autobots.population.economy.Wish
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.Recipe
++
++/** One way to get an item, with what it costs the bot in adena. */
++internal sealed class Route(val cost: Long) {
++    class Npc(cost: Long) : Route(cost)
++    class Store(cost: Long) : Route(cost)
++    /** [cash] is what the bot actually pays: the fee and the materials it lacks; [cost] also counts its own materials. */
++    class Order(cost: Long, val cash: Long, val owner: Player, val recipe: Recipe) : Route(cost)
++    class OwnCraft(cost: Long) : Route(cost)
++}
++
++/**
++ * How a bot gets the next piece of its kit: from a town shop, a private store, a workshop order with its own
++ * materials, its own craft, or not at all for now (it keeps hunting and may find it). The cheapest affordable
++ * route wins; every choice is logged with the alternatives.
++ */
++internal object Sourcing {
++    fun routes(bot: Autobot, itemId: Int): List<Route> {
++        val routes = mutableListOf<Route>()
++        Market.findProduct(bot, itemId)?.let { (shop, product) -> routes += Route.Npc(Market.priceWithTax(shop, product).toLong()) }
++        Market.sellOffers(bot, itemId).firstOrNull()?.let { routes += Route.Store(it.tradeItem.price.toLong()) }
++        if (!CraftBook.enabled) return routes
++        for (recipe in CraftBook.forProduct(itemId)) {
++            if (bot.dwarvenRecipeBook.contains(recipe) && recipe.level <= CraftBook.skillLevel(bot)) {
++                CraftPlanner.craftCost(bot, recipe)?.let { routes += Route.OwnCraft(it / recipe.product.value) }
++            }
++            for ((owner, fee) in CraftPlanner.workshopsFor(bot, recipe)) {
++                // Materials already in the bag are paid for: they cost what an NPC would have paid for them.
++                val cost = CraftPlanner.craftCost(bot, recipe, fee) ?: continue
++                routes += Route.Order(cost / recipe.product.value, fee + missingCost(bot, recipe), owner, recipe)
++                break
++            }
++        }
++        return routes
++    }
++
++    /** The most a bot pays in a private store for [itemId]: a workshop order or a shop must not be cheaper. */
++    fun storeLimit(bot: Autobot, itemId: Int, default: Int): Int {
++        val order = routes(bot, itemId).filterIsInstance<Route.Order>().minOfOrNull { it.cost } ?: return default
++        return minOf(default.toLong(), order).toInt()
++    }
++
++    fun describe(routes: List<Route>): String = routes.joinToString { route ->
++        val kind = when (route) {
++            is Route.Npc -> "npc"
++            is Route.Store -> "store"
++            is Route.Order -> "order@${route.owner.name}"
++            is Route.OwnCraft -> "own craft"
++        }
++        "$kind ${route.cost}"
++    }
++
++    /**
++     * Orders the next kit pieces from workshops in town when that is the cheapest way and the bot can pay for the
++     * fee and the missing materials. Missing materials are bought in stores first.
++     */
++    suspend fun orderCheapest(bot: Autobot, walkTo: suspend (Player) -> Boolean) {
++        val allowedGrade = Gear.gradeFor(bot.level).id
++        var orders = 0
++        // Any kit piece, not just the first: a bot with the parts for its shield orders it while saving for the sword.
++        for (wish in Gear.wishes(bot)) {
++            if (orders >= ORDERS_PER_TRIP) return
++            // The grade penalty: nobody pays for gear they can't use well.
++            if (wish.template.crystalType.id > allowedGrade) continue
++            val routes = routes(bot, wish.itemId)
++            val best = routes.minByOrNull { it.cost } as? Route.Order ?: continue
++            if (best.cash > Errands.spendable(bot)) {
++                EconomyLog.skip(bot, "can't afford ${wish.template.name} by any route (${describe(routes)})")
++                continue
++            }
++            if (!buyMissing(bot, best.recipe, walkTo)) continue
++            if (!walkTo(best.owner)) continue
++            EconomyLog.note(bot, "chose order for ${wish.template.name}: ${describe(routes)}")
++            orders++
++            if (Workshop.order(bot, best.owner, best.recipe)) equipOrdered(bot, wish)
++        }
++    }
++
++    /** Adena to buy the materials of [recipe] the bot lacks, at the best price in town (0 when it has them all). */
++    private fun missingCost(bot: Autobot, recipe: Recipe): Long = recipe.materials.sumOf { material ->
++        val missing = (material.value - Gear.count(bot, material.id)).coerceAtLeast(0)
++        if (missing == 0) 0L else missing.toLong() * (CraftPlanner.buyPrice(bot, material.id) ?: 0)
++    }
++
++    private suspend fun buyMissing(bot: Autobot, recipe: Recipe, walkTo: suspend (Player) -> Boolean): Boolean {
++        for (material in recipe.materials) {
++            var missing = material.value - Gear.count(bot, material.id)
++            for (offer in Market.sellOffers(bot, material.id)) {
++                if (missing <= 0) break
++                val count = minOf(missing, offer.tradeItem.count)
++                if (offer.tradeItem.price.toLong() * count > Errands.spendable(bot) || !walkTo(offer.owner)) return false
++                if (Market.buyFromStore(bot, offer, count)) missing -= count
++            }
++            if (missing > 0) {
++                val (shop, product) = Market.findProduct(bot, material.id) ?: return false
++                if (!Market.buyFromNpc(bot, shop, product, missing)) return false
++            }
++        }
++        return true
++    }
++
++    private fun equipOrdered(bot: Autobot, wish: Wish) {
++        val item = bot.inventory.getItemsByItemId(wish.itemId).firstOrNull { !it.isEquipped } ?: return
++        Gear.equip(bot, item)
++        Chatter.maybeSay(bot, Chatter.BOUGHT_UPGRADE, item.itemName)
++    }
++
++    /**
++     * Materials and parts a bot keeps for the recipes of its next kit pieces, so it can bring them to a workshop:
++     * a player who found a Broadsword Blade doesn't sell it while saving for a Broadsword.
++     */
++    fun inputsForWishes(bot: Autobot): Set<Int> {
++        if (!CraftBook.enabled) return emptySet()
++        return Gear.wishes(bot).flatMap { wish -> CraftBook.forProduct(wish.itemId).flatMap { recipe -> recipe.materials.map { it.id } } }.toSet()
++    }
++
++    private const val ORDERS_PER_TRIP = 2
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Workshop.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Workshop.kt
+new file mode 100644
+index 0000000..96077ec
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Workshop.kt
+@@ -0,0 +1,82 @@
++package dev.l2j.autobots.population.economy.craft
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.population.economy.Deal
++import dev.l2j.autobots.population.economy.EconomyLog
++import dev.l2j.autobots.population.economy.Gear
++import net.sf.l2j.commons.math.MathUtil
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.enums.actors.StoreType
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.craft.ManufactureItem
++import net.sf.l2j.gameserver.model.craft.ManufactureList
++import net.sf.l2j.gameserver.model.craft.RecipeItemMaker
++import net.sf.l2j.gameserver.model.item.Recipe
++import net.sf.l2j.gameserver.network.serverpackets.RecipeShopMsg
++
++/**
++ * Dwarven Manufacture: the crafter sells its work, the customer brings the materials and pays a fee. Opening one is
++ * what `RequestRecipeShopListSet` does; ordering mirrors `RequestRecipeShopMakeItem`.
++ */
++internal object Workshop {
++    private const val MAX_RECIPES = 20
++    private const val MAX_TITLE = 29
++
++    /** Fee as a share of the product value, fixed per crafter and recipe so the price list doesn't jump around. */
++    fun fee(bot: Player, recipe: Recipe): Int {
++        val share = 0.05 + 0.10 * (Math.floorMod(bot.objectId * 7919 + recipe.id * 104729, 1000) / 1000.0)
++        return (CraftBook.productValue(recipe.product.id).toLong() * recipe.product.value * share).toInt().coerceAtLeast(1)
++    }
++
++    /** Recipes worth offering: something bots want, or a product worth more than a token fee. */
++    fun offer(bot: Autobot): List<Recipe> {
++        val demand = CraftPlanner.demand()
++        return CraftPlanner.knownRecipes(bot)
++                .filter { (demand[it.product.id] ?: 0) > 0 || fee(bot, it) >= MIN_FEE }
++                .sortedWith(compareByDescending<Recipe> { demand[it.product.id] ?: 0 }.thenByDescending { CraftBook.productValue(it.product.id) })
++                .take(MAX_RECIPES)
++    }
++
++    fun open(bot: Autobot): Boolean {
++        val recipes = offer(bot)
++        if (recipes.isEmpty()) return false
++        val list = ManufactureList()
++        recipes.forEach { list.add(ManufactureItem(it.id, fee(bot, it))) }
++        val first = ItemTable.getInstance().getTemplate(recipes.first().product.id).name
++        val title = if (recipes.size > 1) "Craft $first and more" else "Craft $first"
++        list.storeName = title.take(MAX_TITLE)
++        bot.createList = list
++
++        bot.sitDown()
++        bot.storeType = StoreType.MANUFACTURE
++        bot.broadcastUserInfo()
++        bot.broadcastPacket(RecipeShopMsg(bot))
++        EconomyLog.log(bot, Deal.Workshop, "opened workshop: " + recipes.joinToString { "${ItemTable.getInstance().getTemplate(it.product.id).name} @${fee(bot, it)}" })
++        return true
++    }
++
++    /**
++     * Orders one craft from [owner]'s workshop with the customer's own materials. Same checks as the client request;
++     * the maker takes the fee and the materials and hands over the product on success.
++     * @return true if the product was made.
++     */
++    fun order(customer: Autobot, owner: Player, recipe: Recipe): Boolean {
++        if (owner.storeType != StoreType.MANUFACTURE || customer.isInStoreMode) return false
++        if (customer.isCrafting || owner.isCrafting || owner.isInCombat || customer.isInCombat) return false
++        if (!MathUtil.checkIfInRange(150, customer, owner, true)) return false
++        if (!owner.dwarvenRecipeBook.contains(recipe)) return false
++        val fee = owner.createList?.list?.firstOrNull { it.id == recipe.id }?.value ?: return false
++
++        val productId = recipe.product.id
++        val before = Gear.count(customer, productId)
++        val maker = RecipeItemMaker(owner, recipe, customer)
++        if (!maker._isValid) return false
++        maker.run()
++        val made = Gear.count(customer, productId) - before
++        val name = ItemTable.getInstance().getTemplate(productId).name
++        EconomyLog.log(customer, Deal.CraftOrder, (if (made > 0) "ordered ${made}x $name" else "order of $name failed") + " from workshop of ${owner.name} for $fee")
++        return made > 0
++    }
++
++    private const val MIN_FEE = 500
++}
