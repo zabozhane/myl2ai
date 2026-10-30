@@ -4,6 +4,7 @@
 set -eu
 
 SQL_DIR=/opt/acis/sql
+ADDON_SQL_DIR=$SQL_DIR/addons
 LOGIN_TABLE_FILES="accounts.sql gameservers.sql"
 
 run_sql() {
@@ -53,4 +54,10 @@ import_if_empty() {
 
 import_if_empty login "$LOGIN_DB_USER" "$LOGIN_DB_PASSWORD" "$LOGIN_DB_NAME" import_login_schema
 import_if_empty game "$GAME_DB_USER" "$GAME_DB_PASSWORD" "$GAME_DB_NAME" import_game_schema
+# Addon tables (L2Autobots) use CREATE TABLE IF NOT EXISTS, so they are applied on every start:
+# this also adds them to a game schema created before the addon existed.
+for file in "$ADDON_SQL_DIR"/*.sql; do
+	echo "init-db: game addon <- $(basename "$file")"
+	run_sql "$GAME_DB_USER" "$GAME_DB_PASSWORD" "$GAME_DB_NAME" < "$file"
+done
 echo "init-db: done"

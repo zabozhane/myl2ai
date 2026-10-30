@@ -36,7 +36,7 @@ Mac (winemac, клиент C6 / 746)
 | Клиент Interlude (746, пропатченный system) | `./client/`, не в git | удалить папку |
 | Логи | `./logs/login`, `./logs/game` | удалить папку |
 
-**Память (лимиты контейнеров):** db 768 МБ (buffer pool 256 МБ), login 256 МБ, game 3 ГБ (heap 2 ГБ). Итого до ~4 ГБ из 6–8 ГБ виртуалки; в простое фактически ~0,8 ГБ.
+**Память (лимиты контейнеров):** db 768 МБ (buffer pool 256 МБ), login 256 МБ, game 4 ГБ (heap 3 ГБ, из них около 1 ГБ занимает геодата). Итого до ~5 ГБ из 6–8 ГБ виртуалки; в простое фактически ~0,8 ГБ.
 
 ## Запуск
 
@@ -61,7 +61,17 @@ docker compose exec db mariadb -ul2_game -pl2ai-game l2_game \
 
 ## Геодата
 
-Геодата в публичный репозиторий aCis не входит. Без неё сервер стартует (entrypoint пишет предупреждение и отключает список регионов), но нет коллизий и линии видимости. Для этапа 1 это не критично, для ботов (этап 2) нужна: положить файлы L2OFF (`XX_YY_conv.dat`) в `./geodata/` и перезапустить `game`.
+aCis 382 загружает только формат `.l2d` (`XX_YY.l2d`), форматы L2J (`.l2j`) и L2OFF (`_conv.dat`) нужно конвертировать штатным `GeoDataConverter`. Геодата в git не хранится и лежит в `./geodata/`; без неё сервер стартует (entrypoint отключает список регионов), но без коллизий и линии видимости.
+
+Текущий набор: 139 регионов из `.l2j` репозитория [ChaosPaladin/l2j-geodata-project](https://github.com/ChaosPaladin/l2j-geodata-project) (коммит `97332edd`, экспорт старого L2J geodata project, эпоха Gracia/High Five: в отдельных местах Interlude возможны неточности), сконвертированы в `.l2d`:
+
+```sh
+docker run --rm --entrypoint sh -v "$PWD/path/to/l2j:/geo" l2aiserver/acis:382 -c \
+  "cd /opt/acis/gameserver && sed -i 's#^GeoDataPath.*#GeoDataPath = /geo/#' config/geoengine.properties \
+   && echo J | java -Xmx1g -cp './libs/*' net.sf.l2j.geodataconverter.GeoDataConverter"
+```
+
+Затем `*.l2d` скопировать в `./geodata/` и перезапустить `game`.
 
 ## Смена ревизии aCis
 
