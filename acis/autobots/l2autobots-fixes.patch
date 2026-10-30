@@ -787,10 +787,10 @@ index 0000000..4c7caff
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
 new file mode 100644
-index 0000000..076dec8
+index 0000000..613b0c2
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,86 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.extensions.location
@@ -856,16 +856,24 @@ index 0000000..076dec8
 +        return spot.monstersFor(bot.level) * exp(-distance(bot.location(), spot.location) / DISTANCE_DECAY) / (1 + crowd)
 +    }
 +
++    private class MonsterSpawn(val x: Int, val y: Int, val z: Int, val level: Int)
++
 +    private fun buildSpots(): List<HuntingSpot> = SpawnTable.getInstance().spawns
 +            .filter { it.template.isType("Monster") }
-+            .groupBy { cellKey(it.locX, it.locY) }
-+            .map { (key, spawns) ->
-+                val centerX = spawns.map { it.locX }.average()
-+                val centerY = spawns.map { it.locY }.average()
-+                // A real spawn point is known to be walkable ground, unlike the bare cell center.
-+                val anchor = spawns.minByOrNull { (it.locX - centerX) * (it.locX - centerX) + (it.locY - centerY) * (it.locY - centerY) }!!
-+                HuntingSpot(key, Location(anchor.locX, anchor.locY, anchor.locZ), spawns.map { it.template.level.toInt() })
++            .mapNotNull { spawn ->
++                // Territory spawns have no fixed location; the monster they placed tells where they are.
++                val loc = spawn.loc ?: spawn.npc?.position ?: return@mapNotNull null
++                MonsterSpawn(loc.x, loc.y, loc.z, spawn.template.level.toInt())
 +            }
++            .groupBy { cellKey(it.x, it.y) }
++            .map { (key, spawns) ->
++                val centerX = spawns.map { it.x }.average()
++                val centerY = spawns.map { it.y }.average()
++                // A real spawn point is known to be walkable ground, unlike the bare cell center.
++                val anchor = spawns.minByOrNull { (it.x - centerX) * (it.x - centerX) + (it.y - centerY) * (it.y - centerY) }!!
++                HuntingSpot(key, Location(anchor.x, anchor.y, anchor.z), spawns.map { it.level })
++            }
++            .also { println("Autobots population: ${it.size} hunting spots.") }
 +
 +    private fun cellKey(x: Int, y: Int): Long = (Math.floorDiv(x, CELL_SIZE).toLong() shl 32) or (Math.floorDiv(y, CELL_SIZE).toLong() and 0xffffffffL)
 +}
