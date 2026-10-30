@@ -75,6 +75,8 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - Every 10 minutes one `Autobots economy summary:` line counts the deals by kind and shows the bots online
     (average and max level, adena, stores, farming, needsGroup). `scripts/economy-report.sh [since]` prints those
     summaries, deal counts with samples, bot errors and the game container's load.
+  - Every bot death prints an `Autobots death:` line (with `economyLog`): the killer, its level and whether it is
+    aggressive, the monsters on the bot, potions left, mode, hunt level, spot, party size, weapon grade, coordinates.
   Professions (`behaviors/classes/`): every Interlude class plays now. Healers (Cleric line, Elven and Shillien
   Oracle line) heal by priority (tank first, group heal when 2+ members are hurt, battle heals below 35%), raise
   the dead, recharge and buff; buffers (Prophet, Warcryer line) keep party buffs and chants up; summoners
