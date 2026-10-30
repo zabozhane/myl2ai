@@ -177,18 +177,21 @@ index d304168..9b31fbb 100644
          }
      }
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-index 5235b11..39b5507 100644
+index 5235b11..8e45935 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-@@ -11,6 +11,7 @@ import dev.l2j.autobots.extensions.useMagicSkill
+@@ -11,8 +11,10 @@ import dev.l2j.autobots.extensions.useMagicSkill
  import dev.l2j.autobots.models.AutobotInfo
  import dev.l2j.autobots.models.BotChat
  import dev.l2j.autobots.models.ChatType
 +import dev.l2j.autobots.population.PopulationManager
  import dev.l2j.autobots.ui.AutobotsUi
  import dev.l2j.autobots.utils.*
++import kotlinx.coroutines.CancellationException
  import kotlinx.coroutines.launch
-@@ -46,6 +47,7 @@ object AutobotsManager {
+ import net.sf.l2j.Config
+ import net.sf.l2j.commons.math.MathUtil
+@@ -46,15 +48,19 @@ object AutobotsManager {
          AutobotsDao.updateAllBotOnlineStatus(false)
          AutobotScheduler
          AutofarmManager
@@ -196,8 +199,12 @@ index 5235b11..39b5507 100644
  
          Klock.start("onUpdate", 1000, AutobotData.settings.iterationDelay, CoScopes.onUpdateScope, action = {
              activeBots.values.forEach {
-@@ -54,7 +56,7 @@ object AutobotsManager {
+                 CoScopes.onUpdateScope.launch {
+                     try {
                          it.onUpdate()
++                    } catch (e: CancellationException) {
++                        // A sequence cancelled on logout or a change of plans: expected, nothing to report.
++                        it.isBusyThinking.set(false)
                      } catch (e: Exception){
                          it.isBusyThinking.set(false)
 -                        println(e)
@@ -205,7 +212,7 @@ index 5235b11..39b5507 100644
                      }
                  }
              }
-@@ -206,8 +208,6 @@ object AutobotsManager {
+@@ -206,8 +212,6 @@ object AutobotsManager {
          PlayerInfoTable.getInstance().addPlayer(autobot.objectId, "Autobot", autobot.name, 0)
          autobot.rewardSkills()
  
@@ -1571,15 +1578,16 @@ index 0000000..244f82c
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
 new file mode 100644
-index 0000000..999c677
+index 0000000..5a98d56
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,180 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.AutobotData
 +import dev.l2j.autobots.extensions.getCombatBehavior
 +import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.enums.items.ArmorType
 +import net.sf.l2j.gameserver.enums.items.CrystalType
 +import net.sf.l2j.gameserver.enums.items.ShotType
 +import net.sf.l2j.gameserver.enums.items.WeaponType
@@ -1681,7 +1689,7 @@ index 0000000..999c677
 +        val candidates = bot.inventory.items.filter { it.isEquipable && !it.isEquipped && (it.isWeapon || it.isArmor) && it.item.crystalType.id <= allowedGrade }
 +        for (item in candidates) {
 +            if (wished.remove(item.itemId) || isUpgrade(bot, item)) {
-+                val previous = bot.inventory.getPaperdollItem(slotOf(item))
++                val previous = bot.inventory.getPaperdollItem(slotOf(bot, item))
 +                equip(bot, item)
 +                if (previous != null && !previous.isEquipped) replaced += previous
 +            }
@@ -1690,14 +1698,30 @@ index 0000000..999c677
 +    }
 +
 +    private fun isUpgrade(bot: Player, item: ItemInstance): Boolean {
-+        // An empty slot is filled only with the kit's own piece, so a mage never puts on heavy armor it found.
-+        val current = bot.inventory.getPaperdollItem(slotOf(item)) ?: return false
++        val current = bot.inventory.getPaperdollItem(slotOf(bot, item)) ?: return fitsEmptySlot(bot, item)
 +        if (current.item.bodyPart != item.item.bodyPart || current.itemType != item.itemType) return false
 +        if (item.isWeapon && item.weaponItem.isMagical != current.weaponItem.isMagical) return false
 +        return item.referencePrice > current.referencePrice * 1.2
 +    }
 +
-+    private fun slotOf(item: ItemInstance): Int = when (item.item.bodyPart) {
++    /**
++     * Any jewel fills an empty slot; armor only of the kind the class wears (a mage never puts on heavy armor), and
++     * never a piece that would take off something else: a shield next to a two-handed weapon, legs under a full body.
++     */
++    private fun fitsEmptySlot(bot: Player, item: ItemInstance): Boolean {
++        if (item.item.type2 == Item.TYPE2_ACCESSORY) return true
++        if (!item.isArmor || item.itemType == (if (bot.isMageClass) ArmorType.HEAVY else ArmorType.MAGIC)) return false
++        val inventory = bot.inventory
++        return when (item.item.bodyPart) {
++            Item.SLOT_L_HAND -> inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND)?.item?.bodyPart != Item.SLOT_LR_HAND
++            Item.SLOT_LEGS -> inventory.getPaperdollItem(Inventory.PAPERDOLL_CHEST)?.item?.bodyPart != Item.SLOT_FULL_ARMOR
++            Item.SLOT_FULL_ARMOR -> inventory.getPaperdollItem(Inventory.PAPERDOLL_LEGS) == null
++            else -> true
++        }
++    }
++
++    /** The paperdoll slot an item goes to; for earrings and rings, the free one of the pair if there is one. */
++    private fun slotOf(bot: Player, item: ItemInstance): Int = when (item.item.bodyPart) {
 +        Item.SLOT_R_HAND, Item.SLOT_LR_HAND -> Inventory.PAPERDOLL_RHAND
 +        Item.SLOT_L_HAND -> Inventory.PAPERDOLL_LHAND
 +        Item.SLOT_HEAD -> Inventory.PAPERDOLL_HEAD
@@ -1706,9 +1730,14 @@ index 0000000..999c677
 +        Item.SLOT_GLOVES -> Inventory.PAPERDOLL_GLOVES
 +        Item.SLOT_FEET -> Inventory.PAPERDOLL_FEET
 +        Item.SLOT_NECK -> Inventory.PAPERDOLL_NECK
-+        Item.SLOT_L_EAR, Item.SLOT_R_EAR, Item.SLOT_LR_EAR -> Inventory.PAPERDOLL_LEAR
-+        Item.SLOT_L_FINGER, Item.SLOT_R_FINGER, Item.SLOT_LR_FINGER -> Inventory.PAPERDOLL_LFINGER
++        Item.SLOT_L_EAR, Item.SLOT_R_EAR, Item.SLOT_LR_EAR -> freeOf(bot, Inventory.PAPERDOLL_LEAR, Inventory.PAPERDOLL_REAR)
++        Item.SLOT_L_FINGER, Item.SLOT_R_FINGER, Item.SLOT_LR_FINGER -> freeOf(bot, Inventory.PAPERDOLL_LFINGER, Inventory.PAPERDOLL_RFINGER)
 +        else -> -1
++    }
++
++    private fun freeOf(bot: Player, left: Int, right: Int): Int {
++        val inventory = bot.inventory
++        return if (inventory.getPaperdollItem(left) != null && inventory.getPaperdollItem(right) == null) right else left
 +    }
 +
 +    fun equip(bot: Player, item: ItemInstance) {
@@ -1717,7 +1746,7 @@ index 0000000..999c677
 +        EconomyLog.log(bot, Deal.Equip, "equipped ${item.itemName}${if (item.enchantLevel > 0) " +${item.enchantLevel}" else ""}")
 +    }
 +
-+    /** Everything the bot does not need and could turn into adena (worthless items like the Tutorial Guide stay). */
++    /** Everything the bot does not need and could turn into adena (worthless items like the Tutorial Guide, worth 1 adena, stay). */
 +    fun surplus(bot: Player): List<ItemInstance> {
 +        val keep = mutableSetOf(57, SCROLL_OF_ESCAPE, shotId(bot))
 +        keep += POTIONS
@@ -1729,13 +1758,13 @@ index 0000000..999c677
 +        keep += AbstractEnchantPacket._scrolls.filter { (_, scroll) -> worn.any { scroll.isValid(it) } }.keys
 +        return bot.inventory.items.filter {
 +            !it.isEquipped && it.itemId !in keep && !it.isQuestItem && !it.isHeroItem && !it.isShadowItem &&
-+                    it.referencePrice > 0 && (it.isSellable || it.isTradable)
++                    it.referencePrice >= 2 && (it.isSellable || it.isTradable)
 +        }
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
 new file mode 100644
-index 0000000..f92f05c
+index 0000000..206f96f
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
 @@ -0,0 +1,190 @@
@@ -1824,7 +1853,7 @@ index 0000000..f92f05c
 +        var total = 0L
 +        val sold = mutableListOf<String>()
 +        for (item in items) {
-+            if (!item.isSellable || item.isEquipped || item.ownerId != bot.objectId) continue
++            if (!item.isSellable || item.isEquipped || item.ownerId != bot.objectId || item.referencePrice < 2) continue
 +            val count = item.count
 +            val price = item.referencePrice / 2L * count
 +            if (bot.inventory.destroyItem("Sell", item.objectId, count, bot, shop.merchant) == null) continue
@@ -2076,10 +2105,10 @@ index 0000000..a47de5d
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 new file mode 100644
-index 0000000..f580457
+index 0000000..296f5e9
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,216 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -2236,13 +2265,16 @@ index 0000000..f580457
 +    }
 +
 +    private suspend fun buySupplies() {
-+        buy(Gear.SCROLL_OF_ESCAPE, target = 2, budgetShare = 0.1, onlyBelow = 1)
++        // Shares of what the bot can spend now: a scroll home comes first, potions are cheap insurance,
++        // and the rest stays for gear.
++        buy(Gear.SCROLL_OF_ESCAPE, target = 2, budgetShare = 1.0, onlyBelow = 1)
 +        if (bot.level >= 20 || Errands.spendable(bot) >= 5000) {
 +            buy(Gear.shotId(bot), target = shotsFor(bot.level), budgetShare = 0.4, onlyBelow = shotsFor(bot.level) / 3)
 +        }
-+        if (Gear.isArcher(bot)) buy(Gear.arrowId(bot), target = 1500, budgetShare = 0.3, onlyBelow = 500)
-+        buy(Gear.HEALING_POTION, target = 10, budgetShare = 0.15, onlyBelow = 3)
-+        if (bot.isMageClass) buy(Gear.MANA_DRUG, target = 10, budgetShare = 0.1, onlyBelow = 3)
++        // A bow without arrows can't hunt at all.
++        if (Gear.isArcher(bot)) buy(Gear.arrowId(bot), target = 1500, budgetShare = 0.6, onlyBelow = 500)
++        buy(Gear.HEALING_POTION, target = 10, budgetShare = 0.5, onlyBelow = 3)
++        if (bot.isMageClass) buy(Gear.MANA_DRUG, target = 10, budgetShare = 0.3, onlyBelow = 3)
 +    }
 +
 +    /** Buys up to [target] pieces when the bot has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */
