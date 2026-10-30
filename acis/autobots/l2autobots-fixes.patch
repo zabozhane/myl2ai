@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index ef03838..32af5f2 100644
+index ef03838..51fbace 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -2,11 +2,36 @@
+@@ -2,11 +2,38 @@
  <settings>
    <thinkIteration>350</thinkIteration>
    <defaultTitle>Welcome to L2</defaultTitle>
@@ -40,6 +40,8 @@ index ef03838..32af5f2 100644
 +  <professionWeightBuffer>100</professionWeightBuffer>
 +  <professionWeightTank>100</professionWeightTank>
 +  <professionWeightSummoner>100</professionWeightSummoner>
++  <!-- Parties: population bots in a party follow the leader, assist the tank, heal, buff and rest together. -->
++  <groupsEnabled>true</groupsEnabled>
  </settings>
 diff --git a/sql/autobots.sql b/sql/autobots.sql
 index b824d98..a8b6830 100644
@@ -59,7 +61,7 @@ index b824d98..a8b6830 100644
  
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
-index d304168..70d55ac 100644
+index d304168..c3fca1d 100644
 --- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 @@ -6,7 +6,6 @@ import dev.l2j.autobots.behaviors.SocialBehavior
@@ -210,19 +212,37 @@ index d304168..70d55ac 100644
              }
          }
      }
+@@ -582,6 +599,15 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+         handler.handleChat(0, this, null, message)
+     }
+ 
++    internal fun partySay(message: String){
++        if (!isInParty) return
++        ChatHandler.getInstance().getHandler(3).handleChat(3, this, null, message)
++    }
++
++    internal fun tell(target: String, message: String){
++        ChatHandler.getInstance().getHandler(2).handleChat(2, this, target, message)
++    }
++
+     internal fun shout(message: String){
+         val handler = ChatHandler.getInstance().getHandler(1)
+         handler.handleChat(0, this, null, message)
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-index 5235b11..39b5507 100644
+index 5235b11..963cbf1 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-@@ -11,6 +11,7 @@ import dev.l2j.autobots.extensions.useMagicSkill
+@@ -11,6 +11,9 @@ import dev.l2j.autobots.extensions.useMagicSkill
  import dev.l2j.autobots.models.AutobotInfo
  import dev.l2j.autobots.models.BotChat
  import dev.l2j.autobots.models.ChatType
 +import dev.l2j.autobots.population.PopulationManager
++import dev.l2j.autobots.population.group.GroupChat
++import dev.l2j.autobots.population.group.PartyInvites
  import dev.l2j.autobots.ui.AutobotsUi
  import dev.l2j.autobots.utils.*
  import kotlinx.coroutines.launch
-@@ -46,6 +47,7 @@ object AutobotsManager {
+@@ -46,6 +49,7 @@ object AutobotsManager {
          AutobotsDao.updateAllBotOnlineStatus(false)
          AutobotScheduler
          AutofarmManager
@@ -230,7 +250,7 @@ index 5235b11..39b5507 100644
  
          Klock.start("onUpdate", 1000, AutobotData.settings.iterationDelay, CoScopes.onUpdateScope, action = {
              activeBots.values.forEach {
-@@ -54,7 +56,7 @@ object AutobotsManager {
+@@ -54,7 +58,7 @@ object AutobotsManager {
                          it.onUpdate()
                      } catch (e: Exception){
                          it.isBusyThinking.set(false)
@@ -239,7 +259,29 @@ index 5235b11..39b5507 100644
                      }
                  }
              }
-@@ -206,8 +208,6 @@ object AutobotsManager {
+@@ -98,6 +102,9 @@ object AutobotsManager {
+                 }
+                 bot.addChat(BotChat(ChatType.PmReceived, chatter.name, text))
+             }
++            3 -> { // party #
++                GroupChat.onPartyChat(chatter, text)
++            }
+             17 -> { // hero chat %
+                 if(!chatter.isHero) return false
+                 activeBots.forEach {
+@@ -109,6 +116,11 @@ object AutobotsManager {
+         return false
+     }
+ 
++    /** Called by RequestJoinParty once a player invited a bot: the bot answers like the client would. */
++    fun onPartyInvite(requestor: Player, target: Player) {
++        if (target is Autobot) PartyInvites.onInvite(requestor, target)
++    }
++
+     fun loadAutobotDashboard(player: Player, autobot: Autobot) {
+         AutobotsUi.loadBotDetails(player, autobot)
+     }
+@@ -206,8 +218,6 @@ object AutobotsManager {
          PlayerInfoTable.getInstance().addPlayer(autobot.objectId, "Autobot", autobot.name, 0)
          autobot.rewardSkills()
  
@@ -280,7 +322,7 @@ index d6c9c8f..06fa0da 100644
                                      AdminActions.despawnAutobot(autobot)
                                  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-index ce85df0..453b9dc 100644
+index ce85df0..365c591 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 @@ -34,14 +34,24 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
@@ -308,7 +350,35 @@ index ce85df0..453b9dc 100644
          targetAppropriateTarget()
          checkSelfSupportingSkills()
          beforeAttack()
-@@ -58,10 +68,11 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -49,6 +59,27 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         afterAttack()
+     }
+     
++    /**
++     * A tick without looking for a fight of its own: a party member waiting for the tank to pull still regenerates,
++     * loots and, for healers, buffers and summoners, supports. Death and raises are handled as in a normal tick.
++     */
++    internal suspend fun idleUpdate() {
++        if(player.isDead) {
++            handleDeath()
++            return
++        }
++        deadSince = 0
++
++        ensureSummonPet()
++        handleShots()
++        if(idleSupport()) return
++        if(rester.onUpdate()) return
++        lootPicker.onUpdate()
++    }
++
++    /** Heals, buffs or servitor care that need no enemy target. @return true if the bot cast something. */
++    internal open suspend fun idleSupport(): Boolean = false
++
+     internal fun isMoving() : Boolean{
+         if(player is Autobot) {
+             player.isInMotion()
+@@ -58,10 +89,11 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
      }
  
      private suspend fun handleDeath() {
@@ -322,7 +392,7 @@ index ce85df0..453b9dc 100644
              delay(3000)
              return
          }
-@@ -110,10 +121,6 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -110,10 +142,6 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
          if(this is Kiter) {
              kite(this.player)
          }
@@ -333,7 +403,7 @@ index ce85df0..453b9dc 100644
      }
      
      protected open suspend fun afterAttack(){}
-@@ -287,7 +294,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -287,7 +315,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
          val targets: MutableList<Creature> = when(targetingPreference) {
              TargetingPreference.Random -> player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) }.toMutableList()
              TargetingPreference.Closest -> {
@@ -342,7 +412,7 @@ index ce85df0..453b9dc 100644
                  if(target != null) mutableListOf(target) else mutableListOf()
              }
          }
-@@ -334,19 +341,15 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -334,19 +362,15 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
                  (it is Player && it.clan != null && player.clan != null && player.clanId == it.clanId)
      }
  
@@ -369,7 +439,7 @@ index ce85df0..453b9dc 100644
              player.rechargeShots(true, true)
          }
      }
-@@ -355,7 +358,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -355,7 +379,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
              Consumable(1540) { autobot -> autobot.getCombatBehavior().combatPreferences.useQuickHealingPots &&  autobot.getHealthPercentage() < 30 },
              Consumable(728) { autobot -> autobot.getCombatBehavior().combatPreferences.useManaPots && autobot !is SecretManaRegen &&  autobot.getManaPercentage() < 60 },
              Consumable(1539) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterHealingPots &&  autobot.getHealthPercentage() < 80 && !autobot.hasEffect(2037) },
@@ -381,7 +451,7 @@ index ce85df0..453b9dc 100644
      )
  
      internal fun validateConditionalSkill(skill: L2Skill) =
-@@ -374,4 +380,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -374,4 +401,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
      init {
          player.setIsRunning(true)
      }
@@ -621,10 +691,10 @@ index 2402cc2..4fe7dcf 100644
  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/SummonerBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/SummonerBehavior.kt
 new file mode 100644
-index 0000000..52830b3
+index 0000000..a7fc563
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/SummonerBehavior.kt
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,92 @@
 +package dev.l2j.autobots.behaviors.classes
 +
 +import dev.l2j.autobots.behaviors.CombatBehavior
@@ -667,6 +737,8 @@ index 0000000..52830b3
 +
 +    override val getSelfSupportSkills: List<BotSkill> = listOf(
 +            BotSkill(TRANSFER_PAIN) { bot, _, _ -> bot.hasServitor() && !bot.hasEffect(TRANSFER_PAIN) })
++
++    override suspend fun idleSupport(): Boolean = supportServitor()
 +
 +    override suspend fun attack() {
 +        if (supportServitor()) return
@@ -717,10 +789,10 @@ index 0000000..52830b3
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt
 new file mode 100644
-index 0000000..b12b246
+index 0000000..d3ba0c8
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,186 @@
 +package dev.l2j.autobots.behaviors.classes.support
 +
 +import dev.l2j.autobots.behaviors.CombatBehavior
@@ -776,6 +848,8 @@ index 0000000..b12b246
 +        supported = support()
 +        if (!supported) super.targetAppropriateTarget()
 +    }
++
++    override suspend fun idleSupport(): Boolean = !player.isCastingNow && !player.isAllSkillsDisabled && support()
 +
 +    override suspend fun attack() {
 +        if (supported) return
@@ -1163,10 +1237,10 @@ index 0000000..afc1459
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index 323190c..781ea36 100644
+index 323190c..6da9e18 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -24,7 +24,24 @@ internal data class AutobotSettings(
+@@ -24,7 +24,25 @@ internal data class AutobotSettings(
          @JsonProperty("useManaPots") var useManaPots: Boolean = true,
          @JsonProperty("useQuickHealingPots") var useQuickHealingPots: Boolean = false,
          @JsonProperty("useGreaterHealingPots") var useGreaterHealingPots: Boolean = true,
@@ -1188,7 +1262,8 @@ index 323190c..781ea36 100644
 +        @JsonProperty("professionWeightHealer") var professionWeightHealer: Int = 100,
 +        @JsonProperty("professionWeightBuffer") var professionWeightBuffer: Int = 100,
 +        @JsonProperty("professionWeightTank") var professionWeightTank: Int = 100,
-+        @JsonProperty("professionWeightSummoner") var professionWeightSummoner: Int = 100
++        @JsonProperty("professionWeightSummoner") var professionWeightSummoner: Int = 100,
++        @JsonProperty("groupsEnabled") var groupsEnabled: Boolean = true
  ){
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
          setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
@@ -1517,10 +1592,10 @@ index 0000000..d64fe1a
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 new file mode 100644
-index 0000000..49fc482
+index 0000000..0319d03
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,299 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.AutobotData
@@ -1533,6 +1608,8 @@ index 0000000..49fc482
 +import dev.l2j.autobots.population.economy.GoToTownSequence
 +import dev.l2j.autobots.population.economy.StoreKeeper
 +import dev.l2j.autobots.population.economy.TownTrip
++import dev.l2j.autobots.population.group.PartyBehavior
++import dev.l2j.autobots.population.group.PartyPlan
 +import dev.l2j.autobots.utils.distance
 +import net.sf.l2j.commons.random.Rnd
 +import net.sf.l2j.gameserver.data.xml.TeleportLocationData
@@ -1560,6 +1637,9 @@ index 0000000..49fc482
 +
 +    private val economy get() = AutobotData.settings.economyEnabled
 +    private val fitness = Fitness(bot)
++    private val party = PartyBehavior(bot)
++    // A party member's own trip to town: the party goes on hunting meanwhile.
++    private var partyErrand = false
 +
 +    // An AFK session becomes a trading one when the bot has something to sell or buy; decided on the first update,
 +    // once the inventory is loaded.
@@ -1582,6 +1662,7 @@ index 0000000..49fc482
 +
 +    suspend fun onUpdate() {
 +        if (bot.isInStoreMode) return
++        if (AutobotData.settings.groupsEnabled && bot.isInParty && updateInParty()) return
 +        if (bot.isDead || bot.isUnderAttack()) {
 +            bot.combatBehavior.onUpdate()
 +            return
@@ -1594,6 +1675,29 @@ index 0000000..49fc482
 +            Activity.Hunt -> hunt()
 +            Activity.Trade -> trade()
 +        }
++    }
++
++    /**
++     * A party member follows and assists; a short trip to town for its own errands is the exception, the party
++     * does not wait. A bot leading the party lives its normal life, only its spot is chosen for the party.
++     * @return true when the tick was handled.
++     */
++    private suspend fun updateInParty(): Boolean {
++        if (bot.party?.leader === bot) return party.onUpdate()
++        if (!partyErrand && !bot.isDead && economy && System.currentTimeMillis() - townTravelFailedAt > TOWN_RETRY_MS &&
++                !bot.isInsideZone(ZoneId.TOWN) && Errands.shouldLeaveSpot(bot, lastTripAt)) {
++            partyErrand = true
++            bot.partySay(listOf("brb town", "need to go to town, brb", "gonna sell stuff, back soon", "bag full, brb").random())
++        }
++        if (!partyErrand || bot.isDead) return party.onUpdate()
++
++        if (!bot.isInsideZone(ZoneId.TOWN)) {
++            if (!goToTown()) partyErrand = false
++            return true
++        }
++        if (!tripDoneInTown) visitShops()
++        partyErrand = false
++        return true
 +    }
 +
 +    /** True while the bot hunts easier monsters because it dies too often or is undergeared. */
@@ -1715,7 +1819,13 @@ index 0000000..49fc482
 +    private fun currentSpot(): HuntingSpot? {
 +        if (fitness.update()) dropSpot()
 +
-+        val level = fitness.huntLevel()
++        val group = bot.party?.takeIf { it.leader === bot && AutobotData.settings.groupsEnabled }
++        if (group != null && PartyPlan.state(group).newSpotRequested) {
++            PartyPlan.state(group).newSpotRequested = false
++            spot?.let { badSpots.add(it.key) }
++            dropSpot()
++        }
++        val level = if (group != null) PartyPlan.huntLevel(group) else fitness.huntLevel()
 +        val current = spot
 +        if (current != null && (level == spotLevel || HuntingSpots.isSuitable(current, level))) {
 +            spotLevel = level
@@ -2931,6 +3041,433 @@ index 0000000..5e4a893
 +            else -> 1500
 +        }
 +    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
+new file mode 100644
+index 0000000..136e6b6
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
+@@ -0,0 +1,128 @@
++package dev.l2j.autobots.population.group
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.CoScopes
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.group.Party
++import java.util.Collections
++import java.util.WeakHashMap
++
++/**
++ * What a player says in party chat, taken as a teammate's suggestion and never as an order. The bots weigh it
++ * against the party's state and answer, agreeing or explaining why not. Keyword matching in Russian and English
++ * for now; this is the single entry the LLM of stage 5 will take over.
++ */
++internal object GroupChat {
++
++    enum class Intent(val pattern: Regex) {
++        AssistMe(Regex("(асс?ист|assist|бейте|бей|bei).{0,12}(меня|мою|мой|me\\b|my)", RegexOption.IGNORE_CASE)),
++        Rest(Regex("(отд(ох|ых)|передохн|сид(им|ите)|\\bmed\\b|\\brest\\b|мп\\b|\\bmp\\b|ман(ы|а) нет|no mana)", RegexOption.IGNORE_CASE)),
++        Buff(Regex("(баф|buff|\\bbb\\b)", RegexOption.IGNORE_CASE)),
++        NewSpot(Regex("(пойд[её]м|го в|go to|сменим|другое место|тут скучно|move spot|change spot|другой спот)", RegexOption.IGNORE_CASE)),
++        Brb(Regex("(брб|\\bbrb\\b|в город|\\bafk\\b|афк|щас вернусь)", RegexOption.IGNORE_CASE)),
++        Leaving(Regex("(я уш[её]л|ухожу|всем пока|\\bgtg\\b|\\bbye\\b|спс за пати|ty for party|всё,? я)", RegexOption.IGNORE_CASE));
++    }
++
++    /** Things a bot says, in both languages; the bot answers in the language it was spoken to in. */
++    enum class Line(val ru: List<String>, val en: List<String>) {
++        Ok(listOf("ок", "давай", "го", "ага"), listOf("ok", "sure", "k", "np")),
++        AssistTank(listOf("давай на танка, так надёжнее", "не, ассист на танка лучше", "лучше по танку бить"), listOf("better assist the tank", "nah, assist tank is safer")),
++        Resting(listOf("ок, сидим", "сели", "давай, мп добрать"), listOf("ok, resting", "sit", "k, med")),
++        NoNeedRest(listOf("да вроде все полные", "не, норм, бьём дальше"), listOf("everyone is full", "nah we're fine, keep going")),
++        BuffSoon(listOf("ща бафну", "ок, бафаю"), listOf("buffing", "ok, sec")),
++        BuffLasts(listOf("баф ещё %d мин", "ещё %d мин висит"), listOf("buff still %d min", "%d min left on buffs")),
++        NewSpotOk(listOf("ок, ищем другое место", "давай, тут правда пусто"), listOf("ok, lets move", "sure, moving")),
++        NewSpotNo(listOf("тут норм, давай ещё посидим", "не, тут хорошо идёт"), listOf("its good here, lets stay a bit", "nah, good exp here")),
++        Wait(listOf("ок, ждём", "давай, мы тут"), listOf("ok, we wait", "k, we're here")),
++        Thanks(listOf("спс за пати", "пока, спс", "удачи"), listOf("ty for party", "bye, ty", "gl")),
++        Busy(listOf("сорри, я торгую", "занят щас"), listOf("sorry, busy", "trading now, sorry")),
++        NoPk(listOf("с пк не пойду", "не, ты красный"), listOf("no pk, sorry", "you're red, no")),
++        TooHigh(listOf("ты для меня высоковат", "у вас уровень высокий, я там умру"), listOf("too high for me", "your lvl is too high for me")),
++        TooLow(listOf("сорри, ты для нас низковат", "маловат уровень"), listOf("sorry, too low for us", "lvl too low")),
++        NotNow(listOf("не, я соло", "сорри, не сейчас", "спс, но я сам"), listOf("no thanks, solo", "sorry, not now", "thx but no"));
++    }
++
++    private val RUSSIAN = Regex("[а-яА-ЯёЁ]")
++    private const val REPLY_MIN_MS = 1000L
++    private const val REPLY_MAX_MS = 4000L
++    private const val BUFF_ENOUGH_SECONDS = 600
++
++    fun isRussian(text: String) = RUSSIAN.containsMatchIn(text)
++
++    /** A player's language, guessed from the last thing they said to a bot; English until then. */
++    private val playerLanguage = Collections.synchronizedMap(WeakHashMap<Player, Boolean>())
++
++    fun isRussian(player: Player) = playerLanguage[player] ?: false
++
++    fun line(line: Line, russian: Boolean): String = (if (russian) line.ru else line.en).random()
++
++    fun onPartyChat(chatter: Player, text: String) {
++        if (chatter is Autobot) return
++        val party = chatter.party ?: return
++        val bots = party.members.filterIsInstance<Autobot>().filter { it.life != null && !it.isDead }
++        if (bots.isEmpty()) return
++
++        val russian = isRussian(text)
++        playerLanguage[chatter] = russian
++        val intent = Intent.values().firstOrNull { it.pattern.containsMatchIn(text) } ?: return
++        // One voice answers: the bot leading the party, else any bot in it.
++        val speaker = (party.leader as? Autobot)?.takeIf { it in bots } ?: bots.random()
++
++        val reply = react(intent, chatter, party, bots) ?: return
++        CoScopes.generalScope.launch {
++            delay(Rnd.get(REPLY_MIN_MS, REPLY_MAX_MS))
++            val (answer, arg) = reply
++            speaker.partySay(line(answer, russian).let { if (arg != null) it.format(arg) else it })
++        }
++    }
++
++    /** Weighs the suggestion and changes the party plan when the party agrees. @return the answer and its argument. */
++    private fun react(intent: Intent, chatter: Player, party: Party, bots: List<Autobot>): Pair<Line, Int?>? = when (intent) {
++        Intent.AssistMe -> {
++            val worthIt = Role.of(chatter.classId) == Role.Tank || party.leader === chatter ||
++                    party.members.none { Role.of(it.classId) == Role.Tank }
++            if (worthIt) {
++                PartyPlan.state(party).assist = chatter
++                Line.Ok to null
++            } else Line.AssistTank to null
++        }
++        Intent.Rest -> {
++            val needed = party.members.any { it.currentMp < it.maxMp * 0.5 || it.currentHp < it.maxHp * 0.5 }
++            if (needed) {
++                PartyPlan.state(party).restUntilFull = true
++                Line.Resting to null
++            } else Line.NoNeedRest to null
++        }
++        Intent.Buff -> {
++            val buffers = bots.filter { Role.of(it.classId) == Role.Buffer || Role.of(it.classId) == Role.Healer }
++            if (buffers.isEmpty()) null
++            else {
++                val left = chatter.allEffects.filter { it.skill.isActive && it.period > 60 }.minOfOrNull { it.period - it.time }
++                if (left != null && left > BUFF_ENOUGH_SECONDS) Line.BuffLasts to left / 60 else Line.BuffSoon to null
++            }
++        }
++        Intent.NewSpot -> {
++            // The party agrees when most of it is bored: few kills lately, nobody hurt.
++            val agree = party.leader is Autobot && Rnd.get(100) < 60
++            if (agree) {
++                PartyPlan.state(party).newSpotRequested = true
++                Line.NewSpotOk to null
++            } else Line.NewSpotNo to null
++        }
++        Intent.Brb -> Line.Wait to null
++        Intent.Leaving -> Line.Thanks to null
++    }
++}
++
++/** What a party decides together: shared by its bots, dropped with the party. */
++internal class PartyState {
++    /** A member the others agreed to assist instead of the tank. */
++    var assist: Player? = null
++    /** Someone asked to rest: the leader sits until everybody is full. */
++    var restUntilFull = false
++    /** Someone asked to move on: the leading bot picks another spot. */
++    var newSpotRequested = false
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+new file mode 100644
+index 0000000..256b994
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+@@ -0,0 +1,201 @@
++package dev.l2j.autobots.population.group
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.behaviors.sequences.TravelByGatekeeperSequence
++import dev.l2j.autobots.behaviors.sequences.WalkToSequence
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.population.economy.GoToTownSequence
++import dev.l2j.autobots.population.isUnderAttack
++import dev.l2j.autobots.utils.distance
++import dev.l2j.autobots.utils.getHealthPercentage
++import dev.l2j.autobots.utils.getManaPercentage
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.xml.TeleportLocationData
++import net.sf.l2j.gameserver.enums.IntentionType
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.actor.Creature
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
++import net.sf.l2j.gameserver.model.group.Party
++import net.sf.l2j.gameserver.model.location.Location
++
++/**
++ * A population bot in a party. Members follow the leader and assist the tank (or the leader without a tank): they
++ * hit what it hits and never pull monsters themselves. Healers, buffers and summoners support between fights.
++ * A bot leading the party hunts as usual (its spot fits the party, see [huntLevel]) and stops for the party to rest.
++ * A player leading the party is followed the same way; nothing a player does is an order, see the group chat.
++ */
++internal class PartyBehavior(private val bot: Autobot) {
++
++    private var lastGreetedParty: Party? = null
++    private var travelFailedAt = 0L
++
++    /** @return true when the party took care of this tick; false leaves it to the solo life (town errands, leading). */
++    suspend fun onUpdate(): Boolean {
++        val party = bot.party ?: return false
++        greet(party)
++
++        if (bot.isDead) {
++            bot.combatBehavior.onUpdate()
++            return true
++        }
++
++        val leader = party.leader ?: return false
++        if (leader === bot) return lead(party)
++
++        if (followFar(leader)) return true
++
++        val target = assistTarget(party, leader)
++        if (target != null) {
++            if (bot.isSitting) bot.standUp()
++            if (bot.target !== target) {
++                bot.target = target
++                bot.combatBehavior.committedTarget = target
++            }
++            bot.combatBehavior.onUpdate()
++            return true
++        }
++
++        if (bot.isUnderAttack()) {
++            bot.combatBehavior.onUpdate()
++            return true
++        }
++
++        if (leader.isSitting && !bot.isMoving) {
++            bot.combatBehavior.idleUpdate()
++            if (!bot.isSitting && !bot.isCastingNow) bot.sitDown()
++            return true
++        }
++
++        if (stayClose(leader)) return true
++        bot.combatBehavior.idleUpdate()
++        return true
++    }
++
++    private fun greet(party: Party) {
++        if (lastGreetedParty === party) return
++        lastGreetedParty = party
++        if (Rnd.get(100) < GREET_PERCENT) bot.partySay(listOf("hi", "hey all", "hello", "o/", "hi guys").random())
++    }
++
++    /** The leader hunts on its own terms; it only holds the party back while the healer drinks mana or someone heals up. */
++    private suspend fun lead(party: Party): Boolean {
++        if (bot.isUnderAttack()) return false
++        val tired = party.members.filter { it !== bot && distance(bot, it) < PartyPlan.RANGE }.any { member ->
++            (Role.of(member.classId) == Role.Healer && member.getManaPercentage() < REST_HEALER_MP) || member.getHealthPercentage() < REST_MEMBER_HP
++        }
++        val rested = party.members.all { it.getManaPercentage() >= RESTED_PERCENT || Role.of(it.classId) != Role.Healer } &&
++                party.members.all { it.getHealthPercentage() >= RESTED_PERCENT }
++
++        val state = PartyPlan.state(party)
++        val full = party.members.all { it.getManaPercentage() >= FULL_PERCENT && it.getHealthPercentage() >= FULL_PERCENT }
++        if (bot.isSitting) {
++            if (if (state.restUntilFull) full else rested) {
++                state.restUntilFull = false
++                bot.standUp()
++            }
++            return true
++        }
++        if ((tired || state.restUntilFull) && !hasLiveTarget()) {
++            if (Rnd.get(100) < REST_SAY_PERCENT) bot.partySay(listOf("rest", "sit for mp", "lets rest a bit", "med").random())
++            bot.sitDown()
++            return true
++        }
++        return false
++    }
++
++    /** What the party is fighting: the tank's target, else the leader's, else a monster busy with any member. */
++    private fun assistTarget(party: Party, leader: Player): Creature? {
++        val near = party.members.filter { it !== bot && !it.isDead && distance(bot, it) < PartyPlan.RANGE }
++        val agreed = PartyPlan.state(party).assist?.takeIf { it in near }
++        val tank = near.firstOrNull { Role.of(it.classId) == Role.Tank }
++        listOfNotNull(agreed, tank, leader).forEach { ally ->
++            val target = ally.target as? Monster
++            if (target != null && !target.isDead && (ally.isInCombat || target.target === ally)) return target
++        }
++        return bot.getKnownTypeInRadius(Monster::class.java, PartyPlan.RANGE).firstOrNull { monster ->
++            !monster.isDead && near.any { monster.target === it }
++        }
++    }
++
++    /** Far away (another region, a teleport ago): town by scroll, then the gatekeeper closest to the leader, then on foot. */
++    private suspend fun followFar(leader: Player): Boolean {
++        val gap = distance(bot, leader)
++        if (gap <= FAR) return false
++        if (System.currentTimeMillis() - travelFailedAt < TRAVEL_RETRY_MS) return false
++        if (bot.isSitting) bot.standUp()
++
++        val inTown = bot.isInsideZone(ZoneId.TOWN)
++        var failed = false
++        when {
++            inTown && !leader.isInsideZone(ZoneId.TOWN) -> {
++                val exit = TeleportLocationData.getInstance().allTeleportLocations.filter { !it.isNoble }.minByOrNull { distance(it, leader.location()) }
++                if (exit != null && distance(bot.location(), leader.location()) - distance(exit, leader.location()) > MIN_WALK_SAVED_BY_TELEPORT) {
++                    TravelByGatekeeperSequence(bot, exit) { failed = true }.execute()
++                } else {
++                    WalkToSequence(bot, leader.location(), FOLLOW_DISTANCE) { failed = true }.execute()
++                }
++            }
++            gap > SCROLL_DISTANCE && !inTown -> GoToTownSequence(bot) { failed = true }.execute()
++            else -> WalkToSequence(bot, leader.location(), FOLLOW_DISTANCE) { failed = true }.execute()
++        }
++        if (failed) travelFailedAt = System.currentTimeMillis()
++        return !failed
++    }
++
++    /** Keeps within a few steps of the leader; casters stay a bit further back. */
++    private fun stayClose(leader: Player): Boolean {
++        val keep = if (bot.isMageClass) FOLLOW_DISTANCE_CASTER else FOLLOW_DISTANCE
++        if (distance(bot, leader) <= keep) return false
++        if (bot.isSitting) bot.standUp()
++        val angle = Math.toRadians(Rnd.get(360).toDouble())
++        val offset = Rnd.get(80, keep / 2)
++        val spot = Location(leader.x + (offset * Math.cos(angle)).toInt(), leader.y + (offset * Math.sin(angle)).toInt(), leader.z)
++        bot.ai.setIntention(IntentionType.MOVE_TO, spot)
++        return true
++    }
++
++    private fun hasLiveTarget() = (bot.target as? Creature)?.let { !it.isDead && it !== bot } ?: false
++
++    companion object {
++        private const val FOLLOW_DISTANCE = 300
++        private const val FOLLOW_DISTANCE_CASTER = 500
++        private const val FAR = 2500
++        private const val SCROLL_DISTANCE = 15000
++        private const val MIN_WALK_SAVED_BY_TELEPORT = 8000
++        private const val TRAVEL_RETRY_MS = 60_000L
++        private const val REST_HEALER_MP = 30.0
++        private const val REST_MEMBER_HP = 50.0
++        private const val RESTED_PERCENT = 80.0
++        private const val FULL_PERCENT = 95.0
++        private const val GREET_PERCENT = 70
++        private const val REST_SAY_PERCENT = 30
++    }
++}
++
++/** What a party decides together. For now: the level of monsters it can take. */
++internal object PartyPlan {
++    /** Members further than this don't share experience (`PartyRange` in players.properties). */
++    const val RANGE = 1500
++
++    private val states = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Party, PartyState>())
++
++    fun state(party: Party): PartyState = states.getOrPut(party) { PartyState() }
++
++    /**
++     * The level a bot-led party hunts at: the average level, a bit higher when the party is big enough and has a
++     * healer, a bit lower without one. A party should beat what its members can solo.
++     */
++    fun huntLevel(party: Party): Int {
++        val members = party.members
++        val average = members.sumOf { it.level } / members.size
++        val hasHealer = members.any { Role.of(it.classId) == Role.Healer }
++        val bonus = when {
++            hasHealer && members.size >= 4 -> 3
++            hasHealer && members.size >= 2 -> 2
++            members.size >= 3 -> 1
++            else -> 0
++        }
++        return (average + bonus).coerceAtLeast(1)
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
+new file mode 100644
+index 0000000..affb587
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
+@@ -0,0 +1,80 @@
++package dev.l2j.autobots.population.group
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.CoScopes
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.group.Party
++import net.sf.l2j.gameserver.network.serverpackets.JoinParty
++
++/** How much a bot likes playing with others; fixed per bot, like the enchanting temper. */
++internal enum class Sociability(val acceptPercent: Int) {
++    Loner(30), Regular(70), TeamPlayer(95);
++
++    companion object {
++        fun of(bot: Player): Sociability {
++            val roll = Math.floorMod(bot.objectId * 31337 + 17, 100)
++            return when {
++                roll < 25 -> Loner
++                roll < 70 -> Regular
++                else -> TeamPlayer
++            }
++        }
++    }
++}
++
++/**
++ * Party invitations to population bots. The client's AskJoinParty window never reaches a bot, so the core calls
++ * [onInvite] after a `/invite` and the bot answers a few seconds later through the same steps as
++ * `RequestAnswerJoinParty`. It decides like a player would: busy, wrong level, a PK, or just not in the mood.
++ */
++internal object PartyInvites {
++    private const val MAX_LEVEL_GAP = 8
++    private const val ANSWER_MIN_MS = 2000L
++    private const val ANSWER_MAX_MS = 6000L
++    private const val EXPLAIN_REFUSAL_PERCENT = 60
++
++    fun onInvite(requestor: Player, bot: Autobot) {
++        if (bot.life == null || !bot.isOnline) return
++        val (accept, reason) = decide(bot, requestor)
++        CoScopes.generalScope.launch {
++            delay(Rnd.get(ANSWER_MIN_MS, ANSWER_MAX_MS))
++            if (bot.activeRequester !== requestor) return@launch
++            answer(bot, requestor, accept)
++            if (!accept && reason != null && Rnd.get(100) < EXPLAIN_REFUSAL_PERCENT) {
++                bot.tell(requestor.name, GroupChat.line(reason, GroupChat.isRussian(requestor)))
++            }
++        }
++    }
++
++    /** Why a bot would turn the invite down, or null to accept. */
++    fun decide(bot: Autobot, requestor: Player): Pair<Boolean, GroupChat.Line?> {
++        if (!groupsEnabled()) return false to null
++        if (bot.isInStoreMode || bot.isDead) return false to GroupChat.Line.Busy
++        if (requestor.karma > 0) return false to GroupChat.Line.NoPk
++
++        val partyLevel = requestor.party?.let { p -> p.members.sumOf { it.level } / p.members.size } ?: requestor.level
++        if (partyLevel - bot.level > MAX_LEVEL_GAP) return false to GroupChat.Line.TooHigh
++        if (bot.level - partyLevel > MAX_LEVEL_GAP) return false to GroupChat.Line.TooLow
++
++        val eager = bot.needsGroup || Role.of(bot.classId) == Role.Healer
++        val chance = if (eager) 98 else Sociability.of(bot).acceptPercent
++        return if (Rnd.get(100) < chance) true to null else false to GroupChat.Line.NotNow
++    }
++
++    /** The bot's answer, the same steps as RequestAnswerJoinParty (party matching rooms aside). */
++    fun answer(bot: Player, requestor: Player, accept: Boolean) {
++        requestor.sendPacket(JoinParty(if (accept) 1 else 0))
++        var party: Party? = requestor.party
++        if (accept && !bot.isInParty) {
++            if (party == null) party = Party(requestor, bot, requestor.lootRule) else party.addPartyMember(bot)
++        }
++        party?.setPendingInvitation(false)
++        bot.activeRequester = null
++        requestor.onTransactionResponse()
++    }
++
++    private fun groupsEnabled() = dev.l2j.autobots.AutobotData.settings.groupsEnabled
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Role.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Role.kt
 new file mode 100644
