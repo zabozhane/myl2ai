@@ -12,7 +12,8 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - `AdminAutobots` registered in `AdminCommandHandler`, `admin_a` (access level 7) in `adminCommands.xml`.
   - Redone hunks: IdFactory (items cleanup keeps autobot items), Player (import), Say2 (`onChat` hook).
   - `RequestBypassToServer`: null check moved before `player.isGM()` (upstream could NPE).
-- `l2autobots-kotlin-1.9.patch` - source fixes for Kotlin 1.9 (exhaustive `when`, lambda labels).
+- `l2autobots-fixes.patch` - upstream fixes: Kotlin 1.9 compatibility (exhaustive `when`, lambda labels) and
+  `sql/autobots.sql`, whose table options were a separate statement after `);` (MariaDB syntax error).
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 

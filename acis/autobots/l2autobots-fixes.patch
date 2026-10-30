@@ -1,3 +1,20 @@
+diff --git a/sql/autobots.sql b/sql/autobots.sql
+index b824d98..a8b6830 100644
+--- a/sql/autobots.sql
++++ b/sql/autobots.sql
+@@ -59,10 +59,8 @@ CREATE TABLE IF NOT EXISTS autobots (
+   `social_prefs` LONGTEXT NULL DEFAULT NULL CHECK (json_valid(`social_prefs`)),
+   PRIMARY KEY (obj_Id),
+   KEY `clanid` (`clanid`)
+-);
+-
++)
+ COLLATE='utf8_general_ci'
+-ENGINE=InnoDB
+-;
++ENGINE=InnoDB;
+ 
+ 
 diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 index d304168..442015e 100644
 --- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
