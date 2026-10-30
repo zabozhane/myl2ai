@@ -1,3 +1,25 @@
+diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java work/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java
+@@ -13,6 +13,7 @@
+ import net.sf.l2j.commons.mmocore.SelectorThread;
+ import net.sf.l2j.commons.util.SysUtil;
+ 
++import dev.l2j.autobots.AutobotsManager;
+ import net.sf.l2j.Config;
+ import net.sf.l2j.L2DatabaseFactory;
+ import net.sf.l2j.gameserver.communitybbs.Manager.ForumsBBSManager;
+@@ -276,6 +277,10 @@
+ 		LOGGER.info("Loaded {} skill handlers.", SkillHandler.getInstance().size());
+ 		LOGGER.info("Loaded {} user command handlers.", UserCommandHandler.getInstance().size());
+ 		
++		StringUtil.printSection("Autobots");
++		// Starts the think loop of spawned bots; without it bots are spawned but never act.
++		AutobotsManager.INSTANCE.start();
++		
+ 		StringUtil.printSection("System");
+ 		Runtime.getRuntime().addShutdownHook(Shutdown.getInstance());
+ 		ForumsBBSManager.getInstance();
 diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/data/xml/TeleportLocationData.java work/aCis_gameserver/java/net/sf/l2j/gameserver/data/xml/TeleportLocationData.java
 --- a/aCis_gameserver/java/net/sf/l2j/gameserver/data/xml/TeleportLocationData.java
 +++ b/aCis_gameserver/java/net/sf/l2j/gameserver/data/xml/TeleportLocationData.java

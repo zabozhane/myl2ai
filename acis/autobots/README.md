@@ -10,6 +10,7 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - `Player`, `GameClient` not final, `Player` constructor protected: `Autobot` and `AutobotClient` extend them.
   - `Player.checkDoCastConditions` public, `Clan.getClanMembers()`: called from bot behaviors and the DAO.
   - `AdminAutobots` registered in `AdminCommandHandler`, `admin_a` (access level 7) in `adminCommands.xml`.
+  - `AutobotsManager.start()` called from `GameServer`: it starts the bots' think loop.
   - Redone hunks: IdFactory (items cleanup keeps autobot items), Player (import), Say2 (`onChat` hook).
   - `RequestBypassToServer`: null check moved before `player.isGM()` (upstream could NPE).
 - `l2autobots-fixes.patch` - upstream fixes: Kotlin 1.9 compatibility (exhaustive `when`, lambda labels) and
