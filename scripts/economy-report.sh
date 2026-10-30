@@ -14,7 +14,7 @@ echo
 echo "== Deals in the last $since =="
 deals="$(grep -o 'Autobots economy: .*' <<<"$log" || true)"
 for kind in "from NPC" "sold to NPC" "from store of" "to store of" "equipped" "enchanted" "failed" \
-            "opened sell store" "opened buy store" "mode " "skipped"; do
+            "opened sell store" "opened buy store" "mode " "newbie buffs" "skipped"; do
   matches="$(grep -F -- "$kind" <<<"$deals" || true)"
   count="$(grep -c . <<<"$matches" || true)"
   printf '%-18s %s\n' "$kind" "$count"

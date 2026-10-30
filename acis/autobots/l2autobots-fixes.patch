@@ -2993,10 +2993,10 @@ index 0000000..eabb9c1
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 new file mode 100644
-index 0000000..538f966
+index 0000000..95c8a2c
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,294 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -3016,6 +3016,14 @@ index 0000000..538f966
 +import net.sf.l2j.gameserver.model.actor.Npc
 +import net.sf.l2j.gameserver.model.actor.Player
 +import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++import dev.l2j.autobots.extensions.moveTo
++import dev.l2j.autobots.AutobotData
++import kotlin.math.sin
++import kotlin.math.cos
++import kotlin.math.abs
++import java.util.concurrent.ConcurrentHashMap
++import net.sf.l2j.gameserver.model.location.Location
++import net.sf.l2j.gameserver.geoengine.GeoEngine
 +
 +/** When a bot should leave its hunting spot for town, and what it can afford there. */
 +internal object Errands {
@@ -3115,6 +3123,7 @@ index 0000000..538f966
 +        val guide = Market.newbieGuideNear(bot) ?: return
 +        if (!walkTo(guide, "for newbie buffs")) return
 +        guide.onBypassFeedback(bot, "SupportMagic")
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): got newbie buffs from ${guide.name}")
 +        delay(Rnd.get(1000, 3000).toLong())
 +    }
 +
@@ -3208,15 +3217,17 @@ index 0000000..538f966
 +    }
 +
 +    /**
-+     * Walks up to an NPC or a store and pauses like a player reading the window. The last steps are a click on the
-+     * target, as a player would do: the server's own approach with pathfinding gets around counters, stairs and doors
-+     * that straight walking legs bump into.
++     * Walks up to an NPC or a store and pauses like a player reading the window. An NPC is approached at a standing
++     * point next to it (see [Approach]): several grocers stand on geodata cells no path leads to, behind a counter or
++     * under a roof, so walking to their exact point never arrives. The last steps are a click on the target, the
++     * server's own approach with pathfinding.
 +     */
 +    private suspend fun walkTo(target: Creature, purpose: String = ""): Boolean {
 +        if (bot.isDead) return false
-+        if (!inReach(target)) WalkToSequence(bot, target.location(), APPROACH_RADIUS) {}.definition()
++        val spot = if (target is Npc) Approach.pointNear(bot, target) else null
++        if (!inReach(target)) WalkToSequence(bot, spot ?: target.location(), if (spot != null) SPOT_ARRIVAL_RADIUS else APPROACH_RADIUS) {}.definition()
 +        if (!inReach(target) && !bot.isDead) {
-+            bot.ai.setIntention(IntentionType.INTERACT, target)
++            if (spot != null) bot.moveTo(spot.x, spot.y, spot.z) else bot.ai.setIntention(IntentionType.INTERACT, target)
 +            for (second in 1..FINAL_APPROACH_SECONDS) {
 +                delay(1000)
 +                if (inReach(target) || bot.isDead) break
@@ -3224,7 +3235,7 @@ index 0000000..538f966
 +        }
 +        if (!inReach(target)) {
 +            EconomyLog.skip(bot, "couldn't reach ${target.name} $purpose (${distance(bot, target).toInt()} away, " +
-+                    "dz ${target.z - bot.z}, bot at ${bot.x},${bot.y},${bot.z})")
++                    "dz ${target.z - bot.z}, bot at ${bot.x},${bot.y},${bot.z}, spot ${spot?.let { "${it.x},${it.y},${it.z}" } ?: "none"})")
 +            return false
 +        }
 +        bot.target = target
@@ -3238,6 +3249,7 @@ index 0000000..538f966
 +        private const val MAX_STORE_VISITS = 4
 +        private const val SHOTS_PER_TRIP = 1000
 +        private const val APPROACH_RADIUS = 300
++        private const val SPOT_ARRIVAL_RADIUS = 30
 +        private const val NEWBIE_BUFF_MIN_LEVEL = 10
 +        private const val FINAL_APPROACH_SECONDS = 15
 +
@@ -3246,6 +3258,37 @@ index 0000000..538f966
 +            level < 40 -> 800
 +            else -> 1500
 +        }
++    }
++}
++
++/**
++ * Standing points next to NPCs, the way a player stands at a counter: a ring of points around the NPC within talking
++ * distance, on the floor the NPC stands on, that the bot can walk to. Found once per NPC and kept.
++ */
++internal object Approach {
++    private val RADII = intArrayOf(60, 100, 130)
++    private const val DIRECTIONS = 16
++    private const val MAX_FLOOR_DIFFERENCE = 50
++
++    private val points = ConcurrentHashMap<Int, Location>()
++
++    fun pointNear(bot: Player, npc: Npc): Location? = points[npc.objectId] ?: find(bot, npc)?.also { points[npc.objectId] = it }
++
++    private fun find(bot: Player, npc: Npc): Location? {
++        val geo = GeoEngine.getInstance()
++        for (radius in RADII) {
++            for (i in 0 until DIRECTIONS) {
++                val angle = 2 * Math.PI * i / DIRECTIONS
++                val x = npc.x + (cos(angle) * radius).toInt()
++                val y = npc.y + (sin(angle) * radius).toInt()
++                val z = geo.getHeight(x, y, npc.z).toInt()
++                if (abs(z - npc.z) > MAX_FLOOR_DIFFERENCE) continue
++                val reachable = geo.canMoveToTarget(bot.x, bot.y, bot.z, x, y, z) ||
++                        (geo.findPath(bot.x, bot.y, bot.z, x, y, z, true)?.size ?: 0) >= 2
++                if (reachable) return Location(x, y, z)
++            }
++        }
++        return null
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
