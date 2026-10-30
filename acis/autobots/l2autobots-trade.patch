@@ -443,10 +443,10 @@ index 0000000..bd4125d
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
 new file mode 100644
-index 0000000..6b8fee5
+index 0000000..8108e00
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
-@@ -0,0 +1,414 @@
+@@ -0,0 +1,413 @@
 +package dev.l2j.autobots.population.trade
 +
 +import dev.l2j.autobots.Autobot
@@ -549,16 +549,15 @@ index 0000000..6b8fee5
 +    }
 +
 +    private fun onBorrowAsked(player: Player, bot: Autobot, text: String) {
-+        val ru = russian(player)
 +        val amount = amount(text)
 +        val item = if (amount == null) findItem(text, Gear.surplus(bot).filter { it.isTradable && it.isEquipable }) else null
 +        if (amount == null && item == null) return say(bot, player, "а что именно? у меня лишнего нет", "what exactly? nothing spare")
 +        val value = amount?.toLong() ?: Worth.of(item!!.itemId, item.enchantLevel, 1)
 +        if (amount != null && amount > Errands.spendable(bot)) return say(bot, player, "столько нет", "don't have that much")
-+        val refusal = SocialTrade.refusalToLend(bot, player, value, ru)
++        val refusal = SocialTrade.refusalToLend(bot, player, value, adena = amount != null)
 +        if (refusal != null) {
 +            TradeLog.log(bot, TradeDeal.Refused, "won't lend ${amount ?: item!!.itemName} to ${player.name}: $refusal")
-+            return say(bot, player, refusal, refusal)
++            return say(bot, player, refusal.text(true), refusal.text(false))
 +        }
 +        val due = System.currentTimeMillis() + duration(text, (if (amount != null) PLAYER_ADENA_LOAN_HOURS else PLAYER_ITEM_LOAN_HOURS) * HOUR)
 +        pending[player.objectId] = Pending.LendToPlayer(bot.objectId, item, amount ?: 0, due)
@@ -863,10 +862,10 @@ index 0000000..6b8fee5
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt
 new file mode 100644
-index 0000000..a48f564
+index 0000000..74fbd4e
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt
-@@ -0,0 +1,488 @@
+@@ -0,0 +1,514 @@
 +package dev.l2j.autobots.population.trade
 +
 +import dev.l2j.autobots.Autobot
@@ -983,25 +982,50 @@ index 0000000..a48f564
 +
 +    // ---- Loans ----
 +
++    /** Why a bot won't lend, in the language it was asked in. */
++    class Refusal(val kind: Kind, private val arg: String = "") {
++        fun text(russian: Boolean) = kind.text(russian).format(arg)
++        override fun toString() = kind.name
++    }
++
++    enum class Kind(private val ru: String, private val en: String) {
++        ScammedMe("ты меня уже кидал, нет", "you scammed me before, no"),
++        StillOwes("сначала верни %s", "give back %s first"),
++        Broke("сам на мели, сорри", "broke myself, sorry"),
++        TooMuch("многовато просишь", "too much, sorry"),
++        Stranger("я тебя не знаю, сорри", "I don't know you, sorry"),
++        NotNow("не, сорри, самому надо", "nah, need it myself");
++
++        fun text(russian: Boolean) = if (russian) ru else en
++    }
++
 +    /**
-+     * Would [lender] lend [value] worth to [borrower]? @return null for yes, or the reason to say.
++     * Would [lender] lend [value] worth to [borrower]? @return null for yes, or the reason to give.
 +     * Friends and people who returned loans before get it; strangers don't, nor anyone who already owes.
 +     */
-+    fun refusalToLend(lender: Autobot, borrower: Player, value: Long, russian: Boolean): String? {
++    fun refusalToLend(lender: Autobot, borrower: Player, value: Long, adena: Boolean): Refusal? {
 +        val trust = trusts(lender, borrower)
 +        val affinity = Relations.affinity(lender, borrower)
-+        val sameParty = lender.isInParty && lender.party === borrower.party
 +        val owes = Loans.between(lender, borrower).firstOrNull()
 +        return when {
-+            trust <= NO_DEALS -> if (russian) "ты меня уже кидал, нет" else "you scammed me before, no"
-+            owes != null -> if (russian) "сначала верни ${owes.name}" else "give back ${owes.name} first"
-+            Honesty.of(lender) == Honesty.Scammer -> if (russian) "сам на мели, сорри" else "broke myself, sorry"
-+            value > lender.adena + lender.inventory.items.sumOf { if (it.isEquipped) Worth.of(it.itemId, it.enchantLevel, 1) else 0L } / 3 ->
-+                if (russian) "многовато просишь" else "too much, sorry"
-+            !(affinity >= Relations.FRIEND || trust >= 30 || (sameParty && affinity >= 10)) -> if (russian) "я тебя не знаю, сорри" else "I don't know you, sorry"
-+            Rnd.get(100) >= (40 + trust / 2 + affinity / 3).coerceIn(10, 95) -> if (russian) "не, сорри, самому надо" else "nah, need it myself"
++            trust <= NO_DEALS -> Refusal(Kind.ScammedMe)
++            owes != null -> Refusal(Kind.StillOwes, owes.name)
++            Honesty.of(lender) == Honesty.Scammer -> Refusal(Kind.Broke)
++            value > limitFor(lender, adena) -> Refusal(Kind.TooMuch)
++            !knows(lender, borrower) -> Refusal(Kind.Stranger)
++            Rnd.get(100) >= (40 + trust / 2 + affinity / 3).coerceIn(10, 95) -> Refusal(Kind.NotNow)
 +            else -> null
 +        }
++    }
++
++    /** Half of its adena at most; a spare piece it doesn't need, up to what it wears. */
++    private fun limitFor(lender: Player, adena: Boolean): Long =
++            if (adena) lender.adena / 2L else lender.adena + lender.inventory.items.sumOf { if (it.isEquipped) Worth.of(it.itemId, it.enchantLevel, 1) else 0L }
++
++    /** Someone a bot would lend to at all: a friend, someone trusted, a party mate it gets on with. */
++    fun knows(bot: Player, other: Player): Boolean {
++        val affinity = Relations.affinity(bot, other)
++        return affinity >= Relations.FRIEND || trusts(bot, other) >= 30 || (bot.isInParty && bot.party === other.party && affinity >= 10)
 +    }
 +
 +    private fun lenderOf(loan: Loan): Player? = World.getInstance().getPlayer(loan.lenderId)
@@ -1115,16 +1139,16 @@ index 0000000..a48f564
 +            else -> return
 +        }
 +        val lender = bot.getKnownTypeInRadius(Autobot::class.java, TOWN_RADIUS)
-+                .filter { isPopulation(it) && free(it) && Errands.spendable(it) >= need * 2 && Relations.affinity(bot, it) >= 0 }
++                .filter { isPopulation(it) && free(it) && Errands.spendable(it) >= need * 2 && knows(bot, it) }
 +                .maxByOrNull { Relations.affinity(it, bot) + trusts(it, bot) } ?: return
 +        if (!cooledDown(bot, lender, if (scammer) SCAM_COOLDOWN_MS else PAIR_COOLDOWN_MS)) return
 +        val russian = Rnd.get(100) < 60
 +        val what = wish?.template?.name ?: if (russian) "банки" else "potions"
 +        bot.tell(lender.name, if (russian) "привет, одолжишь $need аден до завтра? на $what не хватает" else "hi, can you lend me $need adena till tomorrow? short for $what")
 +        delay(Rnd.get(2000, 5000).toLong())
-+        val refusal = refusalToLend(lender, bot, need.toLong(), russian)
++        val refusal = refusalToLend(lender, bot, need.toLong(), adena = true)
 +        if (refusal != null) {
-+            lender.tell(bot.name, refusal)
++            lender.tell(bot.name, refusal.text(russian))
 +            TradeLog.log(lender, TradeDeal.Refused, "won't lend $need adena to ${bot.name}: $refusal")
 +            return
 +        }
@@ -1145,7 +1169,8 @@ index 0000000..a48f564
 +        val grade = Gear.gradeFor(bot.level).id
 +        for (seller in bot.getKnownTypeInRadius(Autobot::class.java, TOWN_RADIUS).shuffled()) {
 +            if (!isPopulation(seller) || !free(seller) || refusesDeals(bot, seller) || refusesDeals(seller, bot)) continue
-+            val item = StoreKeeper.storeGoods(seller).firstOrNull { it.itemId in wanted && it.isTradable && it.item.crystalType.id <= grade } ?: continue
++            // Anything in the bag it doesn't need, not just what is worth a store slot.
++            val item = Gear.surplus(seller).firstOrNull { it.itemId in wanted && it.isTradable && it.item.crystalType.id <= grade } ?: continue
 +            val count = if (item.isStackable) item.count.coerceAtMost(1000) else 1
 +            val price = Worth.asking(seller, item, count)
 +            // Never above what the shop or the store would take.
@@ -1161,7 +1186,7 @@ index 0000000..a48f564
 +        val russian = Rnd.get(100) < 60
 +        // Pay with goods the seller wants when there are any, adena for the rest.
 +        val sellerWants = Worth.wanted(seller)
-+        val barter = StoreKeeper.storeGoods(buyer).filter { it.itemId in sellerWants && it.isTradable && it.objectId != item.objectId }
++        val barter = Gear.surplus(buyer).filter { it.itemId in sellerWants && it.isTradable && it.objectId != item.objectId }
 +                .firstOrNull { Worth.of(it.itemId, it.enchantLevel, it.count) <= price * 3 / 2 }
 +        val barterValue = barter?.let { Worth.of(it.itemId, it.enchantLevel, it.count) } ?: 0L
 +        val adena = (price - barterValue).coerceAtLeast(0).toInt()
@@ -1193,7 +1218,7 @@ index 0000000..a48f564
 +     * A scammer offers a bot around the piece it wants and puts a cheaper item of the same kind in the window.
 +     * An attentive buyer reads the window and walks away; another one pays and finds out afterwards.
 +     */
-+    private suspend fun sellLookalike(bot: Autobot): Boolean {
++    suspend fun sellLookalike(bot: Autobot): Boolean {
 +        if (System.currentTimeMillis() - (lastScam[bot.objectId] ?: 0L) < SCAM_COOLDOWN_MS) return false
 +        val mine = bot.inventory.items.filter { it.isTradable && !it.isEquipped && (it.isWeapon || it.isArmor) && !Loans.isBorrowed(bot, it) }
 +        if (mine.isEmpty()) return false
@@ -1323,13 +1348,13 @@ index 0000000..a48f564
 +    private fun isUpgradeFor(bot: Player, item: ItemInstance): Boolean = item.isTradable && item.isEquipable && (item.isWeapon || item.isArmor) &&
 +            item.item.crystalType.id <= Gear.gradeFor(bot.level).id && (Gear.wishes(bot).any { it.itemId == item.itemId } || Gear.isUpgrade(bot, item))
 +
-+    private suspend fun askForItem(borrower: Autobot, lender: Autobot, item: ItemInstance) {
++    suspend fun askForItem(borrower: Autobot, lender: Autobot, item: ItemInstance) {
 +        val russian = Rnd.get(100) < 60
 +        borrower.partySay(if (russian) "${lender.name}, дай поносить ${item.itemName}? до конца пати, верну" else "${lender.name}, can I borrow ${item.itemName} for this party? will return")
 +        delay(Rnd.get(2000, 5000).toLong())
-+        val refusal = refusalToLend(lender, borrower, Worth.of(item.itemId, item.enchantLevel, 1), russian)
++        val refusal = refusalToLend(lender, borrower, Worth.of(item.itemId, item.enchantLevel, 1), adena = false)
 +        if (refusal != null) {
-+            lender.partySay(refusal)
++            lender.partySay(refusal.text(russian))
 +            TradeLog.log(lender, TradeDeal.Refused, "won't lend ${item.itemName} to ${borrower.name}: $refusal")
 +            return
 +        }
