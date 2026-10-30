@@ -22,14 +22,18 @@ RUN test -n "${AUTOBOTS_COMMIT}" \
  && git -C /autobots checkout --quiet FETCH_HEAD
 COPY autobots/*.patch /patches/
 # aCis ships CRLF sources; the patch is kept with LF, so only the files it touches are normalized.
-RUN grep '^+++ b/' /patches/acis-382-autobots.patch | cut -c7- | xargs sed -i 's/\r$//' \
+RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs sed -i 's/\r$//' \
  && git apply /patches/acis-382-autobots.patch \
+ && git apply /patches/acis-382-trade.patch \
  && git -C /autobots apply /patches/l2autobots-fixes.patch \
  && git -C /autobots apply /patches/l2autobots-autofarm.patch \
  && git -C /autobots apply /patches/l2autobots-craft.patch \
  && git -C /autobots apply /patches/l2autobots-quests.patch \
  && git -C /autobots apply /patches/l2autobots-skills.patch \
- && git -C /autobots apply /patches/l2autobots-raids.patch
+ && git -C /autobots apply /patches/l2autobots-sessions.patch \
+ && git -C /autobots apply /patches/l2autobots-partysize.patch \
+ && git -C /autobots apply /patches/l2autobots-raids.patch \
+ && git -C /autobots apply /patches/l2autobots-trade.patch
 
 # The Kotlin module is compiled against the aCis Java sources and dropped into aCis_gameserver/lib,
 # where the stock ant build picks it up for both compilation and the dist libs.
