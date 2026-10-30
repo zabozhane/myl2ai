@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index ef03838..41c4a54 100644
+index ef03838..386cbb6 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -2,11 +2,23 @@
+@@ -2,11 +2,30 @@
  <settings>
    <thinkIteration>350</thinkIteration>
    <defaultTitle>Welcome to L2</defaultTitle>
@@ -27,6 +27,13 @@ index ef03838..41c4a54 100644
 +  <populationMaxSessions>4</populationMaxSessions>
 +  <populationMinSessionMinutes>60</populationMinSessionMinutes>
 +  <populationMaxSessionMinutes>180</populationMaxSessionMinutes>
++  <!-- Load testing: every active member stays online, ignoring sleep and sessions. Keep false for a living world. -->
++  <populationAlwaysOnline>false</populationAlwaysOnline>
++  <!-- Living economy for population bots: they sell loot, buy supplies and gear in town shops, enchant, and trade
++       in private stores. economyLog writes every deal to the game server log, economyChat lets bots comment in chat. -->
++  <economyEnabled>true</economyEnabled>
++  <economyLog>true</economyLog>
++  <economyChat>true</economyChat>
  </settings>
 diff --git a/sql/autobots.sql b/sql/autobots.sql
 index b824d98..a8b6830 100644
@@ -46,7 +53,7 @@ index b824d98..a8b6830 100644
  
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
-index d304168..992cebf 100644
+index d304168..9b31fbb 100644
 --- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 @@ -6,7 +6,6 @@ import dev.l2j.autobots.behaviors.SocialBehavior
@@ -65,17 +72,20 @@ index d304168..992cebf 100644
  import dev.l2j.autobots.utils.clearCircle
  import dev.l2j.autobots.utils.getBehaviorByClassId
  import dev.l2j.autobots.utils.supportedCombatPrefs
-@@ -73,6 +73,9 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -73,6 +73,12 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
      
      internal var respawnAction: RespawnAction = RespawnAction.ReturnToDeathLocation
      
 +    // Set for bots of the living population; they decide what to do themselves.
 +    internal var life: LifeBehavior? = null
 +    
++    // Set when the bot keeps dying even in easy spots: the group logic picks such bots up.
++    internal var needsGroup: Boolean = false
++    
      internal val chatMessages = mutableListOf<BotChat>()    
      
      internal var spawnTime: Long = 0
-@@ -104,10 +107,11 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -104,10 +110,11 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
          
          isBusyThinking.set(true)
          handleScheduledLogout()
@@ -90,7 +100,28 @@ index d304168..992cebf 100644
              socialBehavior.onUpdate()
          } else {
              combatBehavior.onUpdate()
-@@ -301,6 +305,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -235,16 +242,17 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+         onTeleported()
+     }
+     
++    // Population bots carry what a player could and get overweight like one; dashboard bots have endless bags.
+     override fun getWeightPenalty(): Int {
+-        return 0
++        return if (life != null) super.getWeightPenalty() else 0
+     }
+ 
+     override fun getMaxLoad(): Int {
+-        return Int.MAX_VALUE
++        return if (life != null) super.getMaxLoad() else Int.MAX_VALUE
+     }
+ 
+     override fun getInventoryLimit(): Int {
+-        return Int.MAX_VALUE
++        return if (life != null) super.getInventoryLimit() else Int.MAX_VALUE
+     }
+ 
+     internal fun setBotClass(newClassId: ClassId){
+@@ -301,6 +309,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
          }
          
          try{
@@ -98,7 +129,7 @@ index d304168..992cebf 100644
              clearDevActions()
              setOnlineStatus(false, true)
              abortAttack()
-@@ -329,6 +334,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -329,6 +338,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
                  }
                  when (effect.effectType) {
                      L2EffectType.SIGNET_GROUND, L2EffectType.SIGNET_EFFECT -> effect.exit()
@@ -106,7 +137,18 @@ index d304168..992cebf 100644
                  }
              }
              
-@@ -478,15 +484,9 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -384,7 +394,9 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+     }
+ 
+     override fun doDie(killer: Creature?): Boolean {
+-        return super.doDie(killer)
++        val died = super.doDie(killer)
++        if (died) life?.onDeath()
++        return died
+     }
+     
+     override fun rewardSkills() {
+@@ -478,15 +490,9 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
      
      @OptIn(ExperimentalStdlibApi::class)
      internal fun onLevelChange(oldLevel: Int, newLevel: Int){
@@ -124,7 +166,7 @@ index d304168..992cebf 100644
                  val newClassId = getNewClassId(classId)
                  
                  if(newClassId != null && newClassId != classId) {
-@@ -494,9 +494,6 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -494,9 +500,6 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
                      setClassId(newClassId.id)
                      rewardSkills()
                  }
@@ -135,18 +177,21 @@ index d304168..992cebf 100644
          }
      }
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-index 5235b11..39b5507 100644
+index 5235b11..8e45935 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-@@ -11,6 +11,7 @@ import dev.l2j.autobots.extensions.useMagicSkill
+@@ -11,8 +11,10 @@ import dev.l2j.autobots.extensions.useMagicSkill
  import dev.l2j.autobots.models.AutobotInfo
  import dev.l2j.autobots.models.BotChat
  import dev.l2j.autobots.models.ChatType
 +import dev.l2j.autobots.population.PopulationManager
  import dev.l2j.autobots.ui.AutobotsUi
  import dev.l2j.autobots.utils.*
++import kotlinx.coroutines.CancellationException
  import kotlinx.coroutines.launch
-@@ -46,6 +47,7 @@ object AutobotsManager {
+ import net.sf.l2j.Config
+ import net.sf.l2j.commons.math.MathUtil
+@@ -46,15 +48,19 @@ object AutobotsManager {
          AutobotsDao.updateAllBotOnlineStatus(false)
          AutobotScheduler
          AutofarmManager
@@ -154,8 +199,12 @@ index 5235b11..39b5507 100644
  
          Klock.start("onUpdate", 1000, AutobotData.settings.iterationDelay, CoScopes.onUpdateScope, action = {
              activeBots.values.forEach {
-@@ -54,7 +56,7 @@ object AutobotsManager {
+                 CoScopes.onUpdateScope.launch {
+                     try {
                          it.onUpdate()
++                    } catch (e: CancellationException) {
++                        // A sequence cancelled on logout or a change of plans: expected, nothing to report.
++                        it.isBusyThinking.set(false)
                      } catch (e: Exception){
                          it.isBusyThinking.set(false)
 -                        println(e)
@@ -163,7 +212,7 @@ index 5235b11..39b5507 100644
                      }
                  }
              }
-@@ -206,8 +208,6 @@ object AutobotsManager {
+@@ -206,8 +212,6 @@ object AutobotsManager {
          PlayerInfoTable.getInstance().addPlayer(autobot.objectId, "Autobot", autobot.name, 0)
          autobot.rewardSkills()
  
@@ -204,7 +253,7 @@ index d6c9c8f..06fa0da 100644
                                      AdminActions.despawnAutobot(autobot)
                                  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-index ce85df0..c7ac93f 100644
+index ce85df0..e146c32 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 @@ -34,6 +34,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
@@ -247,7 +296,7 @@ index ce85df0..c7ac93f 100644
                  if(target != null) mutableListOf(target) else mutableListOf()
              }
          }
-@@ -334,19 +336,13 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -334,19 +336,15 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
                  (it is Player && it.clan != null && player.clan != null && player.clanId == it.clanId)
      }
  
@@ -267,12 +316,27 @@ index ce85df0..c7ac93f 100644
          
 -        if (!player.autoSoulShot.contains(getShotId(player))) {
 -            player.addAutoSoulShot(getShotId(player))
++        // Shots of another grade (the weapon changed) would only fail on every hit.
++        player.autoSoulShot.filter { it != shotId }.forEach { player.removeAutoSoulShot(it) }
 +        if (!player.autoSoulShot.contains(shotId)) {
 +            player.addAutoSoulShot(shotId)
              player.rechargeShots(true, true)
          }
      }
-@@ -374,4 +370,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -355,7 +353,11 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+             Consumable(1540) { autobot -> autobot.getCombatBehavior().combatPreferences.useQuickHealingPots &&  autobot.getHealthPercentage() < 30 },
+             Consumable(728) { autobot -> autobot.getCombatBehavior().combatPreferences.useManaPots && autobot !is SecretManaRegen &&  autobot.getManaPercentage() < 60 },
+             Consumable(1539) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterHealingPots &&  autobot.getHealthPercentage() < 80 && !autobot.hasEffect(2037) },
+-            Consumable(5592) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterCpPots &&  autobot.getCpPercentage() < 80 }
++            Consumable(5592) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterCpPots &&  autobot.getCpPercentage() < 80 },
++            // Shop potions population bots buy (heals over time) and a mana drug from drops, not stacked with a running one.
++            Consumable(1061) { autobot -> autobot.getHealthPercentage() < 40 && !autobot.hasEffect(2032) && !autobot.hasEffect(2031) },
++            Consumable(1060) { autobot -> autobot.getHealthPercentage() < 40 && !autobot.hasEffect(2031) && !autobot.hasEffect(2032) },
++            Consumable(726) { autobot -> autobot.getManaPercentage() < 30 && !autobot.hasEffect(2279) }
+     )
+ 
+     internal fun validateConditionalSkill(skill: L2Skill) =
+@@ -374,4 +376,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
      init {
          player.setIsRunning(true)
      }
@@ -601,10 +665,10 @@ index 0000000..afc1459
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index 323190c..9809e46 100644
+index 323190c..95c3c8f 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -24,7 +24,16 @@ internal data class AutobotSettings(
+@@ -24,7 +24,20 @@ internal data class AutobotSettings(
          @JsonProperty("useManaPots") var useManaPots: Boolean = true,
          @JsonProperty("useQuickHealingPots") var useQuickHealingPots: Boolean = false,
          @JsonProperty("useGreaterHealingPots") var useGreaterHealingPots: Boolean = true,
@@ -618,7 +682,11 @@ index 323190c..9809e46 100644
 +        @JsonProperty("populationMinSessions") var populationMinSessions: Int = 2,
 +        @JsonProperty("populationMaxSessions") var populationMaxSessions: Int = 4,
 +        @JsonProperty("populationMinSessionMinutes") var populationMinSessionMinutes: Int = 60,
-+        @JsonProperty("populationMaxSessionMinutes") var populationMaxSessionMinutes: Int = 180
++        @JsonProperty("populationMaxSessionMinutes") var populationMaxSessionMinutes: Int = 180,
++        @JsonProperty("populationAlwaysOnline") var populationAlwaysOnline: Boolean = false,
++        @JsonProperty("economyEnabled") var economyEnabled: Boolean = true,
++        @JsonProperty("economyLog") var economyLog: Boolean = true,
++        @JsonProperty("economyChat") var economyChat: Boolean = true
  ){
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
          setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
@@ -787,10 +855,10 @@ index 0000000..4c7caff
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
 new file mode 100644
-index 0000000..613b0c2
+index 0000000..d64fe1a
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,87 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.extensions.location
@@ -826,10 +894,11 @@ index 0000000..613b0c2
 +
 +    fun isSuitable(spot: HuntingSpot, level: Int): Boolean = spot.monstersFor(level) >= MIN_SUITABLE_MONSTERS
 +
-+    fun choose(bot: Player, excluded: Set<Long>): HuntingSpot? {
++    /** Picks a spot with monsters for [level], which is below the bot's own when it falls back to easier hunting. */
++    fun choose(bot: Player, level: Int, excluded: Set<Long>): HuntingSpot? {
 +        val candidates = spots.asSequence()
-+                .filter { it.key !in excluded && isSuitable(it, bot.level) }
-+                .map { it to score(it, bot) }
++                .filter { it.key !in excluded && isSuitable(it, level) }
++                .map { it to score(it, bot, level) }
 +                .sortedByDescending { it.second }
 +                .take(CANDIDATES)
 +                .toList()
@@ -851,9 +920,9 @@ index 0000000..613b0c2
 +        hunters[spot.key]?.decrementAndGet()
 +    }
 +
-+    private fun score(spot: HuntingSpot, bot: Player): Double {
++    private fun score(spot: HuntingSpot, bot: Player, level: Int): Double {
 +        val crowd = hunters[spot.key]?.get() ?: 0
-+        return spot.monstersFor(bot.level) * exp(-distance(bot.location(), spot.location) / DISTANCE_DECAY) / (1 + crowd)
++        return spot.monstersFor(level) * exp(-distance(bot.location(), spot.location) / DISTANCE_DECAY) / (1 + crowd)
 +    }
 +
 +    private class MonsterSpawn(val x: Int, val y: Int, val z: Int, val level: Int)
@@ -879,22 +948,29 @@ index 0000000..613b0c2
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 new file mode 100644
-index 0000000..1255471
+index 0000000..49fc482
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,264 @@
 +package dev.l2j.autobots.population
 +
++import dev.l2j.autobots.AutobotData
 +import dev.l2j.autobots.Autobot
 +import dev.l2j.autobots.behaviors.sequences.TravelByGatekeeperSequence
 +import dev.l2j.autobots.behaviors.sequences.WalkToSequence
 +import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.population.economy.Fitness
++import dev.l2j.autobots.population.economy.GoToTownSequence
++import dev.l2j.autobots.population.economy.StoreKeeper
++import dev.l2j.autobots.population.economy.TownTrip
 +import dev.l2j.autobots.utils.distance
 +import net.sf.l2j.commons.random.Rnd
 +import net.sf.l2j.gameserver.data.xml.TeleportLocationData
 +import net.sf.l2j.gameserver.enums.ZoneId
 +import net.sf.l2j.gameserver.model.actor.Player
 +import net.sf.l2j.gameserver.model.actor.instance.Monster
++import net.sf.l2j.gameserver.model.location.Location
 +import net.sf.l2j.gameserver.model.location.TeleportLocation
 +
 +/** A monster that targets us, or a flagged or PK player who does: both are worth fighting back. */
@@ -905,40 +981,130 @@ index 0000000..1255471
 +private const val ATTACKER_RADIUS = 1000
 +
 +/**
-+ * What a population bot does during one play session: either hunts at a spot that fits its level,
-+ * or stays AFK where it logged in. Self-defense and death handling are always on.
++ * What a population bot does during one play session: hunts at a spot that fits its level and gear, stays AFK,
++ * or trades in a private store in town. Hunting bots go to town to sell loot and buy supplies and gear.
++ * Self-defense and death handling are always on.
 + */
 +internal class LifeBehavior(private val bot: Autobot) {
 +
-+    private enum class Activity { Hunt, Afk }
++    private enum class Activity { Hunt, Afk, Trade }
 +
-+    private val activity = if (Rnd.get(100) < AFK_SESSION_PERCENT) Activity.Afk else Activity.Hunt
++    private val economy get() = AutobotData.settings.economyEnabled
++    private val fitness = Fitness(bot)
++
++    // An AFK session becomes a trading one when the bot has something to sell or buy; decided on the first update,
++    // once the inventory is loaded.
++    private var activity: Activity? = null
 +    private var spot: HuntingSpot? = null
 +    private var spotLevel = 0
 +    private val badSpots = mutableSetOf<Long>()
 +    private var idleTicks = 0
 +    private var gatekeeperFailed = false
 +
++    // Town trips: when the last one ended, and whether this stay in town already had one.
++    private var lastTripAt = System.currentTimeMillis()
++    private var tripDoneInTown = false
++    private var townTravelFailedAt = 0L
++
++    // Staying online past the session in a store, like a player who leaves a merchant for the night.
++    private var lingerDecided = false
++    private var lingerUntil = 0L
++    private var storeAttempts = 0
++
 +    suspend fun onUpdate() {
++        if (bot.isInStoreMode) return
 +        if (bot.isDead || bot.isUnderAttack()) {
 +            bot.combatBehavior.onUpdate()
 +            return
 +        }
 +
-+        when (activity) {
++        if (!bot.isInsideZone(ZoneId.TOWN)) tripDoneInTown = false
++
++        when (activity ?: chooseActivity()) {
 +            Activity.Afk -> if (!bot.isSitting && !bot.isMoving) bot.sitDown()
 +            Activity.Hunt -> hunt()
++            Activity.Trade -> trade()
 +        }
++    }
++
++    /** True while the bot hunts easier monsters because it dies too often or is undergeared. */
++    val isFallingBack get() = fitness.isSaving
++
++    fun onDeath() {
++        fitness.onDeath()
 +    }
 +
 +    fun onLogout() {
 +        spot?.let { HuntingSpots.leave(it) }
 +        spot = null
++        StoreKeeper.close(bot)
++    }
++
++    /**
++     * Asked by the population manager when the bot's session is over. A bot with goods may stay in a store for a while.
++     * @return true while the bot wants to stay online.
++     */
++    fun keepsOnline(): Boolean {
++        if (!lingerDecided) {
++            lingerDecided = true
++            if (economy && Rnd.get(100) < LINGER_PERCENT && StoreKeeper.storeGoods(bot).isNotEmpty()) {
++                lingerUntil = System.currentTimeMillis() + Rnd.get(LINGER_MIN_MINUTES, LINGER_MAX_MINUTES) * 60_000L
++                activity = Activity.Trade
++                bot.cancelSequence()
++            }
++        }
++        return System.currentTimeMillis() < lingerUntil
++    }
++
++    private fun chooseActivity(): Activity {
++        val chosen = when {
++            Rnd.get(100) >= AFK_SESSION_PERCENT -> Activity.Hunt
++            economy && StoreKeeper.hasBusiness(bot) -> Activity.Trade
++            else -> Activity.Afk
++        }
++        activity = chosen
++        return chosen
++    }
++
++    private suspend fun trade() {
++        if (!bot.isInsideZone(ZoneId.TOWN)) {
++            if (!goToTown()) giveUpTrading()
++            return
++        }
++        if (!tripDoneInTown) {
++            visitShops()
++            return
++        }
++        if (bot.isMoving) return
++        if (StoreKeeper.open(bot)) return
++
++        // Another store is in the way, or there is nothing left to trade: step aside a few times, then just sit.
++        if (StoreKeeper.hasBusiness(bot) && ++storeAttempts <= MAX_STORE_ATTEMPTS) {
++            val step = Location(bot.x + Rnd.get(-STORE_STEP, STORE_STEP), bot.y + Rnd.get(-STORE_STEP, STORE_STEP), bot.z)
++            WalkToSequence(bot, step, 50) {}.execute()
++            return
++        }
++        giveUpTrading()
++    }
++
++    private fun giveUpTrading() {
++        activity = Activity.Afk
++        lingerUntil = 0
 +    }
 +
 +    private suspend fun hunt() {
 +        val inTown = bot.isInsideZone(ZoneId.TOWN)
++        if (inTown && economy && !tripDoneInTown) {
++            visitShops()
++            return
++        }
 +        if (inTown) bot.socialBehavior.onUpdate()
++
++        if (!inTown && economy && bot.target == null && System.currentTimeMillis() - townTravelFailedAt > TOWN_RETRY_MS &&
++                Errands.shouldLeaveSpot(bot, lastTripAt)) {
++            goToTown()
++            return
++        }
 +
 +        val target = currentSpot()
 +        if (target == null) {
@@ -963,21 +1129,43 @@ index 0000000..1255471
 +        if (idleTicks >= MAX_IDLE_TICKS) abandon(target)
 +    }
 +
++    private suspend fun visitShops() {
++        TownTrip(bot, cautious = fitness.isSaving).execute()
++        tripDoneInTown = true
++        lastTripAt = System.currentTimeMillis()
++    }
++
++    /** @return false when town can't be reached from here (no scroll, too far to walk). */
++    private suspend fun goToTown(): Boolean {
++        var failed = false
++        GoToTownSequence(bot) { failed = true }.execute()
++        if (failed) townTravelFailedAt = System.currentTimeMillis()
++        return !failed
++    }
++
 +    private fun currentSpot(): HuntingSpot? {
++        if (fitness.update()) dropSpot()
++
++        val level = fitness.huntLevel()
 +        val current = spot
-+        if (current != null && (bot.level == spotLevel || HuntingSpots.isSuitable(current, bot.level))) {
-+            spotLevel = bot.level
++        if (current != null && (level == spotLevel || HuntingSpots.isSuitable(current, level))) {
++            spotLevel = level
 +            return current
 +        }
 +
 +        current?.let { HuntingSpots.leave(it) }
-+        val next = HuntingSpots.choose(bot, badSpots)
++        val next = HuntingSpots.choose(bot, level, badSpots)
 +        next?.let { HuntingSpots.join(it) }
 +        spot = next
-+        spotLevel = bot.level
++        spotLevel = level
 +        idleTicks = 0
 +        gatekeeperFailed = false
 +        return next
++    }
++
++    private fun dropSpot() {
++        spot?.let { HuntingSpots.leave(it) }
++        spot = null
 +    }
 +
 +    private suspend fun travelTo(target: HuntingSpot, inTown: Boolean) {
@@ -1020,14 +1208,20 @@ index 0000000..1255471
 +        private const val MIN_WALK_SAVED_BY_TELEPORT = 12000
 +        // About 20 seconds at the default think interval.
 +        private const val MAX_IDLE_TICKS = 60
++        private const val TOWN_RETRY_MS = 10 * 60 * 1000L
++        private const val LINGER_PERCENT = 30
++        private const val LINGER_MIN_MINUTES = 30
++        private const val LINGER_MAX_MINUTES = 90
++        private const val MAX_STORE_ATTEMPTS = 5
++        private const val STORE_STEP = 400
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 new file mode 100644
-index 0000000..c47f926
+index 0000000..e34ff17
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,141 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.Autobot
@@ -1040,6 +1234,7 @@ index 0000000..c47f926
 +import dev.l2j.autobots.behaviors.preferences.SocialPreferences
 +import dev.l2j.autobots.dao.AutobotsDao
 +import dev.l2j.autobots.models.RespawnAction
++import dev.l2j.autobots.population.economy.EconomyLog
 +import dev.l2j.autobots.utils.Klock
 +import dev.l2j.autobots.utils.getRandomAppearance
 +import dev.l2j.autobots.utils.getSupportedClassesForLevel
@@ -1061,6 +1256,8 @@ index 0000000..c47f926
 +internal object PopulationManager {
 +    private const val TICK_MS = 15_000L
 +    private const val SAVE_EVERY_TICKS = 20
++    // Every 10 minutes.
++    private const val SUMMARY_EVERY_TICKS = 40
 +
 +    private class Member(val name: String, val firstDay: LocalDate, val career: Career, val schedule: DailySchedule)
 +
@@ -1089,10 +1286,10 @@ index 0000000..c47f926
 +            welcomeNewbies(now)
 +
 +            val today = now.toLocalDate()
-+            val (playing, offline) = members.values.partition { it.career.isActiveOn(today) && it.schedule.isPlaying(now) }
++            val (playing, offline) = members.values.partition { it.career.isActiveOn(today) && (settings.populationAlwaysOnline || it.schedule.isPlaying(now)) }
 +
 +            offline.mapNotNull { AutobotsManager.activeBots[it.name] }
-+                    .filter { it.controller == null && !it.isInCombat }
++                    .filter { it.controller == null && !it.isInCombat && it.life?.keepsOnline() != true }
 +                    .forEach { logout(it) }
 +
 +            playing.filter { !AutobotsManager.activeBots.containsKey(it.name) }
@@ -1100,6 +1297,9 @@ index 0000000..c47f926
 +                    .take(settings.populationLoginsPerTick)
 +                    .forEach { login(it) }
 +
++            if (settings.economyEnabled && (ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
++                EconomyLog.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
++            }
 +            if (++ticks % SAVE_EVERY_TICKS == 0) {
 +                members.values.mapNotNull { AutobotsManager.activeBots[it.name] }.forEach { AutobotsDao.saveAutobot(it) }
 +            }
@@ -1163,6 +1363,996 @@ index 0000000..c47f926
 +        bot.despawn()
 +    }
 +}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Chatter.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Chatter.kt
+new file mode 100644
+index 0000000..ee3f10d
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Chatter.kt
+@@ -0,0 +1,20 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.Autobot
++import net.sf.l2j.commons.random.Rnd
++
++/** Short remarks bots make about their deals, the way players comment on a lucky enchant or a broken weapon. */
++internal object Chatter {
++    val ENCHANT_SUCCESS = listOf("yes! %s", "%s finally", "gz me %s", "%s :)")
++    val ENCHANT_RESET = listOf("blessed failed... back to 0 from %s", "lost %s, at least not broken")
++    val ENCHANT_BREAK = listOf("damn, broke at %s", "%s and boom", "nooo %s gone", "f... crystals again")
++    val BOUGHT_UPGRADE = listOf("new %s :)", "finally got %s", "saved up for %s")
++
++    private const val CHANCE_PERCENT = 40
++
++    fun maybeSay(bot: Autobot, lines: List<String>, arg: String) {
++        if (!AutobotData.settings.economyChat || Rnd.get(100) >= CHANCE_PERCENT) return
++        bot.say(lines.random().format(arg))
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt
+new file mode 100644
+index 0000000..1c39338
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt
+@@ -0,0 +1,107 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.Autobot
++import net.sf.l2j.Config
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++import net.sf.l2j.gameserver.model.item.kind.Item
++import net.sf.l2j.gameserver.network.clientpackets.AbstractEnchantPacket
++
++/** How far a bot pushes its luck with enchant scrolls; derived from the object id, like the chronotype. */
++internal enum class Temper(val armorCap: Int, val weaponCap: Int) {
++    /** Safe enchants only. */
++    Cautious(0, 0),
++    /** One or two steps over safe, and only with the adena to replace a broken item. */
++    Normal(4, 6),
++    /** Enchants while scrolls last. */
++    Gambler(6, 10);
++
++    companion object {
++        fun of(objectId: Int): Temper = when (Math.floorMod(objectId * 31 + 7, 100)) {
++            in 0..49 -> Cautious
++            in 50..84 -> Normal
++            else -> Gambler
++        }
++    }
++}
++
++/**
++ * Enchants worn gear with the bot's own scrolls, by the core's chances: success adds a level, a failed blessed
++ * scroll resets it to 0, a failed normal scroll crystallizes the item, which then has to be bought or found again.
++ */
++internal object Enchanter {
++
++    fun enchantWorn(bot: Autobot, cautious: Boolean) {
++        val temper = if (cautious) Temper.Cautious else Temper.of(bot.objectId)
++        var attempts = 0
++        while (attempts++ < MAX_ATTEMPTS_PER_VISIT) {
++            val (scrollItem, target) = nextAttempt(bot, temper) ?: return
++            enchant(bot, scrollItem, target)
++        }
++    }
++
++    private fun nextAttempt(bot: Autobot, temper: Temper): Pair<ItemInstance, ItemInstance>? {
++        for (scrollItem in bot.inventory.items.filter { AbstractEnchantPacket._scrolls.containsKey(it.itemId) }) {
++            val scroll = AbstractEnchantPacket._scrolls.getValue(scrollItem.itemId)
++            val target = bot.inventory.paperdollItems
++                    .filter { scroll.isValid(it) && isEnchantable(it) && it.enchantLevel < capFor(bot, it, temper, scroll.isBlessed) }
++                    .minByOrNull { it.enchantLevel } ?: continue
++            return scrollItem to target
++        }
++        return null
++    }
++
++    /** The level the bot is willing to reach on [item]; safe levels are always taken. */
++    private fun capFor(bot: Autobot, item: ItemInstance, temper: Temper, blessed: Boolean): Int {
++        val safe = if (item.item.bodyPart == Item.SLOT_FULL_ARMOR) Config.ENCHANT_SAFE_MAX_FULL else Config.ENCHANT_SAFE_MAX
++        // A blessed scroll can't break the item, so everyone goes as far as a gambler would.
++        val effective = if (blessed && temper != Temper.Cautious) Temper.Gambler else temper
++        val risky = if (item.isWeapon) effective.weaponCap else effective.armorCap
++        if (risky <= safe) return safe
++        // A normal player only risks an item they could afford to replace.
++        if (effective == Temper.Normal && bot.adena < Market.fairValue(item.itemId)) return safe
++        return risky
++    }
++
++    private fun isEnchantable(item: ItemInstance): Boolean = !item.isHeroItem && !item.isShadowItem && !item.isEtcItem &&
++            (item.location == ItemInstance.ItemLocation.INVENTORY || item.location == ItemInstance.ItemLocation.PAPERDOLL)
++
++    private fun enchant(bot: Autobot, scrollItem: ItemInstance, item: ItemInstance) {
++        val scroll = AbstractEnchantPacket._scrolls.getValue(scrollItem.itemId)
++        val chance = scroll.getChance(item)
++        if (chance < 0) return
++        if (bot.inventory.destroyItem("Enchant", scrollItem.objectId, 1, bot, item) == null) return
++
++        val level = item.enchantLevel
++        val name = item.itemName
++        when {
++            Rnd.nextDouble() < chance -> {
++                item.enchantLevel = level + 1
++                item.updateDatabase()
++                EconomyLog.log(bot, Deal.EnchantSuccess, "enchanted $name to +${level + 1} (chance ${(chance * 100).toInt()}%)")
++                if (level + 1 > 5) Chatter.maybeSay(bot, Chatter.ENCHANT_SUCCESS, "+${level + 1}")
++            }
++            scroll.isBlessed -> {
++                item.enchantLevel = 0
++                item.updateDatabase()
++                EconomyLog.log(bot, Deal.EnchantReset, "blessed enchant of $name +$level failed, reset to +0")
++                Chatter.maybeSay(bot, Chatter.ENCHANT_RESET, "+$level")
++            }
++            else -> {
++                val crystalId = item.item.crystalItemId
++                val crystals = (item.crystalCount - (item.item.crystalCount + 1) / 2).coerceAtLeast(1)
++                val destroyed = bot.inventory.destroyItem("Enchant", item, bot, null) ?: return
++                World.getInstance().removeObject(destroyed)
++                if (crystalId != 0) bot.inventory.addItem("Enchant", crystalId, crystals, bot, destroyed)
++                EconomyLog.log(bot, Deal.EnchantBreak, "enchant of $name +$level failed, the item crystallized")
++                Chatter.maybeSay(bot, Chatter.ENCHANT_BREAK, "+$level")
++            }
++        }
++        // Re-equipping refreshes the +4 dual and +6 armor set skills the way the core does on equip.
++        bot.inventory.reloadEquippedItems()
++        bot.broadcastUserInfo()
++    }
++
++    private const val MAX_ATTEMPTS_PER_VISIT = 10
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+new file mode 100644
+index 0000000..244f82c
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+@@ -0,0 +1,69 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.Autobot
++
++/**
++ * How a bot copes with its hunting: deaths in the last hour and gear against its level decide whether it hunts
++ * normally, falls back to easier monsters to farm adena and gear, or gives up soloing and needs a group.
++ */
++internal class Fitness(private val bot: Autobot) {
++
++    enum class Mode(val levelOffset: Int) { Normal(0), Farm(-5), NeedsGroup(-8) }
++
++    var mode = Mode.Normal
++        private set
++
++    private val deaths = ArrayDeque<Long>()
++    private var modeSince = System.currentTimeMillis()
++
++    fun onDeath() {
++        val now = System.currentTimeMillis()
++        deaths.addLast(now)
++        while (deaths.isNotEmpty() && now - deaths.first() > WINDOW_MS) deaths.removeFirst()
++        // Newbies have nothing easier to fall back to: dying is part of learning there.
++        if (deaths.size < MAX_DEATHS_PER_HOUR || bot.level < MIN_LEVEL) return
++
++        deaths.clear()
++        when (mode) {
++            Mode.Normal -> switchTo(Mode.Farm, "died $MAX_DEATHS_PER_HOUR times in an hour")
++            Mode.Farm, Mode.NeedsGroup -> {
++                bot.needsGroup = true
++                switchTo(Mode.NeedsGroup, "keeps dying even on easy monsters, needs a group")
++            }
++        }
++    }
++
++    /** Re-evaluated whenever a new hunting spot is chosen. @return true if the mode changed. */
++    fun update(): Boolean {
++        val now = System.currentTimeMillis()
++        val weak = Gear.isWeak(bot)
++        return when {
++            mode == Mode.Normal && weak -> switchTo(Mode.Farm, "gear is weak for level ${bot.level}")
++            mode != Mode.Normal && !weak && deaths.isEmpty() && now - modeSince > WINDOW_MS -> {
++                bot.needsGroup = false
++                switchTo(Mode.Normal, "geared up and an hour without deaths")
++            }
++            else -> false
++        }
++    }
++
++    /** The level the bot picks monsters for. */
++    fun huntLevel(): Int = (bot.level + mode.levelOffset).coerceAtLeast(1)
++
++    /** Farming bots only take safe enchants: they can't afford to lose an item. */
++    val isSaving get() = mode != Mode.Normal
++
++    private fun switchTo(next: Mode, reason: String): Boolean {
++        if (next == mode) return false
++        EconomyLog.log(bot, Deal.ModeChange, "mode $mode -> $next: $reason")
++        mode = next
++        modeSince = System.currentTimeMillis()
++        return true
++    }
++
++    companion object {
++        private const val WINDOW_MS = 60 * 60 * 1000L
++        private const val MAX_DEATHS_PER_HOUR = 3
++        private const val MIN_LEVEL = 10
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+new file mode 100644
+index 0000000..5de9855
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -0,0 +1,180 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.extensions.getCombatBehavior
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.enums.items.ArmorType
++import net.sf.l2j.gameserver.enums.items.CrystalType
++import net.sf.l2j.gameserver.enums.items.ShotType
++import net.sf.l2j.gameserver.enums.items.WeaponType
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++import net.sf.l2j.gameserver.model.item.kind.Item
++import net.sf.l2j.gameserver.model.itemcontainer.Inventory
++import net.sf.l2j.gameserver.network.clientpackets.AbstractEnchantPacket
++
++/** A paperdoll slot the bot wants to fill with [itemId]. */
++internal class Wish(val slot: Int, val itemId: Int) {
++    val template: Item get() = ItemTable.getInstance().getTemplate(itemId)
++}
++
++/**
++ * What a bot wears and what it should wear: grades by level, the target kit from `equipment.xml`,
++ * shots and arrows that match the weapon, and which inventory items are worth keeping.
++ */
++internal object Gear {
++    const val SCROLL_OF_ESCAPE = 736
++    /** Healing potions town shops sell, best first: starting villages only have the lesser one. */
++    val HEALING_POTIONS = listOf(1061, 1060)
++
++    private val POTIONS = setOf(725, 726, 727, 728, 1060, 1061, 1539, 1540, 5592)
++    private val BEGINNER_SHOTS = setOf(5789, 5790)
++    private val SOULSHOTS = mapOf(CrystalType.NONE to 1835, CrystalType.D to 1463, CrystalType.C to 1464, CrystalType.B to 1465, CrystalType.A to 1466, CrystalType.S to 1467)
++    private val SPIRITSHOTS = mapOf(CrystalType.NONE to 3947, CrystalType.D to 3948, CrystalType.C to 3949, CrystalType.B to 3950, CrystalType.A to 3951, CrystalType.S to 3952)
++    private val ARROWS = mapOf(CrystalType.NONE to 17, CrystalType.D to 1341, CrystalType.C to 1342, CrystalType.B to 1343, CrystalType.A to 1344, CrystalType.S to 1345)
++
++    /** Paperdoll slots in buying order: weapon first, then the big armor parts, jewels last. */
++    private val SLOT_ORDER = listOf(Inventory.PAPERDOLL_RHAND, Inventory.PAPERDOLL_CHEST, Inventory.PAPERDOLL_LEGS, Inventory.PAPERDOLL_LHAND,
++            Inventory.PAPERDOLL_HEAD, Inventory.PAPERDOLL_GLOVES, Inventory.PAPERDOLL_FEET, Inventory.PAPERDOLL_NECK,
++            Inventory.PAPERDOLL_LEAR, Inventory.PAPERDOLL_REAR, Inventory.PAPERDOLL_LFINGER, Inventory.PAPERDOLL_RFINGER)
++
++    /** The grade a player of [level] can use without penalty, which is also the grade expected of them. */
++    fun gradeFor(level: Int): CrystalType = when {
++        level >= 76 -> CrystalType.S
++        level >= 61 -> CrystalType.A
++        level >= 52 -> CrystalType.B
++        level >= 40 -> CrystalType.C
++        level >= 20 -> CrystalType.D
++        else -> CrystalType.NONE
++    }
++
++    fun weaponGrade(bot: Player): CrystalType = bot.activeWeaponItem?.crystalType ?: CrystalType.NONE
++
++    fun isArcher(bot: Player): Boolean = bot.activeWeaponItem?.itemType == WeaponType.BOW
++
++    /** Shots that work with the equipped weapon: the grade must match the weapon, not the level. */
++    fun shotId(bot: Player): Int {
++        val grade = weaponGrade(bot)
++        return if (bot.getCombatBehavior().getShotType() == ShotType.SOULSHOT) SOULSHOTS.getValue(grade) else SPIRITSHOTS.getValue(grade)
++    }
++
++    fun arrowId(bot: Player): Int = ARROWS.getValue(weaponGrade(bot))
++
++    fun count(bot: Player, itemId: Int): Int = bot.inventory.getItemByItemId(itemId)?.count ?: 0
++
++    /** The pieces of the target kit the bot still lacks, in buying order. */
++    fun wishes(bot: Player): List<Wish> {
++        val kit = AutobotData.equipment.firstOrNull { bot.level in it.minLevel..it.maxLevel && bot.classId == it.classId } ?: return emptyList()
++        val targets = mapOf(Inventory.PAPERDOLL_RHAND to kit.rightHand, Inventory.PAPERDOLL_LHAND to kit.leftHand, Inventory.PAPERDOLL_HEAD to kit.head,
++                Inventory.PAPERDOLL_CHEST to kit.chest, Inventory.PAPERDOLL_LEGS to kit.legs, Inventory.PAPERDOLL_GLOVES to kit.hands,
++                Inventory.PAPERDOLL_FEET to kit.feet, Inventory.PAPERDOLL_NECK to kit.neck, Inventory.PAPERDOLL_LEAR to kit.leftEar,
++                Inventory.PAPERDOLL_REAR to kit.rightEar, Inventory.PAPERDOLL_LFINGER to kit.leftRing, Inventory.PAPERDOLL_RFINGER to kit.rightRing)
++        return SLOT_ORDER.mapNotNull { slot ->
++            val itemId = targets[slot] ?: 0
++            if (itemId <= 0 || ItemTable.getInstance().getTemplate(itemId) == null || isSatisfied(bot, slot, itemId)) null else Wish(slot, itemId)
++        }
++    }
++
++    private fun isSatisfied(bot: Player, slot: Int, itemId: Int): Boolean {
++        val inventory = bot.inventory
++        // A full body armor or a two-handed weapon leaves the other slot legitimately empty.
++        if (slot == Inventory.PAPERDOLL_LEGS && inventory.getPaperdollItem(Inventory.PAPERDOLL_CHEST)?.item?.bodyPart == Item.SLOT_FULL_ARMOR) return true
++        if (slot == Inventory.PAPERDOLL_LHAND && inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND)?.item?.bodyPart == Item.SLOT_LR_HAND) return true
++        val current = inventory.getPaperdollItem(slot) ?: return false
++        if (current.itemId == itemId) return true
++        // Something at least as valuable is already worn there (found in loot, or bought before the level band changed).
++        val target = ItemTable.getInstance().getTemplate(itemId)
++        return current.item.crystalType.id >= target.crystalType.id && current.referencePrice >= target.referencePrice
++    }
++
++    /** Weapon or chest more than a grade below the level, or no weapon at all: the bot is undergeared. */
++    fun isWeak(bot: Player): Boolean {
++        val expected = gradeFor(bot.level).id
++        if (expected == 0) return false
++        val weapon = bot.inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND) ?: return true
++        val chest = bot.inventory.getPaperdollItem(Inventory.PAPERDOLL_CHEST)
++        return weapon.item.crystalType.id < expected - 1 || (chest?.item?.crystalType?.id ?: -1) < expected - 1
++    }
++
++    /** Puts on loot that is a clear upgrade over what is worn in the same slot. Returns the items taken off. */
++    fun equipUpgradesFromInventory(bot: Player): List<ItemInstance> {
++        val allowedGrade = gradeFor(bot.level).id
++        // A slot's wish is spent on the first matching piece, so a second copy doesn't replace the one just put on.
++        val wished = wishes(bot).map { it.itemId }.toMutableSet()
++        val replaced = mutableListOf<ItemInstance>()
++        val candidates = bot.inventory.items.filter { it.isEquipable && !it.isEquipped && (it.isWeapon || it.isArmor) && it.item.crystalType.id <= allowedGrade }
++        for (item in candidates) {
++            if (wished.remove(item.itemId) || isUpgrade(bot, item)) {
++                val previous = bot.inventory.getPaperdollItem(slotOf(bot, item))
++                equip(bot, item)
++                if (previous != null && !previous.isEquipped) replaced += previous
++            }
++        }
++        return replaced
++    }
++
++    private fun isUpgrade(bot: Player, item: ItemInstance): Boolean {
++        val current = bot.inventory.getPaperdollItem(slotOf(bot, item)) ?: return fitsEmptySlot(bot, item)
++        if (current.item.bodyPart != item.item.bodyPart || current.itemType != item.itemType) return false
++        if (item.isWeapon && item.weaponItem.isMagical != current.weaponItem.isMagical) return false
++        return item.referencePrice > current.referencePrice * 1.2
++    }
++
++    /**
++     * Any jewel fills an empty slot; armor only of the kind the class wears (a mage never puts on heavy armor), and
++     * never a piece that would take off something else: a shield next to a two-handed weapon, legs under a full body.
++     */
++    private fun fitsEmptySlot(bot: Player, item: ItemInstance): Boolean {
++        if (item.item.type2 == Item.TYPE2_ACCESSORY) return true
++        if (!item.isArmor || item.itemType == (if (bot.isMageClass) ArmorType.HEAVY else ArmorType.MAGIC)) return false
++        val inventory = bot.inventory
++        return when (item.item.bodyPart) {
++            Item.SLOT_L_HAND -> inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND)?.item?.bodyPart != Item.SLOT_LR_HAND
++            Item.SLOT_LEGS -> inventory.getPaperdollItem(Inventory.PAPERDOLL_CHEST)?.item?.bodyPart != Item.SLOT_FULL_ARMOR
++            Item.SLOT_FULL_ARMOR -> inventory.getPaperdollItem(Inventory.PAPERDOLL_LEGS) == null
++            else -> true
++        }
++    }
++
++    /** The paperdoll slot an item goes to; for earrings and rings, the free one of the pair if there is one. */
++    private fun slotOf(bot: Player, item: ItemInstance): Int = when (item.item.bodyPart) {
++        Item.SLOT_R_HAND, Item.SLOT_LR_HAND -> Inventory.PAPERDOLL_RHAND
++        Item.SLOT_L_HAND -> Inventory.PAPERDOLL_LHAND
++        Item.SLOT_HEAD -> Inventory.PAPERDOLL_HEAD
++        Item.SLOT_CHEST, Item.SLOT_FULL_ARMOR -> Inventory.PAPERDOLL_CHEST
++        Item.SLOT_LEGS -> Inventory.PAPERDOLL_LEGS
++        Item.SLOT_GLOVES -> Inventory.PAPERDOLL_GLOVES
++        Item.SLOT_FEET -> Inventory.PAPERDOLL_FEET
++        Item.SLOT_NECK -> Inventory.PAPERDOLL_NECK
++        Item.SLOT_L_EAR, Item.SLOT_R_EAR, Item.SLOT_LR_EAR -> freeOf(bot, Inventory.PAPERDOLL_LEAR, Inventory.PAPERDOLL_REAR)
++        Item.SLOT_L_FINGER, Item.SLOT_R_FINGER, Item.SLOT_LR_FINGER -> freeOf(bot, Inventory.PAPERDOLL_LFINGER, Inventory.PAPERDOLL_RFINGER)
++        else -> -1
++    }
++
++    private fun freeOf(bot: Player, left: Int, right: Int): Int {
++        val inventory = bot.inventory
++        return if (inventory.getPaperdollItem(left) != null && inventory.getPaperdollItem(right) == null) right else left
++    }
++
++    fun equip(bot: Player, item: ItemInstance) {
++        bot.useEquippableItem(item, true)
++        bot.broadcastUserInfo()
++        EconomyLog.log(bot, Deal.Equip, "equipped ${item.itemName}${if (item.enchantLevel > 0) " +${item.enchantLevel}" else ""}")
++    }
++
++    /** Everything the bot does not need and could turn into adena (worthless items like the Tutorial Guide, worth 1 adena, stay). */
++    fun surplus(bot: Player): List<ItemInstance> {
++        val keep = mutableSetOf(57, SCROLL_OF_ESCAPE, shotId(bot))
++        keep += POTIONS
++        keep += BEGINNER_SHOTS
++        if (isArcher(bot)) keep += arrowId(bot)
++        keep += wishes(bot).map { it.itemId }
++        // Enchant scrolls for the gear the bot wears are kept for itself; others are for sale.
++        val worn = bot.inventory.paperdollItems
++        keep += AbstractEnchantPacket._scrolls.filter { (_, scroll) -> worn.any { scroll.isValid(it) } }.keys
++        return bot.inventory.items.filter {
++            !it.isEquipped && it.itemId !in keep && !it.isQuestItem && !it.isHeroItem && !it.isShadowItem &&
++                    it.referencePrice >= 2 && (it.isSellable || it.isTradable)
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+new file mode 100644
+index 0000000..5663c3e
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+@@ -0,0 +1,195 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.data.manager.BuyListManager
++import net.sf.l2j.gameserver.data.sql.SpawnTable
++import net.sf.l2j.gameserver.enums.actors.StoreType
++import net.sf.l2j.gameserver.model.ItemRequest
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Merchant
++import net.sf.l2j.gameserver.model.buylist.Product
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++import net.sf.l2j.gameserver.model.tradelist.TradeItem
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
++
++/** A merchant NPC with what it sells. */
++internal class Shop(val merchant: Merchant, val products: Map<Int, Product>)
++
++/** An item a private store sells or wants, with its owner. */
++internal class StoreOffer(val owner: Player, val tradeItem: TradeItem)
++
++/**
++ * The bots' view of the market: NPC shops indexed from spawns and buy lists, private stores around, and the
++ * server-side equivalents of the client's buy and sell requests (same checks, same prices, same taxes).
++ */
++internal object Market {
++    /** How far from the bot a shop still counts as "in this town". */
++    const val TOWN_RADIUS = 8000
++    const val STORE_RADIUS = 3000
++
++    private val shops: List<Shop> by lazy { buildShops() }
++
++    /** Lowest NPC price of each item anywhere in the world: what an item is worth to someone who needs it. */
++    private val npcPrices: Map<Int, Int> by lazy {
++        shops.flatMap { it.products.values }.groupBy { it.itemId }.mapValues { (_, products) -> products.minOf { it.price } }
++    }
++
++    fun npcPrice(itemId: Int): Int? = npcPrices[itemId]
++
++    /** What an NPC pays for one piece. */
++    fun npcSellPrice(itemId: Int): Int = (ItemTable.getInstance().getTemplate(itemId)?.referencePrice ?: 0) / 2
++
++    /** Market value of one piece: the shop price if shops sell it, otherwise the reference price. */
++    fun fairValue(itemId: Int): Int = npcPrice(itemId) ?: ItemTable.getInstance().getTemplate(itemId)?.referencePrice ?: 0
++
++    fun shopsNear(bot: Player): List<Shop> = shops.filter { distance(bot, it.merchant) <= TOWN_RADIUS }
++
++    /** The closest shop in town that sells [itemId], with the product. */
++    fun findProduct(bot: Player, itemId: Int): Pair<Shop, Product>? = shopsNear(bot)
++            .mapNotNull { shop -> shop.products[itemId]?.let { shop to it } }
++            .filter { (_, product) -> !product.hasLimitedStock() || product.count > 0 }
++            .minByOrNull { (shop, _) -> distance(bot, shop.merchant) }
++
++    fun closestShop(bot: Player): Shop? = shopsNear(bot).minByOrNull { distance(bot, it.merchant) }
++
++    /** Price per piece with the castle tax, as RequestBuyItem charges it. */
++    fun priceWithTax(shop: Shop, product: Product): Int = (product.price * (1 + (shop.merchant.castle?.taxRate ?: 0.0))).toInt()
++
++    /** Mirrors RequestBuyItem: checks price, stock and adena, pays the castle tax. */
++    fun buyFromNpc(bot: Player, shop: Shop, product: Product, count: Int): Boolean {
++        if (count <= 0 || product.price <= 0) return false
++        if (!product.item.isStackable && count > 1) return false
++        if (product.hasLimitedStock() && count > product.count) return false
++
++        val price = priceWithTax(shop, product)
++        if (Int.MAX_VALUE / count < price) return false
++        val total = price * count
++        if (!bot.reduceAdena("Buy", total, shop.merchant, false)) return false
++
++        if (product.hasLimitedStock() && !product.decreaseCount(count)) return false
++        bot.inventory.addItem("Buy", product.itemId, count, bot, shop.merchant)
++        shop.merchant.castle?.let { it.addToTreasury((total * it.taxRate).toInt()) }
++        EconomyLog.log(bot, Deal.NpcBuy, "bought ${count}x ${product.item.name} for $total from NPC ${shop.merchant.name}")
++        return true
++    }
++
++    /** Mirrors RequestSellItem: half the reference price, sellable items only. Returns the adena earned. */
++    fun sellToNpc(bot: Player, shop: Shop, items: List<ItemInstance>): Int {
++        var total = 0L
++        val sold = mutableListOf<String>()
++        for (item in items) {
++            if (!item.isSellable || item.isEquipped || item.ownerId != bot.objectId || item.referencePrice < 2) continue
++            val count = item.count
++            val price = item.referencePrice / 2L * count
++            if (bot.inventory.destroyItem("Sell", item.objectId, count, bot, shop.merchant) == null) continue
++            total += price
++            sold += "${count}x ${item.itemName}"
++        }
++        val earned = total.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
++        if (earned > 0) bot.addAdena("Sell", earned, shop.merchant, false)
++        if (sold.isNotEmpty()) EconomyLog.log(bot, Deal.NpcSell, "sold to NPC for $earned: ${sold.joinToString()}")
++        return earned
++    }
++
++    /** Private stores around the bot, other than its own. */
++    fun storesNear(bot: Player): List<Player> = bot.getKnownTypeInRadius(Player::class.java, STORE_RADIUS)
++            .filter { it !== bot && it.isOnline && !it.isDead }
++
++    fun sellOffers(bot: Player, itemId: Int): List<StoreOffer> = storesNear(bot)
++            .filter { it.storeType == StoreType.SELL }
++            .flatMap { owner -> owner.sellList.items.filter { it.item.itemId == itemId }.map { StoreOffer(owner, it) } }
++            .sortedBy { it.tradeItem.price }
++
++    fun buyOffers(bot: Player, itemId: Int): List<StoreOffer> = storesNear(bot)
++            .filter { it.storeType == StoreType.BUY }
++            .flatMap { owner -> owner.buyList.items.filter { it.item.itemId == itemId }.map { StoreOffer(owner, it) } }
++            .sortedByDescending { it.tradeItem.price }
++
++    /** Mirrors RequestPrivateStoreBuy: the store owner gets the adena, the bot gets the items. */
++    fun buyFromStore(bot: Player, offer: StoreOffer, count: Int): Boolean {
++        val owner = offer.owner
++        if (owner.storeType != StoreType.SELL || count <= 0) return false
++        val request = ItemRequest(offer.tradeItem.objectId, count, offer.tradeItem.price)
++        if (!owner.sellList.privateStoreBuy(bot, mutableSetOf(request))) return false
++        closeIfEmpty(owner)
++        EconomyLog.log(bot, Deal.StoreBuy, "bought ${count}x ${offer.tradeItem.item.name} for ${count.toLong() * offer.tradeItem.price} from store of ${owner.name}")
++        return true
++    }
++
++    /** Mirrors RequestPrivateStoreSell: the store owner pays, the bot hands over the items. */
++    fun sellToStore(bot: Player, offer: StoreOffer, item: ItemInstance, count: Int): Boolean {
++        val owner = offer.owner
++        if (owner.storeType != StoreType.BUY || count <= 0) return false
++        val request = ItemRequest(item.objectId, item.itemId, count, offer.tradeItem.price)
++        if (!owner.buyList.privateStoreSell(bot, arrayOf(request))) return false
++        closeIfEmpty(owner)
++        EconomyLog.log(bot, Deal.StoreSell, "sold ${count}x ${item.itemName} for ${count.toLong() * offer.tradeItem.price} to store of ${owner.name}")
++        return true
++    }
++
++    private fun closeIfEmpty(owner: Player) {
++        val list = if (owner.storeType == StoreType.BUY) owner.buyList else owner.sellList
++        if (list.items.isEmpty()) {
++            owner.storeType = StoreType.NONE
++            owner.broadcastUserInfo()
++        }
++    }
++
++    private fun buildShops(): List<Shop> = SpawnTable.getInstance().spawns
++            .mapNotNull { it.npc as? Merchant }
++            // Clan hall stewards serve their clan only; the world's shops are the town merchants.
++            .filter { !it.title.contains("Steward", ignoreCase = true) }
++            .mapNotNull { merchant ->
++                val products = BuyListManager.getInstance().getBuyListsByNpcId(merchant.npcId)
++                        .flatMap { it.products }
++                        .filter { it.price > 0 }
++                        .groupBy { it.itemId }
++                        .mapValues { (_, list) -> list.minByOrNull { it.price }!! }
++                if (products.isEmpty()) null else Shop(merchant, products)
++            }
++            .also { println("Autobots economy: ${it.size} shops indexed.") }
++
++    fun location(shop: Shop) = shop.merchant.location()
++}
++
++/** Kinds of economy events, counted for the periodic summary. */
++internal enum class Deal { NpcBuy, NpcSell, StoreBuy, StoreSell, Equip, EnchantSuccess, EnchantReset, EnchantBreak, SellStore, BuyStore, ModeChange }
++
++internal object EconomyLog {
++    private val counts = ConcurrentHashMap<Deal, AtomicInteger>()
++
++    fun log(bot: Player, deal: Deal, message: String) {
++        counts.computeIfAbsent(deal) { AtomicInteger() }.incrementAndGet()
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): $message")
++    }
++
++    /** A planned deal that didn't happen, and why: shows what holds the economy back. */
++    fun skip(bot: Player, reason: String) {
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): skipped: $reason")
++    }
++
++    /**
++     * One line about the whole population since the last summary, so a run can be judged without reading every deal:
++     * deals by kind, then the state of the bots online.
++     */
++    fun summary(bots: Collection<Autobot>) {
++        val deals = Deal.values().joinToString(" ") { "${it.name}=${counts[it]?.getAndSet(0) ?: 0}" }
++        if (bots.isEmpty()) {
++            println("Autobots economy summary: $deals online=0")
++            return
++        }
++        val adena = bots.sumOf { it.adena.toLong() }
++        val stores = bots.count { it.isInStoreMode }
++        val farming = bots.count { it.life?.isFallingBack == true }
++        val needGroup = bots.count { it.needsGroup }
++        val avgLevel = bots.sumOf { it.level } / bots.size
++        val maxLevel = bots.maxOf { it.level }
++        println("Autobots economy summary: $deals online=${bots.size} avgLevel=$avgLevel maxLevel=$maxLevel " +
++                "adena=$adena adenaPerBot=${adena / bots.size} stores=$stores farming=$farming needsGroup=$needGroup")
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
+new file mode 100644
+index 0000000..a47de5d
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
+@@ -0,0 +1,139 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.Autobot
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.enums.actors.StoreType
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++import net.sf.l2j.gameserver.network.clientpackets.AbstractEnchantPacket
++import net.sf.l2j.gameserver.network.serverpackets.PrivateStoreMsgBuy
++import net.sf.l2j.gameserver.network.serverpackets.PrivateStoreMsgSell
++import net.sf.l2j.gameserver.taskmanager.AttackStanceTaskManager
++import java.util.concurrent.ConcurrentHashMap
++import kotlin.math.pow
++
++/**
++ * Private stores of population bots, stocked only with what the bot owns: a sell store for valuable surplus
++ * (materials, recipes, gear, scrolls), or a buy store for gear and scrolls town shops don't sell, paid with the
++ * bot's own adena. Prices sit between what an NPC pays and what it charges, so the store is worth visiting.
++ */
++internal object StoreKeeper {
++    /** A stack worth less than this to an NPC is not worth a store slot; it goes to the shop. */
++    const val MIN_STORE_STACK_VALUE = 2000
++    private const val MIN_DISTANCE_TO_OTHER_STORE = 150
++    private const val MAX_TITLE = 29
++
++    // Unsold sessions per bot and item: each one cuts the asking price by 10%. Lost on restart, like a player's memory.
++    private val unsold = ConcurrentHashMap<Int, MutableMap<Int, Int>>()
++    // Asking price multipliers, fixed per bot and item so a store doesn't reprice itself every reopening.
++    private fun roll(botId: Int, itemId: Int, range: ClosedFloatingPointRange<Double>): Double {
++        val r = Math.floorMod(botId * 7919 + itemId * 104729, 1000) / 1000.0
++        return range.start + (range.endInclusive - range.start) * r
++    }
++
++    /** Surplus worth selling in a store rather than to an NPC. */
++    fun storeGoods(bot: Autobot): List<ItemInstance> = Gear.surplus(bot)
++            .filter { it.isTradable && askingPrice(bot, it.itemId).toLong() * it.count >= MIN_STORE_STACK_VALUE && askingPrice(bot, it.itemId) > Market.npcSellPrice(it.itemId) }
++
++    /** Items the bot is looking for that town shops don't sell: the next gear piece and scrolls for its gear. */
++    fun wanted(bot: Autobot): List<Int> {
++        val gear = Gear.wishes(bot).map { it.itemId }.filter { Market.npcPrice(it) == null }.take(1)
++        val scrolls = AbstractEnchantPacket._scrolls
++                .filter { (_, scroll) -> !scroll.isBlessed && !scroll.isCrystal && bot.inventory.paperdollItems.any { scroll.isValid(it) } }
++                .keys
++        return (gear + scrolls).distinct()
++    }
++
++    fun hasBusiness(bot: Autobot): Boolean = storeGoods(bot).isNotEmpty() || (bot.adena > 0 && wanted(bot).any { bidPrice(bot, it) in 1..bot.adena })
++
++    fun askingPrice(bot: Autobot, itemId: Int): Int {
++        val inShops = Market.npcPrice(itemId) != null
++        val base = Market.fairValue(itemId) * roll(bot.objectId, itemId, if (inShops) 0.65..0.9 else 0.8..1.5)
++        val discount = 0.9.pow(unsold[bot.objectId]?.get(itemId) ?: 0)
++        return (base * discount).toInt().coerceAtLeast(Market.npcSellPrice(itemId))
++    }
++
++    fun bidPrice(bot: Autobot, itemId: Int): Int {
++        val inShops = Market.npcPrice(itemId) != null
++        return (Market.fairValue(itemId) * roll(bot.objectId, itemId + 1, if (inShops) 0.55..0.8 else 0.6..1.0)).toInt()
++    }
++
++    /** Opens a sell store if there is valuable surplus, otherwise a buy store if the bot wants something. */
++    fun open(bot: Autobot): Boolean {
++        if (!canOpenHere(bot)) return false
++        return openSellStore(bot) || openBuyStore(bot)
++    }
++
++    fun canOpenHere(bot: Player): Boolean = !bot.isInsideZone(ZoneId.NO_STORE) && !bot.isInCombat &&
++            !AttackStanceTaskManager.getInstance().isInAttackStance(bot) && !bot.isCastingNow &&
++            bot.getKnownTypeInRadius(Player::class.java, MIN_DISTANCE_TO_OTHER_STORE).none { it.isInStoreMode }
++
++    private fun openSellStore(bot: Autobot): Boolean {
++        val goods = storeGoods(bot).sortedByDescending { askingPrice(bot, it.itemId).toLong() * it.count }.take(bot.privateSellStoreLimit)
++        if (goods.isEmpty()) return false
++
++        val list = bot.sellList
++        list.clear()
++        list.isPackaged = false
++        for (item in goods) list.addItem(item.objectId, item.count, askingPrice(bot, item.itemId))
++        if (list.items.isEmpty()) return false
++        list.title = title("WTS", goods.first().itemName, goods.size)
++
++        bot.sitDown()
++        bot.storeType = StoreType.SELL
++        bot.broadcastUserInfo()
++        bot.broadcastPacket(PrivateStoreMsgSell(bot))
++        EconomyLog.log(bot, Deal.SellStore, "opened sell store: " + list.items.joinToString { "${it.count}x ${it.item.name} @${it.price}" })
++        return true
++    }
++
++    private fun openBuyStore(bot: Autobot): Boolean {
++        // Only what the bot can actually pay for: the store can't promise adena the bot doesn't have.
++        var budget = (bot.adena * 0.8).toLong()
++        val list = bot.buyList
++        list.clear()
++        for (itemId in wanted(bot).take(bot.privateBuyStoreLimit)) {
++            val price = bidPrice(bot, itemId)
++            if (price <= 0) continue
++            val template = ItemTable.getInstance().getTemplate(itemId) ?: continue
++            val count = if (template.isStackable) (budget / price).coerceAtMost(Rnd.get(1, 3).toLong()).toInt() else if (budget >= price) 1 else 0
++            if (count <= 0) continue
++            list.addItemByItemId(itemId, count, price)
++            budget -= price.toLong() * count
++        }
++        if (list.items.isEmpty()) return false
++        list.title = title("WTB", list.items.first().item.name, list.items.size)
++
++        bot.sitDown()
++        bot.storeType = StoreType.BUY
++        bot.broadcastUserInfo()
++        bot.broadcastPacket(PrivateStoreMsgBuy(bot))
++        EconomyLog.log(bot, Deal.BuyStore, "opened buy store: " + list.items.joinToString { "${it.count}x ${it.item.name} @${it.price}" })
++        return true
++    }
++
++    /** Closes the store and remembers what didn't sell, so it's offered cheaper next time. */
++    fun close(bot: Autobot) {
++        if (!bot.isInStoreMode) return
++        if (bot.storeType == StoreType.SELL) {
++            val memory = unsold.computeIfAbsent(bot.objectId) { ConcurrentHashMap() }
++            bot.sellList.items.forEach { memory.merge(it.item.itemId, 1, Int::plus) }
++        }
++        bot.sellList.clear()
++        bot.buyList.clear()
++        bot.storeType = StoreType.NONE
++        bot.standUp()
++        bot.broadcastUserInfo()
++    }
++
++    fun forget(bot: Autobot, itemId: Int) {
++        unsold[bot.objectId]?.remove(itemId)
++    }
++
++    private fun title(kind: String, first: String, count: Int): String {
++        val text = if (count > 1) "$kind $first and more" else "$kind $first"
++        return if (text.length <= MAX_TITLE) text else text.take(MAX_TITLE)
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+new file mode 100644
+index 0000000..bb7b6ff
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -0,0 +1,238 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.behaviors.sequences.Sequence
++import dev.l2j.autobots.behaviors.sequences.WalkToSequence
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.extensions.useItem
++import dev.l2j.autobots.utils.CancellationToken
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.delay
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.enums.IntentionType
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.actor.Creature
++import net.sf.l2j.gameserver.model.actor.Npc
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++
++/** When a bot should leave its hunting spot for town, and what it can afford there. */
++internal object Errands {
++    private const val MIN_MINUTES_BETWEEN_TRIPS = 15
++    private const val ROUTINE_TRIP_MINUTES = 90
++    /** The weight penalty starts at 50% of the limit; a player heads to town before that. */
++    private const val HEAVY_LOAD_PERCENT = 45
++
++    // Enough for a gatekeeper hop; a newbie with 800 adena should still afford a scroll and some potions.
++    fun reserve(bot: Player): Int = 200 + bot.level * 100
++
++    fun spendable(bot: Player): Int = (bot.adena - reserve(bot)).coerceAtLeast(0)
++
++    fun loadPercent(bot: Player): Int = if (bot.maxLoad <= 0) 0 else (bot.currentLoad.toLong() * 100 / bot.maxLoad).toInt()
++
++    fun shouldLeaveSpot(bot: Autobot, lastTripAt: Long): Boolean {
++        val minutesSinceTrip = (System.currentTimeMillis() - lastTripAt) / 60_000
++        if (minutesSinceTrip < MIN_MINUTES_BETWEEN_TRIPS) return false
++        if (loadPercent(bot) >= HEAVY_LOAD_PERCENT) return true
++        if (outOfShots(bot)) return true
++        if (Gear.isArcher(bot) && Gear.count(bot, Gear.arrowId(bot)) < 50) return true
++        if (affordableUpgrade(bot) != null) return true
++        return minutesSinceTrip >= ROUTINE_TRIP_MINUTES && Gear.surplus(bot).isNotEmpty()
++    }
++
++    private fun outOfShots(bot: Autobot): Boolean {
++        val shotId = Gear.shotId(bot)
++        val price = Market.npcPrice(shotId) ?: return false
++        return Gear.count(bot, shotId) == 0 && spendable(bot) >= price * 200 && (bot.level >= 20 || spendable(bot) >= 5000)
++    }
++
++    /** The next piece of the kit that town shops sell and the bot can pay for. */
++    fun affordableUpgrade(bot: Autobot): Wish? = Gear.wishes(bot).firstOrNull { wish ->
++        val price = Market.npcPrice(wish.itemId) ?: return@firstOrNull false
++        price <= spendable(bot)
++    }
++}
++
++/** Gets the bot to town: a Scroll of Escape if it has one, on foot if town is close. */
++internal class GoToTownSequence(override val bot: Autobot, private val onFail: () -> Unit) : Sequence {
++    override var cancellationToken: CancellationToken? = null
++
++    override suspend fun definition() {
++        if (Gear.count(bot, Gear.SCROLL_OF_ESCAPE) > 0) {
++            if (bot.isSitting) bot.standUp()
++            delay(Rnd.get(500, 1500).toLong())
++            bot.useItem(Gear.SCROLL_OF_ESCAPE)
++            // The scroll is a 20 second cast that ends in a teleport.
++            repeat(30) { second ->
++                delay(1000)
++                if (bot.isInsideZone(ZoneId.TOWN) || bot.isDead) return
++                // The cast was interrupted (an attack, a stun): no teleport is coming.
++                if (second > 3 && !bot.isCastingNow && !bot.isTeleporting) return onFail()
++            }
++            return onFail()
++        }
++
++        val town = MapRegionData.getInstance().getLocationToTeleport(bot, MapRegionData.TeleportType.TOWN)
++        if (distance(bot.location(), town) > MAX_WALK_TO_TOWN) return onFail()
++        WalkToSequence(bot, town, 300, onFail).definition()
++    }
++
++    companion object {
++        private const val MAX_WALK_TO_TOWN = 6000
++    }
++}
++
++/**
++ * One visit to town, done like a player: the private stores around first (cheaper than shops, or paying more
++ * than shops), then the merchants to sell junk and buy supplies and the next gear piece, then equip and enchant.
++ */
++internal class TownTrip(override val bot: Autobot, private val cautious: Boolean) : Sequence {
++    override var cancellationToken: CancellationToken? = null
++
++    override suspend fun definition() {
++        if (bot.isInStoreMode) return
++        if (bot.isSitting) bot.standUp()
++
++        Gear.equipUpgradesFromInventory(bot)
++        tradeWithStores()
++        sellToNpc(junk())
++        buySupplies()
++        buyGear()
++        // What the new gear replaced is junk now, and so are store goods if the bag is still heavy.
++        val leftovers = Gear.equipUpgradesFromInventory(bot) + junk()
++        val heavy = if (Errands.loadPercent(bot) >= 40) StoreKeeper.storeGoods(bot) else emptyList()
++        sellToNpc((leftovers + heavy).distinct().filter { bot.inventory.getItemByObjectId(it.objectId) != null })
++        Enchanter.enchantWorn(bot, cautious)
++        bot.refreshOverloaded()
++    }
++
++    /** Cheap surplus that isn't worth a store slot. */
++    private fun junk(): List<ItemInstance> {
++        val goods = StoreKeeper.storeGoods(bot).map { it.objectId }.toSet()
++        return Gear.surplus(bot).filter { it.isSellable && it.objectId !in goods }
++    }
++
++    private suspend fun tradeWithStores() {
++        var visits = 0
++
++        // Sell surplus to buy stores that pay more than an NPC would.
++        for (item in Gear.surplus(bot)) {
++            if (visits >= MAX_STORE_VISITS) return
++            val offer = Market.buyOffers(bot, item.itemId).firstOrNull { it.tradeItem.price > Market.npcSellPrice(item.itemId) } ?: continue
++            if (!walkTo(offer.owner, "to sell ${item.itemName}")) continue
++            visits++
++            val live = bot.inventory.getItemByObjectId(item.objectId) ?: continue
++            Market.sellToStore(bot, offer, live, minOf(live.count, offer.tradeItem.count))
++            StoreKeeper.forget(bot, item.itemId)
++        }
++
++        // Buy what the bot needs from sell stores cheaper than the shops (or at a fair price if shops don't have it).
++        val needs = Gear.wishes(bot).map { it.itemId to 1 }.toMutableList()
++        needs += Gear.shotId(bot) to SHOTS_PER_TRIP
++        if (Gear.wishes(bot).isEmpty()) needs += StoreKeeper.wanted(bot).map { it to 1 }
++        for ((itemId, wantedCount) in needs) {
++            if (visits >= MAX_STORE_VISITS) return
++            val limit = Market.npcPrice(itemId) ?: (Market.fairValue(itemId) * 1.3).toInt()
++            val offer = Market.sellOffers(bot, itemId).firstOrNull { it.tradeItem.price < limit } ?: continue
++            val count = minOf(offer.tradeItem.count, wantedCount, Errands.spendable(bot) / offer.tradeItem.price.coerceAtLeast(1))
++            if (count <= 0 || !walkTo(offer.owner, "to buy ${offer.tradeItem.item.name}")) continue
++            visits++
++            if (Market.buyFromStore(bot, offer, count)) {
++                bot.inventory.getItemByItemId(itemId)?.takeIf { it.isEquipable && !it.isEquipped }?.let {
++                    Gear.equip(bot, it)
++                    Chatter.maybeSay(bot, Chatter.BOUGHT_UPGRADE, it.itemName)
++                }
++            }
++        }
++    }
++
++    private suspend fun sellToNpc(items: List<ItemInstance>) {
++        if (items.isEmpty()) return
++        val shop = Market.closestShop(bot) ?: return EconomyLog.skip(bot, "no shop in town to sell to")
++        if (!walkTo(shop.merchant, "to sell")) return
++        Market.sellToNpc(bot, shop, items)
++    }
++
++    private suspend fun buySupplies() {
++        // Shares of what the bot can spend now: a scroll home comes first, potions are cheap insurance,
++        // and the rest stays for gear. The reserve is travel money, and a scroll or a potion is exactly what it is
++        // kept for, so essentials may use all of the adena.
++        buy(Gear.SCROLL_OF_ESCAPE, target = 2, budgetShare = 1.0, onlyBelow = 1, essential = true)
++        if (bot.level >= 20 || Errands.spendable(bot) >= 5000) {
++            buy(Gear.shotId(bot), target = shotsFor(bot.level), budgetShare = 0.4, onlyBelow = shotsFor(bot.level) / 3)
++        }
++        // A bow without arrows can't hunt at all.
++        if (Gear.isArcher(bot)) buy(Gear.arrowId(bot), target = 1500, budgetShare = 0.6, onlyBelow = 500, essential = true)
++        // No town shop sells mana potions in Interlude: mages rest, as players did.
++        val potions = Gear.HEALING_POTIONS.sumOf { Gear.count(bot, it) }
++        val potion = Gear.HEALING_POTIONS.firstOrNull { Market.findProduct(bot, it) != null }
++        if (potion != null) buy(potion, target = 10, budgetShare = 0.5, onlyBelow = 3, have = potions, essential = true)
++    }
++
++    /** Buys up to [target] pieces when the bot has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */
++    private suspend fun buy(itemId: Int, target: Int, budgetShare: Double, onlyBelow: Int, have: Int = Gear.count(bot, itemId),
++                            essential: Boolean = false) {
++        if (have >= onlyBelow) return
++        val name = ItemTable.getInstance().getTemplate(itemId)?.name ?: "$itemId"
++        val (shop, product) = Market.findProduct(bot, itemId) ?: return EconomyLog.skip(bot, "no shop in town sells $name")
++        val price = Market.priceWithTax(shop, product).coerceAtLeast(1)
++        val budget = if (essential) bot.adena else Errands.spendable(bot)
++        val count = minOf(target - have, (budget * budgetShare / price).toInt())
++        if (count <= 0) return EconomyLog.skip(bot, "can't afford $name at $price (adena ${bot.adena}, reserve ${if (essential) 0 else Errands.reserve(bot)})")
++        if (!walkTo(shop.merchant, "for $name")) return
++        Market.buyFromNpc(bot, shop, product, count)
++    }
++
++    private suspend fun buyGear() {
++        val wish = Errands.affordableUpgrade(bot) ?: return
++        val (shop, product) = Market.findProduct(bot, wish.itemId) ?: return
++        if (Market.priceWithTax(shop, product) > Errands.spendable(bot)) return
++        if (!walkTo(shop.merchant, "for ${product.item.name}")) return
++        if (!Market.buyFromNpc(bot, shop, product, 1)) return
++        val item = bot.inventory.getItemsByItemId(wish.itemId).firstOrNull { !it.isEquipped } ?: return
++        Gear.equip(bot, item)
++        Chatter.maybeSay(bot, Chatter.BOUGHT_UPGRADE, item.itemName)
++    }
++
++    /**
++     * Walks up to an NPC or a store and pauses like a player reading the window. The last steps are a click on the
++     * target, as a player would do: the server's own approach with pathfinding gets around counters, stairs and doors
++     * that straight walking legs bump into.
++     */
++    private suspend fun walkTo(target: Creature, purpose: String = ""): Boolean {
++        if (bot.isDead) return false
++        if (!inReach(target)) WalkToSequence(bot, target.location(), APPROACH_RADIUS) {}.definition()
++        if (!inReach(target) && !bot.isDead) {
++            bot.ai.setIntention(IntentionType.INTERACT, target)
++            for (second in 1..FINAL_APPROACH_SECONDS) {
++                delay(1000)
++                if (inReach(target) || bot.isDead) break
++            }
++        }
++        if (!inReach(target)) {
++            EconomyLog.skip(bot, "couldn't reach ${target.name} $purpose (${distance(bot, target).toInt()} away, " +
++                    "dz ${target.z - bot.z}, bot at ${bot.x},${bot.y},${bot.z})")
++            return false
++        }
++        bot.target = target
++        delay(Rnd.get(2000, 5000).toLong())
++        return !bot.isDead
++    }
++
++    private fun inReach(target: Creature) = target.isInsideRadius(bot, Npc.INTERACTION_DISTANCE, true, false)
++
++    companion object {
++        private const val MAX_STORE_VISITS = 4
++        private const val SHOTS_PER_TRIP = 1000
++        private const val APPROACH_RADIUS = 300
++        private const val FINAL_APPROACH_SECONDS = 15
++
++        private fun shotsFor(level: Int) = when {
++            level < 20 -> 300
++            level < 40 -> 800
++            else -> 1500
++        }
++    }
++}
 diff --git a/src/main/kotlin/dev/l2j/autobots/ui/states/ViewStates.kt b/src/main/kotlin/dev/l2j/autobots/ui/states/ViewStates.kt
 index bf8668c..84d84e0 100644
 --- a/src/main/kotlin/dev/l2j/autobots/ui/states/ViewStates.kt
@@ -1176,10 +2366,17 @@ index bf8668c..84d84e0 100644
          deactivateStates(player, "BotDetailsViewState")
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
-index 8c88e5c..f15854c 100644
+index 8c88e5c..313d8f9 100644
 --- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
-@@ -19,6 +19,7 @@ import net.sf.l2j.gameserver.enums.actors.ClassRace
+@@ -1,5 +1,6 @@
+ package dev.l2j.autobots.utils
+ 
++import dev.l2j.autobots.population.economy.Gear
+ import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.behaviors.CombatBehavior
+ import dev.l2j.autobots.behaviors.classes.*
+@@ -19,6 +20,7 @@ import net.sf.l2j.gameserver.enums.actors.ClassRace
  import net.sf.l2j.gameserver.enums.actors.Sex
  import net.sf.l2j.gameserver.enums.items.ShotType
  import net.sf.l2j.gameserver.enums.skills.L2EffectType
@@ -1187,7 +2384,38 @@ index 8c88e5c..f15854c 100644
  import net.sf.l2j.gameserver.model.WorldObject
  import net.sf.l2j.gameserver.model.WorldRegion
  import net.sf.l2j.gameserver.model.actor.Creature
-@@ -445,11 +446,21 @@ internal fun Creature.getKnownTargatablesInRadius(radius: Int, attackPlayerType:
+@@ -331,26 +333,11 @@ internal fun createCirclePacket(name: String?, x: Int, y: Int, z: Int, radius: I
+ }
+ 
+ 
+-internal fun getShotId(bot: Player): Int {
+-    val playerLevel: Int = bot.level
+-    if (playerLevel < 20) return if (bot.getCombatBehavior().getShotType() == ShotType.SOULSHOT) 1835 else 3947
+-    if (playerLevel in 20..39) return if (bot.getCombatBehavior().getShotType() == ShotType.SOULSHOT) 1463 else 3948
+-    if (playerLevel in 40..51) return if (bot.getCombatBehavior().getShotType() == ShotType.SOULSHOT) 1464 else 3949
+-    if (playerLevel in 52..60) return if (bot.getCombatBehavior().getShotType() == ShotType.SOULSHOT) 1465 else 3950
+-    if (playerLevel in 61..75) return if (bot.getCombatBehavior().getShotType() == ShotType.SOULSHOT) 1466 else 3951
+-    return if (playerLevel >= 76) if (bot.getCombatBehavior().getShotType() == ShotType.SOULSHOT) 1467 else 3952 else 0
+-}
++/** Shots must match the grade of the equipped weapon, whatever the level. */
++internal fun getShotId(bot: Player): Int = Gear.shotId(bot)
+ 
+-internal fun getArrowId(bot: Player): Int {
+-    val playerLevel: Int = bot.level
+-    
+-    if (playerLevel < 20) return 17 // wooden arrow
+-    if (playerLevel in 20..39) return 1341 // bone arrow
+-    if (playerLevel in 40..51) return 1342 // steel arrow
+-    if (playerLevel in 52..60) return 1343 // Silver arrow
+-    if (playerLevel in 61..75) return 1344 // Mithril Arrow
+-    return if (playerLevel >= 76) 1345 else 0 // shining
+-}
++/** Arrows must match the grade of the equipped bow. */
++internal fun getArrowId(bot: Player): Int = Gear.arrowId(bot)
+ 
+ internal fun clearCircle(player: Player, circleName: String){
+     val packet = ExServerPrimitive(circleName)
+@@ -445,11 +432,21 @@ internal fun Creature.getKnownTargatablesInRadius(radius: Int, attackPlayerType:
      fun shouldTarget(it: WorldObject, attackPlayerType: AttackPlayerType) : Boolean {
          return when(attackPlayerType){
              AttackPlayerType.None -> it is Monster
