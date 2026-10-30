@@ -27,6 +27,19 @@ index d304168..442015e 100644
                  }
              }
              
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 5235b11..371b1bd 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -54,7 +54,7 @@ object AutobotsManager {
+                         it.onUpdate()
+                     } catch (e: Exception){
+                         it.isBusyThinking.set(false)
+-                        println(e)
++                        e.printStackTrace()
+                     }
+                 }
+             }
 diff --git a/src/main/kotlin/dev/l2j/autobots/admincommands/AdminAutobots.kt b/src/main/kotlin/dev/l2j/autobots/admincommands/AdminAutobots.kt
 index d6c9c8f..06fa0da 100644
 --- a/src/main/kotlin/dev/l2j/autobots/admincommands/AdminAutobots.kt
@@ -58,3 +71,77 @@ index d6c9c8f..06fa0da 100644
                                      val autobot = AutobotsManager.activeBots.getOrDefault(it.value.name, null) ?: return@innerLaunch
                                      AdminActions.despawnAutobot(autobot)
                                  }
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index ce85df0..aa03245 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -287,7 +287,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         val targets: MutableList<Creature> = when(targetingPreference) {
+             TargetingPreference.Random -> player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) }.toMutableList()
+             TargetingPreference.Closest -> {
+-                val target = player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) }.minBy { distance(player, it) }
++                val target = player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) }.minByOrNull { distance(player, it) }
+                 if(target != null) mutableListOf(target) else mutableListOf()
+             }
+         }
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt
+index 6fe02b1..5561f1b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt
+@@ -23,7 +23,7 @@ internal interface Healer {
+             finalTargets.addAll(partyMembers)
+         }
+         
+-        val target = finalTargets.filter { !it!!.isDead }.minBy { it!!.getHealthPercentage() } ?: return
++        val target = finalTargets.filter { !it!!.isDead }.minByOrNull { it!!.getHealthPercentage() } ?: return
+ 
+         //TODO fix this broken shit
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/ReturnToDeathLocationSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/ReturnToDeathLocationSequence.kt
+index 896ab2b..b71d4bb 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/ReturnToDeathLocationSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/ReturnToDeathLocationSequence.kt
+@@ -47,7 +47,7 @@ internal class ReturnToDeathLocationSequence(override val bot: Player) : Sequenc
+ 
+         val closestTeleportLocation = TeleportLocationData.getInstance().allTeleportLocations
+                 .filter { !it.isNoble }
+-                .minBy { distance(bot.lastDeathLocation!!, Location(it.x, it.y, it.z)) }
++                .minByOrNull { distance(bot.lastDeathLocation!!, Location(it.x, it.y, it.z)) }
+ 
+         bot.teleportTo(closestTeleportLocation, 20)
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TeleportToLocationSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TeleportToLocationSequence.kt
+index 1dc04ff..94f4330 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TeleportToLocationSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TeleportToLocationSequence.kt
+@@ -46,7 +46,7 @@ internal class TeleportToLocationSequence(override val bot: Player, private val
+ 
+         val closestTeleportLocation = TeleportLocationData.getInstance().allTeleportLocations
+                 .filter { !it.isNoble }
+-                .minBy { distance(targetLocation, Location(it.x, it.y, it.z)) }
++                .minByOrNull { distance(targetLocation, Location(it.x, it.y, it.z)) }
+ 
+         bot.teleportTo(closestTeleportLocation, 20)
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt b/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
+index 0968ad1..765d56c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
++++ b/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
+@@ -279,7 +279,7 @@ internal inline fun <reified T : Creature> Player.getClosestEntityInRadius(radiu
+ 
+     return region.surroundingRegions.flatMap { it.objects }
+             .filterIsInstance<T>()
+-            .filter { condition(it) && !it.isGM && it.objectId != objectId && MathUtil.checkIfInRange(radius, this, it, true) }.minBy { distance(x, y, z, it.x, it.y, it.z) }
++            .filter { condition(it) && !it.isGM && it.objectId != objectId && MathUtil.checkIfInRange(radius, this, it, true) }.minByOrNull { distance(x, y, z, it.x, it.y, it.z) }
+ }
+ 
+ internal fun Player.useMagicSkill(skill: L2Skill, forceAttack: Boolean = false){
+@@ -436,7 +436,7 @@ internal fun Player.moveTo(x: Int, y: Int, z: Int){
+ }
+ 
+ internal fun Player.findClosestGatekeeper() : Gatekeeper?{
+-    return World.getInstance().objects.filterIsInstance<Gatekeeper>().minBy { distance(location(), it.location()) }
++    return World.getInstance().objects.filterIsInstance<Gatekeeper>().minByOrNull { distance(location(), it.location()) }
+ }
+ 
+ private fun addToTradeList(itemObjectId: Int, count: Int, price: Int, list: TradeList): Boolean {

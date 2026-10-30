@@ -13,7 +13,9 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - `AutobotsManager.start()` called from `GameServer`: it starts the bots' think loop.
   - Redone hunks: IdFactory (items cleanup keeps autobot items), Player (import), Say2 (`onChat` hook).
   - `RequestBypassToServer`: null check moved before `player.isGM()` (upstream could NPE).
-- `l2autobots-fixes.patch` - upstream fixes: Kotlin 1.9 compatibility (exhaustive `when`, lambda labels) and
+- `l2autobots-fixes.patch` - upstream fixes: Kotlin 1.9 compatibility (exhaustive `when`, lambda labels,
+  `minBy` -> `minByOrNull`: since Kotlin 1.7 `minBy` throws on an empty list, which killed every bot tick
+  with no target around), think-loop errors logged with stack traces, and
   `sql/autobots.sql`, whose table options were a separate statement after `);` (MariaDB syntax error).
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
