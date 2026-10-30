@@ -174,8 +174,9 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   earns, exp and adena per minute, over 10-minute windows with the same people at the same spot (another spot, more
   than 3000 away, starts over). It tries one more (50% per window) when nobody died and the last step up didn't cost
   it; one member leaves when a member earns under 85% of the size below, or under 70% of the last window at the same
-  size (the spot runs out of monsters). The one leaving is a bot the party can spare (damage dealers first, never its
-  only tank or healer, never a player), the one the leader likes least; it won't come back for 30 minutes. A party
+  size (the spot runs out of monsters). The party's only tank or healer may leave on its own (20%) but is never sent
+  away; otherwise the leader sends away the one it likes least, damage dealers first, a player as well as a bot. Whoever
+  goes isn't taken back (or offered that party) for 30 minutes. A party
   below its size takes one fitting looker of its region a tick (lacking roles first, full parties no second tank or
   healer), besides the shouts. The groups summary shows `size N/target` and the last exp/min and adena/min.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its

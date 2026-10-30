@@ -12,7 +12,7 @@ index 95d3eac..f0b19de 100644
      var breakUpAt: Long? = null
  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-index f7f30a5..2352012 100644
+index f7f30a5..7d78ab7 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
 @@ -11,6 +11,7 @@ import kotlinx.coroutines.launch
@@ -33,17 +33,18 @@ index f7f30a5..2352012 100644
   */
  internal object GroupFinder {
      const val FULL_FROM_LEVEL = 20
-@@ -50,6 +52,9 @@ internal object GroupFinder {
+@@ -50,6 +52,10 @@ internal object GroupFinder {
      /** A leader's whispered offer to a looking player: their answer is taken as a request to join for a while. */
      private val offers = ConcurrentHashMap<Int, Pair<Int, Long>>()
      private const val OFFER_VALID_MS = 5 * 60_000L
-+    /** A bot that left a party to make it smaller: object id -> the leader and until when it won't come back. */
++    /** A member (bot or player) who left or was sent away to make a party smaller: object id -> the leader and until when it won't come back. */
 +    private val leftParty = ConcurrentHashMap<Int, Pair<Int, Long>>()
 +    private const val NO_RETURN_MS = 30 * 60_000L
++    private const val SELF_LEAVE_PERCENT = 20
  
      private val settings get() = AutobotData.settings
      private val enabled get() = settings.groupsEnabled && settings.groupFinderEnabled
-@@ -95,6 +100,7 @@ internal object GroupFinder {
+@@ -95,6 +101,7 @@ internal object GroupFinder {
          pendingPlayer.remove(bot.objectId)
          smallSince.remove(bot.objectId)
          offers.remove(bot.objectId)
@@ -51,7 +52,7 @@ index f7f30a5..2352012 100644
      }
  
      fun offered(leader: Autobot, player: Player) {
-@@ -117,6 +123,7 @@ internal object GroupFinder {
+@@ -117,6 +124,7 @@ internal object GroupFinder {
              fullSeekers.remove(it.objectId)
          }
  
@@ -59,7 +60,7 @@ index f7f30a5..2352012 100644
          for ((_, regionLookers) in lookers.groupBy { MapRegionData.getInstance().getMapRegion(it.x, it.y) }) {
              val pool = regionLookers.sortedWith(compareByDescending<Autobot> { Sociability.of(it).ordinal }.thenByDescending { it.level }).toMutableList()
              // Full parties first: they need particular people, a casual party takes whoever is left.
-@@ -136,9 +143,15 @@ internal object GroupFinder {
+@@ -136,9 +144,15 @@ internal object GroupFinder {
                  form(leader, members, PartyKind.Casual)
                  grouped += members.size + 1
              }
@@ -76,7 +77,7 @@ index f7f30a5..2352012 100644
          remember(online)
      }
  
-@@ -161,7 +174,7 @@ internal object GroupFinder {
+@@ -161,7 +175,7 @@ internal object GroupFinder {
          wipes = 0
          for (party in parties) {
              val leader = party.leader
@@ -85,7 +86,7 @@ index f7f30a5..2352012 100644
                  "${it.name} ${Role.of(it.classId)} ${distance(leader, it).toInt()}${if (it.isDead) " dead" else ""} ${(it as? Autobot)?.activeSequence?.javaClass?.simpleName ?: it.ai.desire.intention}"
              } + " | leader ${(leader as? Autobot)?.activeSequence?.javaClass?.simpleName ?: leader.ai.desire.intention}" + if (leader.isDead) " (leader dead)" else "")
          }
-@@ -237,6 +250,7 @@ internal object GroupFinder {
+@@ -237,6 +251,7 @@ internal object GroupFinder {
          leader.party?.let { party ->
              val state = PartyPlan.state(party)
              state.kind = kind
@@ -93,7 +94,7 @@ index f7f30a5..2352012 100644
              state.breakUpAt = if (kind == PartyKind.Casual) System.currentTimeMillis() + Rnd.get(CASUAL_MIN_MS, CASUAL_MAX_MS) else null
          }
          nextShout[leader.objectId] = System.currentTimeMillis() + Rnd.get(SHOUT_MIN_MS, SHOUT_MAX_MS)
-@@ -269,12 +283,63 @@ internal object GroupFinder {
+@@ -269,12 +284,75 @@ internal object GroupFinder {
              }
          } else smallSince.remove(leader.objectId)
  
@@ -137,28 +138,40 @@ index f7f30a5..2352012 100644
 +    }
 +
 +    /**
-+     * Too many for what the spot gives: one bot leaves, the one the leader likes least among those the party can spare
-+     * (damage dealers first, never its only tank or healer, never a player), and goes looking for another group.
++     * Too many for what the spot gives: one member goes. The party's only tank or healer may decide to leave on its own
++     * ([SELF_LEAVE_PERCENT]), it is never sent away. Otherwise the leader sends away the one it likes least among the
++     * others, damage dealers first, a player as well as a bot. Whoever goes won't be taken back for [NO_RETURN_MS].
 +     */
 +    private fun letGo(party: Party) {
 +        val leader = party.leader as? Autobot ?: return
 +        val roles = party.members.map { Role.of(it.classId) }
-+        val member = party.members.filterIsInstance<Autobot>()
-+                .filter { it !== leader && Role.of(it.classId).let { role -> (role != Role.Tank && role != Role.Healer) || roles.count { r -> r == role } > 1 } }
-+                .sortedWith(compareBy<Autobot> { if (Role.of(it.classId) == Role.Damage) 0 else 1 }.thenBy { Relations.affinity(leader, it) })
++        fun isOnly(member: Player) = Role.of(member.classId).let { (it == Role.Tank || it == Role.Healer) && roles.count { r -> r == it } == 1 }
++        val others = party.members.filter { it !== leader }
++        val leaving = others.filterIsInstance<Autobot>().filter { isOnly(it) }.firstOrNull { Rnd.get(100) < SELF_LEAVE_PERCENT }
++        if (leaving != null) {
++            leaving.partySay(listOf("too many of us here, exp is low, I'm off. ty all", "мало опыта на всех, пойду дальше, всем спасибо",
++                    "нас многовато для этого места, я отвалюсь", "gonna leave, too crowded for exp, gl").random())
++            party.removePartyMember(leaving, MessageType.LEFT)
++            leftParty[leaving.objectId] = leader.objectId to System.currentTimeMillis() + NO_RETURN_MS
++            startLooking(leaving)
++            if (settings.groupLog) println("Autobots groups: ${leaving.name} (${Role.of(leaving.classId)}) left ${leader.name}'s party on its own, now ${PartySize.target(party)}")
++            return
++        }
++        val member = others.filter { !isOnly(it) }
++                .sortedWith(compareBy<Player> { if (Role.of(it.classId) == Role.Damage) 0 else 1 }.thenBy { Relations.affinity(leader, it) })
 +                .firstOrNull() ?: return
-+        member.partySay(listOf("too many of us here, exp is low, I'm off. ty all", "мало опыта на всех, пойду дальше, всем спасибо",
-+                "нас многовато для этого места, я отвалюсь", "gonna leave, too crowded for exp, gl").random())
-+        party.removePartyMember(member, MessageType.LEFT)
++        leader.partySay(listOf("${member.name}, sorry, too many of us for this spot", "${member.name}, сорри, нас многовато, опыта мало",
++                "${member.name}, извини, сокращаемся, на всех не хватает", "${member.name} ty for party, we go smaller").random())
++        party.removePartyMember(member, MessageType.EXPELLED)
 +        leftParty[member.objectId] = leader.objectId to System.currentTimeMillis() + NO_RETURN_MS
-+        startLooking(member)
-+        if (settings.groupLog) println("Autobots groups: ${member.name} left ${leader.name}'s party to make it smaller, now ${PartySize.target(party)}")
++        if (member is Autobot) startLooking(member)
++        if (settings.groupLog) println("Autobots groups: ${leader.name} sent ${member.name} away to make the party smaller, now ${PartySize.target(party)}")
 +    }
 +
      /** What the party lacks most, as a player would put it in a shout. A casual party takes anybody. */
      fun needs(party: Party): List<Role> {
          if (PartyPlan.state(party).kind == PartyKind.Casual) return listOf(Role.Damage)
-@@ -291,7 +356,7 @@ internal object GroupFinder {
+@@ -291,11 +369,12 @@ internal object GroupFinder {
  
      /** A party a looking player could join: led by a bot of this region, with room and levels that fit. */
      fun partiesFor(player: Player, online: Collection<Autobot>): List<Party> = online
@@ -167,7 +180,12 @@ index f7f30a5..2352012 100644
              .filter { MapRegionData.getInstance().getMapRegion(it.x, it.y) == MapRegionData.getInstance().getMapRegion(player.x, player.y) }
              .map { it.party }
              .filter { p -> kotlin.math.abs(p.members.sumOf { it.level } / p.membersCount - player.level) <= MAX_LEVEL_SPREAD }
-@@ -309,7 +374,7 @@ internal object GroupFinder {
+             .filter { p -> pendingPlayer[p.leader.objectId]?.let { it.second < System.currentTimeMillis() } ?: true }
++            .filter { p -> leftParty[player.objectId]?.let { it.first == p.leader.objectId && it.second > System.currentTimeMillis() } != true }
+             .distinct()
+ 
+     /**
+@@ -309,7 +388,7 @@ internal object GroupFinder {
          if (player.karma > 0) return GroupChat.Line.NoPk
          val role = Role.of(player.classId)
          val roles = party.members.map { Role.of(it.classId) }
