@@ -24,6 +24,20 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   Looting (`LootPicker`): bots pick up their own and ownerless drops within 400, one per tick, before fighting
   back; below 40% HP they fight instead. Items over the weight or slot limit are skipped; a pick-up the AI
   ignores (mid-attack or mid-cast) is retried up to 3 times.
+  Living population (`population/`, on by default, `populationSize` in `config.xml`, 0 disables it):
+  - `PopulationManager` creates level 1 bots like the client does (starter class, race village, starter kit)
+    and logs them in and out every 15 s. Bots are marked `Population` in `activity_prefs`; bots made from
+    the dashboard are left alone.
+  - `DailySchedule`: per bot chronotype (wake time around 08:00 +- 2.5 h, Moscow time), 8 h sleep and 2-4
+    sessions of 1-3 h a day, more likely in the evening. `Career`: play periods of 2-60 days, breaks of
+    2-30 days, 30% chance to quit after each period. Both are derived from the object id, nothing is stored.
+  - Newbies replace inactive players, up to `populationNewbiesPerDay` spread over the day; a fresh server
+    opens with `populationSize` of them at once.
+  - `LifeBehavior`: a session is hunting (90%) or AFK. Hunting spots come from monster spawns (2500 cells
+    with 4+ monsters of level -4..+2), weighted towards close and less crowded ones. Far spots are reached by
+    a paid gatekeeper teleport, near ones on foot; empty or unreachable spots are dropped.
+  - Nothing from thin air any more: no gear on spawn or level up, no free shots, potions, arrows, buffs or
+    mana; bots use what they own and sit down to regenerate (`Rester`).
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 

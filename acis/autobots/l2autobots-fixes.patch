@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index ef03838..8e2a714 100644
+index ef03838..41c4a54 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -2,9 +2,9 @@
+@@ -2,11 +2,23 @@
  <settings>
    <thinkIteration>350</thinkIteration>
    <defaultTitle>Welcome to L2</defaultTitle>
@@ -14,6 +14,20 @@ index ef03838..8e2a714 100644
    <useManaPots>true</useManaPots>
    <useQuickHealingPots>true</useQuickHealingPots>
    <useGreaterHealingPots>true</useGreaterHealingPots>
+   <useGreaterCpPots>true</useGreaterCpPots>
++  <!-- Living population: bots that play on human-like schedules, take breaks, quit and get replaced by newbies.
++       populationSize is how many of them are active (not on a break, not quit); about half of them are online at the evening peak.
++       0 disables it. -->
++  <populationSize>500</populationSize>
++  <populationNewbiesPerDay>40</populationNewbiesPerDay>
++  <populationLoginsPerTick>10</populationLoginsPerTick>
++  <populationTimeZone>Europe/Moscow</populationTimeZone>
++  <populationSleepHours>8</populationSleepHours>
++  <populationMinSessions>2</populationMinSessions>
++  <populationMaxSessions>4</populationMaxSessions>
++  <populationMinSessionMinutes>60</populationMinSessionMinutes>
++  <populationMaxSessionMinutes>180</populationMaxSessionMinutes>
+ </settings>
 diff --git a/sql/autobots.sql b/sql/autobots.sql
 index b824d98..a8b6830 100644
 --- a/sql/autobots.sql
@@ -32,10 +46,59 @@ index b824d98..a8b6830 100644
  
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
-index d304168..442015e 100644
+index d304168..992cebf 100644
 --- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
-@@ -329,6 +329,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -6,7 +6,6 @@ import dev.l2j.autobots.behaviors.SocialBehavior
+ import dev.l2j.autobots.behaviors.preferences.ActivityType
+ import dev.l2j.autobots.behaviors.preferences.SocialPreferences
+ import dev.l2j.autobots.behaviors.preferences.TownAction
+-import dev.l2j.autobots.behaviors.sequences.EquipGearRealisticallySequence
+ import dev.l2j.autobots.behaviors.sequences.Sequence
+ import dev.l2j.autobots.dao.AutobotsDao
+ import dev.l2j.autobots.extensions.getNewClassId
+@@ -15,6 +14,7 @@ import dev.l2j.autobots.models.AutobotLoc
+ import dev.l2j.autobots.models.BotChat
+ import dev.l2j.autobots.models.BotDebugAction
+ import dev.l2j.autobots.models.RespawnAction
++import dev.l2j.autobots.population.LifeBehavior
+ import dev.l2j.autobots.utils.clearCircle
+ import dev.l2j.autobots.utils.getBehaviorByClassId
+ import dev.l2j.autobots.utils.supportedCombatPrefs
+@@ -73,6 +73,9 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+     
+     internal var respawnAction: RespawnAction = RespawnAction.ReturnToDeathLocation
+     
++    // Set for bots of the living population; they decide what to do themselves.
++    internal var life: LifeBehavior? = null
++    
+     internal val chatMessages = mutableListOf<BotChat>()    
+     
+     internal var spawnTime: Long = 0
+@@ -104,10 +107,11 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+         
+         isBusyThinking.set(true)
+         handleScheduledLogout()
+-
+-        combatBehavior.applyBuffs()
+         
+-        if(isInsideZone(ZoneId.TOWN)) {
++        val life = life
++        if(life != null) {
++            life.onUpdate()
++        } else if(isInsideZone(ZoneId.TOWN)) {
+             socialBehavior.onUpdate()
+         } else {
+             combatBehavior.onUpdate()
+@@ -301,6 +305,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+         }
+         
+         try{
++            life?.onLogout()
+             clearDevActions()
+             setOnlineStatus(false, true)
+             abortAttack()
+@@ -329,6 +334,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
                  }
                  when (effect.effectType) {
                      L2EffectType.SIGNET_GROUND, L2EffectType.SIGNET_EFFECT -> effect.exit()
@@ -43,11 +106,55 @@ index d304168..442015e 100644
                  }
              }
              
+@@ -478,15 +484,9 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+     
+     @OptIn(ExperimentalStdlibApi::class)
+     internal fun onLevelChange(oldLevel: Int, newLevel: Int){
+-        val bot = this
+-
+-        val triggerClassChange = shouldChangeClass(oldLevel, newLevel)
+-        
+-        if(!triggerClassChange) {
+-            CoScopes.generalScope.launch { EquipGearRealisticallySequence(bot).execute() }
+-        } else {
++        // Gear is no longer handed out on level up; bots keep what they own.
++        if(shouldChangeClass(oldLevel, newLevel)) {
+             CoScopes.generalScope.launch {
+-                
+                 val newClassId = getNewClassId(classId)
+                 
+                 if(newClassId != null && newClassId != classId) {
+@@ -494,9 +494,6 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+                     setClassId(newClassId.id)
+                     rewardSkills()
+                 }
+-
+-                delay(1000)
+-                EquipGearRealisticallySequence(bot).execute()
+             }
+         }
+     }
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-index 5235b11..371b1bd 100644
+index 5235b11..39b5507 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-@@ -54,7 +54,7 @@ object AutobotsManager {
+@@ -11,6 +11,7 @@ import dev.l2j.autobots.extensions.useMagicSkill
+ import dev.l2j.autobots.models.AutobotInfo
+ import dev.l2j.autobots.models.BotChat
+ import dev.l2j.autobots.models.ChatType
++import dev.l2j.autobots.population.PopulationManager
+ import dev.l2j.autobots.ui.AutobotsUi
+ import dev.l2j.autobots.utils.*
+ import kotlinx.coroutines.launch
+@@ -46,6 +47,7 @@ object AutobotsManager {
+         AutobotsDao.updateAllBotOnlineStatus(false)
+         AutobotScheduler
+         AutofarmManager
++        PopulationManager.start()
+ 
+         Klock.start("onUpdate", 1000, AutobotData.settings.iterationDelay, CoScopes.onUpdateScope, action = {
+             activeBots.values.forEach {
+@@ -54,7 +56,7 @@ object AutobotsManager {
                          it.onUpdate()
                      } catch (e: Exception){
                          it.isBusyThinking.set(false)
@@ -56,6 +163,15 @@ index 5235b11..371b1bd 100644
                      }
                  }
              }
+@@ -206,8 +208,6 @@ object AutobotsManager {
+         PlayerInfoTable.getInstance().addPlayer(autobot.objectId, "Autobot", autobot.name, 0)
+         autobot.rewardSkills()
+ 
+-        giveItemsByClassAndLevel(autobot)
+-
+         val symbols = AutobotData.symbols.firstOrNull { 
+             it.classId == autobot.classId || it.classId == autobot.classId.parent || (autobot.classId.parent?.parent == it.classId )
+         }
 diff --git a/src/main/kotlin/dev/l2j/autobots/admincommands/AdminAutobots.kt b/src/main/kotlin/dev/l2j/autobots/admincommands/AdminAutobots.kt
 index d6c9c8f..06fa0da 100644
 --- a/src/main/kotlin/dev/l2j/autobots/admincommands/AdminAutobots.kt
@@ -88,27 +204,41 @@ index d6c9c8f..06fa0da 100644
                                      AdminActions.despawnAutobot(autobot)
                                  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-index ce85df0..29c2062 100644
+index ce85df0..c7ac93f 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-@@ -34,6 +34,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -34,6 +34,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
      
      private val blacklistedTargets: MutableList<Int> = mutableListOf()
      
 +    private val lootPicker = LootPicker(player)
 +    
++    private val rester = Rester(player)
++    
      internal suspend fun onUpdate() {
          if(player.isDead) {
              handleDeath()
-@@ -42,6 +44,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -42,6 +46,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
          
          ensureSummonPet()        
          handleShots()
++        if(rester.onUpdate()) return
 +        if(lootPicker.onUpdate()) return
          targetAppropriateTarget()
          checkSelfSupportingSkills()
          beforeAttack()
-@@ -287,7 +290,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -110,10 +116,6 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         if(this is Kiter) {
+             kite(this.player)
+         }
+-        
+-        if(this is SecretManaRegen) {
+-            regenMana(this.player)
+-        }
+     }
+     
+     protected open suspend fun afterAttack(){}
+@@ -287,7 +289,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
          val targets: MutableList<Creature> = when(targetingPreference) {
              TargetingPreference.Random -> player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) }.toMutableList()
              TargetingPreference.Closest -> {
@@ -117,6 +247,42 @@ index ce85df0..29c2062 100644
                  if(target != null) mutableListOf(target) else mutableListOf()
              }
          }
+@@ -334,19 +336,13 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+                 (it is Player && it.clan != null && player.clan != null && player.clanId == it.clanId)
+     }
+ 
++    /** Turns on auto use of shots the bot actually owns; shots are no longer created from nothing. */
+     protected open fun handleShots() {
+-        if(player is Autobot) {
+-            if (player.inventory.getItemByItemId(getShotId(player)) != null) {
+-                if (player.inventory.getItemByItemId(getShotId(player)).count <= 20) {
+-                    player.inventory.addItem("", getShotId(player), 500, player, null)
+-                }
+-            } else {
+-                player.inventory.addItem("", getShotId(player), 500, player, null)
+-            }
+-        }        
++        val beginnerShotId = if (getShotType() == ShotType.SOULSHOT) BEGINNER_SOULSHOT_ID else BEGINNER_SPIRITSHOT_ID
++        val shotId = listOf(getShotId(player), beginnerShotId).firstOrNull { player.inventory.getItemByItemId(it) != null } ?: return
+         
+-        if (!player.autoSoulShot.contains(getShotId(player))) {
+-            player.addAutoSoulShot(getShotId(player))
++        if (!player.autoSoulShot.contains(shotId)) {
++            player.addAutoSoulShot(shotId)
+             player.rechargeShots(true, true)
+         }
+     }
+@@ -374,4 +370,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+     init {
+         player.setIsRunning(true)
+     }
++    
++    companion object {
++        private const val BEGINNER_SOULSHOT_ID = 5789
++        private const val BEGINNER_SPIRITSHOT_ID = 5790
++    }
+ }
+\ No newline at end of file
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt
 new file mode 100644
 index 0000000..e6679fb
@@ -173,6 +339,77 @@ index 0000000..e6679fb
 +        private const val MAX_PICK_UP_ATTEMPTS = 3
 +    }
 +}
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
+new file mode 100644
+index 0000000..7bd5585
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
+@@ -0,0 +1,40 @@
++package dev.l2j.autobots.behaviors
++
++import dev.l2j.autobots.population.isAttackedByMonster
++import dev.l2j.autobots.utils.getHealthPercentage
++import dev.l2j.autobots.utils.getManaPercentage
++import net.sf.l2j.gameserver.model.actor.Creature
++import net.sf.l2j.gameserver.model.actor.Player
++
++/** Sits down to regenerate between fights, the way a player without potions does. */
++internal class Rester(private val player: Player) {
++
++    /** Returns true while resting, so the bot does not start a new fight. */
++    fun onUpdate(): Boolean {
++        if (player.isDead) return false
++
++        if (player.isSitting) {
++            if (player.isAttackedByMonster() || isRested()) player.standUp()
++            return true
++        }
++
++        if (isTired() && !player.isAttackedByMonster() && !player.isMoving && !hasLiveTarget()) {
++            player.sitDown()
++            return true
++        }
++        return false
++    }
++
++    private fun isTired() = player.getHealthPercentage() < TIRED_HEALTH_PERCENT || player.getManaPercentage() < TIRED_MANA_PERCENT
++
++    private fun isRested() = player.getHealthPercentage() >= RESTED_HEALTH_PERCENT && player.getManaPercentage() >= RESTED_MANA_PERCENT
++
++    private fun hasLiveTarget() = (player.target as? Creature)?.let { !it.isDead && it !== player } ?: false
++
++    companion object {
++        private const val TIRED_HEALTH_PERCENT = 45.0
++        private const val TIRED_MANA_PERCENT = 20.0
++        private const val RESTED_HEALTH_PERCENT = 95.0
++        private const val RESTED_MANA_PERCENT = 90.0
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/ConsumableUser.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/ConsumableUser.kt
+index 6f6f5c4..4eef207 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/ConsumableUser.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/ConsumableUser.kt
+@@ -1,6 +1,5 @@
+ package dev.l2j.autobots.behaviors.attributes
+ 
+-import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.extensions.useItem
+ import net.sf.l2j.gameserver.model.actor.Player
+ 
+@@ -14,11 +13,8 @@ internal interface ConsumableUser {
+             
+             if(!it.condition(player)) return@forEach
+             
+-            val items = player.inventory.getItemsByItemId(it.consumableId)
+-            
+-            if(items.isEmpty() && player is Autobot) {
+-                player.addItem("AubotoItem", it.consumableId, 200, player, false)
+-            }
++            // Only potions the bot owns; they are no longer created from nothing.
++            if(player.inventory.getItemByItemId(it.consumableId) == null) return@forEach
+             
+             player.useItem(it.consumableId)
+         }
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt
 index 6fe02b1..5561f1b 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt
@@ -186,6 +423,53 @@ index 6fe02b1..5561f1b 100644
  
          //TODO fix this broken shit
  
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/RequiresMiscItem.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/RequiresMiscItem.kt
+index 2402cc2..4fe7dcf 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/RequiresMiscItem.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/RequiresMiscItem.kt
+@@ -1,6 +1,5 @@
+ package dev.l2j.autobots.behaviors.attributes
+ 
+-import dev.l2j.autobots.Autobot
+ import net.sf.l2j.gameserver.model.actor.Player
+ import net.sf.l2j.gameserver.model.item.instance.ItemInstance
+ 
+@@ -10,19 +9,10 @@ internal interface RequiresMiscItem {
+ 
+     fun handleMiscItems(fakePlayer: Player) {
+         
++        // Only items the bot owns (arrows and the like); they are no longer created from nothing.
+         miscItems.forEach {
+-            if (fakePlayer.inventory.getItemByItemId(it.miscItemId(fakePlayer)) != null && fakePlayer is Autobot) {
+-                if (fakePlayer.inventory.getItemByItemId(it.miscItemId(fakePlayer)).count <= it.minimumAmountBeforeGive) {
+-                    fakePlayer.inventory.addItem("", it.miscItemId(fakePlayer), it.countToGive, fakePlayer, null)
+-                }
+-            } else {
+-                if(fakePlayer is Autobot) {
+-                    fakePlayer.inventory.addItem("", it.miscItemId(fakePlayer), it.countToGive, fakePlayer, null)
+-                }                
+-                
+-                val consumable: ItemInstance? = fakePlayer.inventory.getItemByItemId(it.miscItemId(fakePlayer)) ?: return@forEach
+-                if (consumable!!.isEquipable) fakePlayer.inventory.equipItem(consumable)
+-            }
++            val item: ItemInstance = fakePlayer.inventory.getItemByItemId(it.miscItemId(fakePlayer)) ?: return@forEach
++            if (item.isEquipable && !item.isEquipped) fakePlayer.inventory.equipItem(item)
+         }
+     }
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/preferences/ActivityPreferences.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/preferences/ActivityPreferences.kt
+index 8ebef36..2d2a4d7 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/preferences/ActivityPreferences.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/preferences/ActivityPreferences.kt
+@@ -19,5 +19,6 @@ internal data class ActivityPreferences(@JsonProperty("activityType")var activit
+ enum class ActivityType {
+     None,
+     Uptime,
+-    Schedule
++    Schedule,
++    Population
+ }
+\ No newline at end of file
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/ReturnToDeathLocationSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/ReturnToDeathLocationSequence.kt
 index 896ab2b..b71d4bb 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/ReturnToDeathLocationSequence.kt
@@ -212,6 +496,175 @@ index 1dc04ff..94f4330 100644
  
          bot.teleportTo(closestTeleportLocation, 20)
  
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TravelByGatekeeperSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TravelByGatekeeperSequence.kt
+new file mode 100644
+index 0000000..8536d63
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TravelByGatekeeperSequence.kt
+@@ -0,0 +1,33 @@
++package dev.l2j.autobots.behaviors.sequences
++
++import dev.l2j.autobots.extensions.findClosestGatekeeper
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.utils.CancellationToken
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.delay
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.location.TeleportLocation
++
++/** Walks to the nearest gatekeeper and pays for a teleport to [exit]; calls [onFail] when that is not possible. */
++internal class TravelByGatekeeperSequence(override val bot: Player, private val exit: TeleportLocation, private val onFail: () -> Unit) : Sequence {
++
++    override var cancellationToken: CancellationToken? = null
++
++    override suspend fun definition() {
++        val gatekeeper = bot.findClosestGatekeeper() ?: return onFail()
++
++        WalkToSequence(bot, gatekeeper.location(), INTERACTION_RADIUS, onFail).definition()
++        if (distance(bot, gatekeeper) > INTERACTION_RADIUS * 2) return
++
++        bot.target = gatekeeper
++        delay(Rnd.get(2000, 4000).toLong())
++        if (exit.price > 0 && !bot.reduceAdena("Teleport", exit.price, gatekeeper, false)) return onFail()
++
++        bot.teleportTo(exit, 20)
++    }
++
++    companion object {
++        private const val INTERACTION_RADIUS = 150
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+new file mode 100644
+index 0000000..01ab5ef
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+@@ -0,0 +1,59 @@
++package dev.l2j.autobots.behaviors.sequences
++
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.extensions.moveTo
++import dev.l2j.autobots.population.isAttackedByMonster
++import dev.l2j.autobots.utils.CancellationToken
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.delay
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.location.Location
++
++/**
++ * Walks to [destination] in short legs, so pathfinding only has to solve nearby obstacles.
++ * Stops when the bot is attacked, and calls [onStuck] when it stops getting closer.
++ */
++internal class WalkToSequence(override val bot: Player, private val destination: Location, private val arrivalRadius: Int, private val onStuck: () -> Unit) : Sequence {
++
++    override var cancellationToken: CancellationToken? = null
++
++    override suspend fun definition() {
++        var bestDistance = Double.MAX_VALUE
++        var checksWithoutProgress = 0
++
++        while (true) {
++            val remaining = distance(bot.location(), destination)
++            if (remaining <= arrivalRadius || bot.isDead || bot.isAttackedByMonster()) return
++
++            if (remaining < bestDistance - MIN_PROGRESS) {
++                bestDistance = remaining
++                checksWithoutProgress = 0
++            } else if (++checksWithoutProgress >= MAX_CHECKS_WITHOUT_PROGRESS) {
++                onStuck()
++                return
++            }
++
++            if (!bot.isMoving) {
++                val leg = nextLeg(remaining)
++                bot.moveTo(leg.x, leg.y, leg.z)
++            }
++            delay(CHECK_INTERVAL_MS)
++        }
++    }
++
++    private fun nextLeg(remaining: Double): Location {
++        if (remaining <= LEG_LENGTH) return destination
++        val ratio = LEG_LENGTH / remaining
++        return Location(
++                bot.x + ((destination.x - bot.x) * ratio).toInt(),
++                bot.y + ((destination.y - bot.y) * ratio).toInt(),
++                bot.z + ((destination.z - bot.z) * ratio).toInt())
++    }
++
++    companion object {
++        private const val LEG_LENGTH = 2000.0
++        private const val MIN_PROGRESS = 100
++        private const val CHECK_INTERVAL_MS = 2000L
++        private const val MAX_CHECKS_WITHOUT_PROGRESS = 15
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index 323190c..9809e46 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -24,7 +24,16 @@ internal data class AutobotSettings(
+         @JsonProperty("useManaPots") var useManaPots: Boolean = true,
+         @JsonProperty("useQuickHealingPots") var useQuickHealingPots: Boolean = false,
+         @JsonProperty("useGreaterHealingPots") var useGreaterHealingPots: Boolean = true,
+-        @JsonProperty("useGreaterCpPots") var useGreaterCpPots: Boolean = true
++        @JsonProperty("useGreaterCpPots") var useGreaterCpPots: Boolean = true,
++        @JsonProperty("populationSize") var populationSize: Int = 0,
++        @JsonProperty("populationNewbiesPerDay") var populationNewbiesPerDay: Int = 40,
++        @JsonProperty("populationLoginsPerTick") var populationLoginsPerTick: Int = 10,
++        @JsonProperty("populationTimeZone") var populationTimeZone: String = "Europe/Moscow",
++        @JsonProperty("populationSleepHours") var populationSleepHours: Int = 8,
++        @JsonProperty("populationMinSessions") var populationMinSessions: Int = 2,
++        @JsonProperty("populationMaxSessions") var populationMaxSessions: Int = 4,
++        @JsonProperty("populationMinSessionMinutes") var populationMinSessionMinutes: Int = 60,
++        @JsonProperty("populationMaxSessionMinutes") var populationMaxSessionMinutes: Int = 180
+ ){
+     @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
+         setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+diff --git a/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt b/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
+index 2a48781..2676dae 100644
+--- a/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
++++ b/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
+@@ -38,6 +38,7 @@ internal object AutobotsDao {
+     private const val BotNameExists = "SELECT count(1) where char_name=? LIMIT 1"
+     private const val GetAllBotInfo = "SELECT char_name, level, online, classid, obj_Id, clanid from autobots"
+     private const val DeleteById = "DELETE FROM autobots where obj_Id = ?"
++    private const val PopulationMembers = "SELECT obj_Id, char_name, creationDate FROM autobots WHERE JSON_CONTAINS(activity_prefs, '\"Population\"', '\$.activityType')"
+     private const val ScheduledBotSpawn = "SELECT char_name, json_extract(activity_prefs, '\$.loginTime') AS loginTime, json_extract(activity_prefs, '\$.logoutTime') AS logoutTime FROM autobots WHERE JSON_CONTAINS(activity_prefs, '\"Schedule\"', '\$.activityType')"
+ 
+     val mapper = jacksonObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+@@ -323,6 +324,21 @@ internal object AutobotsDao {
+         }
+     }
+     
++    /** Every bot that belongs to the living population. */
++    fun loadPopulationMembers(): List<PopulationMemberInfo> {
++        val members = mutableListOf<PopulationMemberInfo>()
++        L2DatabaseFactory.getInstance().connection.use { con ->
++            con.prepareStatement(PopulationMembers).use { ps ->
++                ps.executeQuery().use { rset ->
++                    while (rset.next()) {
++                        members.add(PopulationMemberInfo(rset.getInt("obj_Id"), rset.getString("char_name"), rset.getLong("creationDate")))
++                    }
++                }
++            }
++        }
++        return members
++    }
++
+     fun loadScheduledSpawns() : List<ScheduledSpawnInfo> {        
+         val list = mutableListOf<ScheduledSpawnInfo>()
+         L2DatabaseFactory.getInstance().connection.use { con ->
+@@ -503,4 +519,6 @@ internal object AutobotsDao {
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
++
++internal data class PopulationMemberInfo(val objectId: Int, val name: String, val creationTime: Long)
 diff --git a/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt b/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
 index 0968ad1..765d56c 100644
 --- a/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
@@ -234,6 +687,474 @@ index 0968ad1..765d56c 100644
  }
  
  private fun addToTradeList(itemObjectId: Int, count: Int, price: Int, list: TradeList): Boolean {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/Career.kt b/src/main/kotlin/dev/l2j/autobots/population/Career.kt
+new file mode 100644
+index 0000000..c21b246
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/Career.kt
+@@ -0,0 +1,35 @@
++package dev.l2j.autobots.population
++
++import java.time.LocalDate
++import java.util.Random
++
++/**
++ * The long-term life of one bot as a player, derived from its object id: it plays for a while, takes a break,
++ * comes back, and after some play period quits for good. Many players only try the game for a few days.
++ */
++internal class Career(private val botId: Int, private val firstDay: LocalDate) {
++
++    fun isActiveOn(day: LocalDate): Boolean {
++        val rnd = Random(botId.toLong() * CAREER_SEED_MULTIPLIER)
++        var phaseStart = firstDay
++        while (true) {
++            // Squaring skews play periods towards short ones: lots of tourists, few veterans.
++            val playDays = MIN_PLAY_DAYS + (rnd.nextDouble() * rnd.nextDouble() * (MAX_PLAY_DAYS - MIN_PLAY_DAYS)).toLong()
++            phaseStart = phaseStart.plusDays(playDays)
++            if (day < phaseStart) return true
++            if (rnd.nextDouble() < QUIT_CHANCE) return false
++
++            phaseStart = phaseStart.plusDays(MIN_BREAK_DAYS + rnd.nextInt(MAX_BREAK_DAYS - MIN_BREAK_DAYS + 1).toLong())
++            if (day < phaseStart) return false
++        }
++    }
++
++    companion object {
++        private const val MIN_PLAY_DAYS = 2
++        private const val MAX_PLAY_DAYS = 60
++        private const val MIN_BREAK_DAYS = 2
++        private const val MAX_BREAK_DAYS = 30
++        private const val QUIT_CHANCE = 0.3
++        private const val CAREER_SEED_MULTIPLIER = 7919L
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/DailySchedule.kt b/src/main/kotlin/dev/l2j/autobots/population/DailySchedule.kt
+new file mode 100644
+index 0000000..4c7caff
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/DailySchedule.kt
+@@ -0,0 +1,51 @@
++package dev.l2j.autobots.population
++
++import java.time.LocalDate
++import java.time.ZonedDateTime
++import java.util.Random
++import kotlin.math.sqrt
++
++/**
++ * A human-like day of one bot, derived from its object id so it survives restarts without storage.
++ *
++ * Each bot has a stable chronotype: the minute of the day it wakes up. The awake hours after it hold
++ * a few play sessions, more often late than early; the last [sleepHours] of the bot's day are sleep.
++ * Session count and placement change from day to day.
++ */
++internal class DailySchedule(
++        private val botId: Int,
++        private val sleepHours: Int,
++        private val sessions: IntRange,
++        private val sessionMinutes: IntRange
++) {
++    private val wakeMinute: Int = run {
++        val rnd = Random(botId.toLong())
++        (TYPICAL_WAKE_MINUTE + rnd.nextGaussian() * WAKE_DEVIATION_MINUTES).toInt().coerceIn(EARLIEST_WAKE_MINUTE, LATEST_WAKE_MINUTE)
++    }
++
++    fun isPlaying(now: ZonedDateTime): Boolean {
++        val sinceWake = now.minusMinutes(wakeMinute.toLong())
++        val minuteOfBotDay = sinceWake.hour * 60 + sinceWake.minute
++        return sessionsOf(sinceWake.toLocalDate()).any { minuteOfBotDay in it }
++    }
++
++    private fun sessionsOf(day: LocalDate): List<IntRange> {
++        val rnd = Random(botId.toLong() * DAY_SEED_MULTIPLIER + day.toEpochDay())
++        val awakeMinutes = (24 - sleepHours) * 60
++        val count = sessions.first + rnd.nextInt(sessions.last - sessions.first + 1)
++        return (0 until count).map {
++            val length = sessionMinutes.first + rnd.nextInt(sessionMinutes.last - sessionMinutes.first + 1)
++            // The square root makes later hours more likely: people mostly play in the evening, before sleep.
++            val start = ((awakeMinutes - length) * sqrt(rnd.nextDouble())).toInt()
++            start until start + length
++        }
++    }
++
++    companion object {
++        private const val TYPICAL_WAKE_MINUTE = 8 * 60
++        private const val WAKE_DEVIATION_MINUTES = 150.0
++        private const val EARLIEST_WAKE_MINUTE = 5 * 60
++        private const val LATEST_WAKE_MINUTE = 14 * 60
++        private const val DAY_SEED_MULTIPLIER = 1_000_003L
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+new file mode 100644
+index 0000000..076dec8
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -0,0 +1,78 @@
++package dev.l2j.autobots.population
++
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.sql.SpawnTable
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.location.Location
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
++import kotlin.math.exp
++
++/** A patch of the map where monsters spawn, with the levels of those monsters. */
++internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>) {
++    fun monstersFor(level: Int): Int = HuntingSpots.suitableLevels(level).let { range -> monsterLevels.count { it in range } }
++}
++
++/**
++ * Hunting spots derived from the server's monster spawns: the map is cut into square cells and each cell
++ * holding monsters becomes a spot. Bots pick spots with monsters of their level, preferring close and less
++ * crowded ones, like a player who looks for a free place near the village.
++ */
++internal object HuntingSpots {
++    private const val CELL_SIZE = 2500
++    private const val MIN_SUITABLE_MONSTERS = 4
++    private const val DISTANCE_DECAY = 10000.0
++    private const val CANDIDATES = 5
++
++    private val spots: List<HuntingSpot> by lazy { buildSpots() }
++    private val hunters = ConcurrentHashMap<Long, AtomicInteger>()
++
++    fun suitableLevels(level: Int): IntRange = (level - 4).coerceAtLeast(1)..(level + 2)
++
++    fun isSuitable(spot: HuntingSpot, level: Int): Boolean = spot.monstersFor(level) >= MIN_SUITABLE_MONSTERS
++
++    fun choose(bot: Player, excluded: Set<Long>): HuntingSpot? {
++        val candidates = spots.asSequence()
++                .filter { it.key !in excluded && isSuitable(it, bot.level) }
++                .map { it to score(it, bot) }
++                .sortedByDescending { it.second }
++                .take(CANDIDATES)
++                .toList()
++        if (candidates.isEmpty()) return null
++
++        var roll = Rnd.nextDouble() * candidates.sumOf { it.second }
++        for ((spot, score) in candidates) {
++            roll -= score
++            if (roll <= 0) return spot
++        }
++        return candidates.last().first
++    }
++
++    fun join(spot: HuntingSpot) {
++        hunters.computeIfAbsent(spot.key) { AtomicInteger() }.incrementAndGet()
++    }
++
++    fun leave(spot: HuntingSpot) {
++        hunters[spot.key]?.decrementAndGet()
++    }
++
++    private fun score(spot: HuntingSpot, bot: Player): Double {
++        val crowd = hunters[spot.key]?.get() ?: 0
++        return spot.monstersFor(bot.level) * exp(-distance(bot.location(), spot.location) / DISTANCE_DECAY) / (1 + crowd)
++    }
++
++    private fun buildSpots(): List<HuntingSpot> = SpawnTable.getInstance().spawns
++            .filter { it.template.isType("Monster") }
++            .groupBy { cellKey(it.locX, it.locY) }
++            .map { (key, spawns) ->
++                val centerX = spawns.map { it.locX }.average()
++                val centerY = spawns.map { it.locY }.average()
++                // A real spawn point is known to be walkable ground, unlike the bare cell center.
++                val anchor = spawns.minByOrNull { (it.locX - centerX) * (it.locX - centerX) + (it.locY - centerY) * (it.locY - centerY) }!!
++                HuntingSpot(key, Location(anchor.locX, anchor.locY, anchor.locZ), spawns.map { it.template.level.toInt() })
++            }
++
++    private fun cellKey(x: Int, y: Int): Long = (Math.floorDiv(x, CELL_SIZE).toLong() shl 32) or (Math.floorDiv(y, CELL_SIZE).toLong() and 0xffffffffL)
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+new file mode 100644
+index 0000000..574727c
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -0,0 +1,130 @@
++package dev.l2j.autobots.population
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.behaviors.sequences.TravelByGatekeeperSequence
++import dev.l2j.autobots.behaviors.sequences.WalkToSequence
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.xml.TeleportLocationData
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
++import net.sf.l2j.gameserver.model.location.TeleportLocation
++
++internal fun Player.isAttackedByMonster(): Boolean =
++        getKnownTypeInRadius(Monster::class.java, ATTACKER_RADIUS).any { !it.isDead && it.target === this }
++
++private const val ATTACKER_RADIUS = 1000
++
++/**
++ * What a population bot does during one play session: either hunts at a spot that fits its level,
++ * or stays AFK where it logged in. Self-defense and death handling are always on.
++ */
++internal class LifeBehavior(private val bot: Autobot) {
++
++    private enum class Activity { Hunt, Afk }
++
++    private val activity = if (Rnd.get(100) < AFK_SESSION_PERCENT) Activity.Afk else Activity.Hunt
++    private var spot: HuntingSpot? = null
++    private var spotLevel = 0
++    private val badSpots = mutableSetOf<Long>()
++    private var idleTicks = 0
++    private var gatekeeperFailed = false
++
++    suspend fun onUpdate() {
++        if (bot.isDead || bot.isAttackedByMonster()) {
++            bot.combatBehavior.onUpdate()
++            return
++        }
++
++        when (activity) {
++            Activity.Afk -> if (!bot.isSitting && !bot.isMoving) bot.sitDown()
++            Activity.Hunt -> hunt()
++        }
++    }
++
++    fun onLogout() {
++        spot?.let { HuntingSpots.leave(it) }
++        spot = null
++    }
++
++    private suspend fun hunt() {
++        val inTown = bot.isInsideZone(ZoneId.TOWN)
++        if (inTown) bot.socialBehavior.onUpdate()
++
++        val target = currentSpot()
++        if (target == null) {
++            if (!inTown) bot.combatBehavior.onUpdate()
++            return
++        }
++
++        val isAway = distance(bot.location(), target.location) > SPOT_RADIUS
++        if (inTown || (isAway && bot.target == null && !bot.isSitting)) {
++            travelTo(target, inTown)
++            return
++        }
++
++        bot.combatBehavior.onUpdate()
++        if (bot.target == null && !bot.isMoving && !bot.isSitting) idleTicks++ else idleTicks = 0
++        if (idleTicks >= MAX_IDLE_TICKS) abandon(target)
++    }
++
++    private fun currentSpot(): HuntingSpot? {
++        val current = spot
++        if (current != null && (bot.level == spotLevel || HuntingSpots.isSuitable(current, bot.level))) {
++            spotLevel = bot.level
++            return current
++        }
++
++        current?.let { HuntingSpots.leave(it) }
++        val next = HuntingSpots.choose(bot, badSpots)
++        next?.let { HuntingSpots.join(it) }
++        spot = next
++        spotLevel = bot.level
++        idleTicks = 0
++        gatekeeperFailed = false
++        return next
++    }
++
++    private suspend fun travelTo(target: HuntingSpot, inTown: Boolean) {
++        if (bot.isSitting) {
++            bot.standUp()
++            return
++        }
++
++        val exit = if (inTown && !gatekeeperFailed) gatekeeperExitFor(target) else null
++        val sequence = if (exit != null) {
++            TravelByGatekeeperSequence(bot, exit) { gatekeeperFailed = true }
++        } else {
++            WalkToSequence(bot, target.location, SPOT_RADIUS) { abandon(target) }
++        }
++        sequence.execute()
++    }
++
++    /** The teleport destination worth paying for: one that saves a long walk to [target]. */
++    private fun gatekeeperExitFor(target: HuntingSpot): TeleportLocation? {
++        val exit = TeleportLocationData.getInstance().allTeleportLocations
++                .filter { !it.isNoble }
++                .minByOrNull { distance(it, target.location) } ?: return null
++        val walkSaved = distance(bot.location(), target.location) - distance(exit, target.location)
++        return if (walkSaved > MIN_WALK_SAVED_BY_TELEPORT) exit else null
++    }
++
++    /** Forgets a spot that is empty or unreachable, so the next update picks another one. */
++    private fun abandon(target: HuntingSpot) {
++        badSpots.add(target.key)
++        if (spot === target) {
++            HuntingSpots.leave(target)
++            spot = null
++        }
++    }
++
++    companion object {
++        private const val AFK_SESSION_PERCENT = 10
++        private const val SPOT_RADIUS = 1500
++        private const val MIN_WALK_SAVED_BY_TELEPORT = 12000
++        // About 20 seconds at the default think interval.
++        private const val MAX_IDLE_TICKS = 60
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+new file mode 100644
+index 0000000..a8a0ff5
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -0,0 +1,132 @@
++package dev.l2j.autobots.population
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.AutobotsManager
++import dev.l2j.autobots.AutobotsNameService
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.behaviors.preferences.ActivityType
++import dev.l2j.autobots.behaviors.preferences.SocialPreferences
++import dev.l2j.autobots.dao.AutobotsDao
++import dev.l2j.autobots.models.RespawnAction
++import dev.l2j.autobots.utils.Klock
++import dev.l2j.autobots.utils.getRandomAppearance
++import dev.l2j.autobots.utils.getSupportedClassesForLevel
++import kotlinx.coroutines.launch
++import net.sf.l2j.Config
++import net.sf.l2j.gameserver.data.sql.PlayerInfoTable
++import net.sf.l2j.gameserver.data.xml.PlayerData
++import net.sf.l2j.gameserver.idfactory.IdFactory
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
++import java.time.ZonedDateTime
++import java.util.concurrent.ConcurrentHashMap
++
++/**
++ * The living population: bots that start as level 1 newbies in their race's village, play on their own daily
++ * schedules, take breaks, quit, and are replaced by new players, so the world lives without a GM spawning anyone.
++ */
++internal object PopulationManager {
++    private const val TICK_MS = 15_000L
++    private const val SAVE_EVERY_TICKS = 20
++
++    private class Member(val name: String, val firstDay: LocalDate, val career: Career, val schedule: DailySchedule)
++
++    private val members = ConcurrentHashMap<Int, Member>()
++    private val settings get() = AutobotData.settings
++    private val zone get() = ZoneId.of(settings.populationTimeZone)
++    private var ticks = 0
++
++    fun start() {
++        if (settings.populationSize <= 0) return
++
++        CoScopes.generalScope.launch {
++            AutobotsDao.loadPopulationMembers().forEach {
++                addMember(it.objectId, it.name, Instant.ofEpochMilli(it.creationTime).atZone(zone).toLocalDate())
++            }
++            // A fresh server opens with a crowd of newbies; later on they only trickle in.
++            if (members.isEmpty()) repeat(settings.populationSize) { createNewbie() }
++            println("Autobots population: ${members.size} members.")
++            Klock.start("population", 0, TICK_MS, CoScopes.generalScope) { tick() }
++        }
++    }
++
++    private suspend fun tick() {
++        try {
++            val now = ZonedDateTime.now(zone)
++            welcomeNewbies(now)
++
++            val today = now.toLocalDate()
++            val (playing, offline) = members.values.partition { it.career.isActiveOn(today) && it.schedule.isPlaying(now) }
++
++            offline.mapNotNull { AutobotsManager.activeBots[it.name] }
++                    .filter { it.controller == null && !it.isInCombat }
++                    .forEach { logout(it) }
++
++            playing.filter { !AutobotsManager.activeBots.containsKey(it.name) }
++                    .shuffled()
++                    .take(settings.populationLoginsPerTick)
++                    .forEach { login(it) }
++
++            if (++ticks % SAVE_EVERY_TICKS == 0) {
++                members.values.mapNotNull { AutobotsManager.activeBots[it.name] }.forEach { AutobotsDao.saveAutobot(it) }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    /** Replaces players who quit or took a break, spreading today's newcomers over the day. */
++    private fun welcomeNewbies(now: ZonedDateTime) {
++        val today = now.toLocalDate()
++        val active = members.values.count { it.career.isActiveOn(today) }
++        val arrivedToday = members.values.count { it.firstDay == today }
++        val allowedByNow = settings.populationNewbiesPerDay * (now.hour * 60 + now.minute + 1) / (24 * 60)
++        repeat(minOf(settings.populationSize - active, allowedByNow - arrivedToday)) { createNewbie() }
++    }
++
++    private fun addMember(objectId: Int, name: String, firstDay: LocalDate) {
++        members[objectId] = Member(name, firstDay, Career(objectId, firstDay), DailySchedule(objectId, settings.populationSleepHours,
++                settings.populationMinSessions..settings.populationMaxSessions,
++                settings.populationMinSessionMinutes..settings.populationMaxSessionMinutes))
++    }
++
++    /** Creates a level 1 character the way the client does: starter class, village spawn, starter kit only. */
++    private fun createNewbie() {
++        val classId = getSupportedClassesForLevel(1).random()
++        val template = PlayerData.getInstance().getTemplate(classId)
++        val bot = Autobot(IdFactory.getInstance().nextId, template, getRandomAppearance(template.race))
++        bot.name = AutobotsNameService.getRandomAvailableName()
++        bot.title = ""
++        bot.setAccessLevel(Config.DEFAULT_ACCESS_LEVEL)
++        bot.setBaseClass(bot.classId)
++        bot.position.set(template.randomSpawn)
++
++        for (holder in template.items) {
++            val item = bot.inventory.addItem("Init", holder.id, holder.value, bot, null) ?: continue
++            if (item.isEquipable && holder.isEquipped) bot.inventory.equipItemAndRecord(item)
++        }
++        bot.heal()
++        bot.combatBehavior.activityPreferences.activityType = ActivityType.Population
++        bot.socialBehavior.socialPreferences = SocialPreferences()
++
++        AutobotsDao.createAutobot(bot)
++        AutobotsDao.saveAutobot(bot)
++        bot.inventory.deleteMe()
++        PlayerInfoTable.getInstance().addPlayer(bot.objectId, "Autobots", bot.name, bot.accessLevel.level)
++        addMember(bot.objectId, bot.name, LocalDate.now(zone))
++    }
++
++    private suspend fun login(member: Member) {
++        val bot = AutobotsDao.loadByName(member.name) ?: return
++        bot.life = LifeBehavior(bot)
++        bot.respawnAction = RespawnAction.None
++        AutobotsManager.spawnAutobot(bot)
++    }
++
++    private fun logout(bot: Autobot) {
++        bot.cancelSequence()
++        bot.despawn()
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/ui/states/ViewStates.kt b/src/main/kotlin/dev/l2j/autobots/ui/states/ViewStates.kt
+index bf8668c..84d84e0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/ui/states/ViewStates.kt
++++ b/src/main/kotlin/dev/l2j/autobots/ui/states/ViewStates.kt
+@@ -24,6 +24,7 @@ internal object ViewStates {
+                     ActivityType.None -> ActivityEditAction.None
+                     ActivityType.Uptime -> ActivityEditAction.Uptime
+                     ActivityType.Schedule -> ActivityEditAction.Schedule
++                    ActivityType.Population -> ActivityEditAction.None
+                 })}
+         deactivateStates(player, "BotDetailsViewState")
+ 
 diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
 index 8c88e5c..a6ba498 100644
 --- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
