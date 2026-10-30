@@ -1,0 +1,509 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 321ba03..e32be24 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -23,6 +23,10 @@
+   <populationMaxSessionMinutes>180</populationMaxSessionMinutes>
+   <!-- Load testing: every active member stays online, ignoring sleep and sessions. Keep false for a living world. -->
+   <populationAlwaysOnline>false</populationAlwaysOnline>
++  <!-- A session is a chain of segments: hunting (quests and town trips included), trading in a store, short AFK
++       breaks and a walk back to town before logout; it is never AFK the whole way. Each bot has its own style
++       (grinder, casual, trader). populationSessionLog prints every switch with its reason; the 10-minute summary is always on. -->
++  <populationSessionLog>true</populationSessionLog>
+   <!-- Living economy for population bots: they sell loot, buy supplies and gear in town shops, enchant, and trade
+        in private stores. economyLog writes every deal to the game server log, economyChat lets bots comment in chat. -->
+   <economyEnabled>true</economyEnabled>
+diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+index f103e8a..84962f8 100644
+--- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
++++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+@@ -514,6 +514,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+     @OptIn(ExperimentalStdlibApi::class)
+     internal fun onLevelChange(oldLevel: Int, newLevel: Int){
+         // Gear is no longer handed out on level up; bots keep what they own.
++        if(newLevel > oldLevel) life?.onLevelUp()
+         // Population bots earn their professions through the quests, like players.
+         if(life != null && AutobotData.settings.questsEnabled) return
+         if(shouldChangeClass(oldLevel, newLevel)) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index da987de..7e7095c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -35,6 +35,7 @@ internal data class AutobotSettings(
+         @JsonProperty("populationMinSessionMinutes") var populationMinSessionMinutes: Int = 60,
+         @JsonProperty("populationMaxSessionMinutes") var populationMaxSessionMinutes: Int = 180,
+         @JsonProperty("populationAlwaysOnline") var populationAlwaysOnline: Boolean = false,
++        @JsonProperty("populationSessionLog") var populationSessionLog: Boolean = true,
+         @JsonProperty("economyEnabled") var economyEnabled: Boolean = true,
+         @JsonProperty("economyLog") var economyLog: Boolean = true,
+         @JsonProperty("economyChat") var economyChat: Boolean = true,
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/DailySchedule.kt b/src/main/kotlin/dev/l2j/autobots/population/DailySchedule.kt
+index 4c7caff..8578f82 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/DailySchedule.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/DailySchedule.kt
+@@ -29,6 +29,14 @@ internal class DailySchedule(
+         return sessionsOf(sinceWake.toLocalDate()).any { minuteOfBotDay in it }
+     }
+ 
++    /** Minutes until the current session ends, 0 when the bot is not playing now. */
++    fun minutesLeft(now: ZonedDateTime): Int {
++        val sinceWake = now.minusMinutes(wakeMinute.toLong())
++        val minuteOfBotDay = sinceWake.hour * 60 + sinceWake.minute
++        // Sessions may overlap; the bot plays on until the last of them ends.
++        return sessionsOf(sinceWake.toLocalDate()).filter { minuteOfBotDay in it }.maxOfOrNull { it.last + 1 - minuteOfBotDay } ?: 0
++    }
++
+     private fun sessionsOf(day: LocalDate): List<IntRange> {
+         val rnd = Random(botId.toLong() * DAY_SEED_MULTIPLIER + day.toEpochDay())
+         val awakeMinutes = (24 - sleepHours) * 60
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 051a7f4..5ac577b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -26,6 +26,7 @@ import net.sf.l2j.gameserver.model.actor.Player
+ import net.sf.l2j.gameserver.model.actor.instance.Monster
+ import net.sf.l2j.gameserver.model.location.Location
+ import net.sf.l2j.gameserver.model.location.TeleportLocation
++import kotlin.math.hypot
+ 
+ /** A monster that targets us, or a flagged or PK player who does: both are worth fighting back. */
+ internal fun Player.isUnderAttack(): Boolean =
+@@ -35,14 +36,12 @@ internal fun Player.isUnderAttack(): Boolean =
+ private const val ATTACKER_RADIUS = 1000
+ 
+ /**
+- * What a population bot does during one play session: hunts at a spot that fits its level and gear, stays AFK,
+- * or trades in a private store in town. Hunting bots go to town to sell loot and buy supplies and gear.
+- * Self-defense and death handling are always on.
++ * What a population bot does during one play session, segment by segment ([SessionPlan]): hunts at a spot that fits
++ * its level and gear, trades in a private store in town, takes an AFK break, and walks back to town before logging
++ * out. Hunting bots go to town to sell loot and buy supplies and gear. Self-defense and death handling are always on.
+  */
+ internal class LifeBehavior(private val bot: Autobot) {
+ 
+-    private enum class Activity { Hunt, Afk, Trade }
+-
+     private val economy get() = AutobotData.settings.economyEnabled
+     private val fitness = Fitness(bot)
+     private val party = PartyBehavior(bot)
+@@ -50,9 +49,14 @@ internal class LifeBehavior(private val bot: Autobot) {
+     // A party member's own trip to town: the party goes on hunting meanwhile.
+     private var partyErrand = false
+ 
+-    // An AFK session becomes a trading one when the bot has something to sell or buy; decided on the first update,
+-    // once the inventory is loaded.
+-    private var activity: Activity? = null
++    // The first segment is chosen on the first update, once the inventory is loaded.
++    private val session = SessionPlan(bot)
++    // When the scheduled session ends (0 = unknown, e.g. load testing); set by the population manager.
++    @Volatile var sessionEndsAt = 0L
++    // A player starts wrapping up a while before logging out.
++    private val wrapUpMs = Rnd.get(WRAP_UP_MIN_MINUTES, WRAP_UP_MAX_MINUTES) * 60_000L
++    private var homeUnreachable = false
++    private var afkRetreats = 0
+     private var spot: HuntingSpot? = null
+     private var spotLevel = 0
+     private val badSpots = mutableSetOf<Long>()
+@@ -73,8 +77,15 @@ internal class LifeBehavior(private val bot: Autobot) {
+         if (economy && CraftBook.enabled) RecipeBookDao.load(bot)
+     }
+ 
++    /** The current segment of the session; a party member follows its party instead. */
++    val activity get() = session.activity
++
+     suspend fun onUpdate() {
+-        if (bot.isInStoreMode) return
++        if (bot.isInStoreMode) {
++            // A store stays open for its segment, then the bot packs up and moves on.
++            if (session.isOver()) nextSegment()
++            return
++        }
+         if (AutobotData.settings.groupsEnabled && bot.isInParty && updateInParty()) return
+         if (bot.isDead || bot.isUnderAttack()) {
+             bot.combatBehavior.onUpdate()
+@@ -83,11 +94,71 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+         if (!bot.isInsideZone(ZoneId.TOWN)) tripDoneInTown = false
+ 
+-        when (activity ?: chooseActivity()) {
+-            Activity.Afk -> if (!bot.isSitting && !bot.isMoving) bot.sitDown()
+-            Activity.Hunt -> hunt()
+-            Activity.Trade -> trade()
++        val wrappingUp = session.activity == SessionPlan.Activity.Home || session.activity == SessionPlan.Activity.Trade
++        if (sessionEndsAt > 0 && !wrappingUp && System.currentTimeMillis() > sessionEndsAt - wrapUpMs && bot.target == null) {
++            dropSpot()
++            session.switchTo(SessionPlan.Activity.Home, ((sessionEndsAt - System.currentTimeMillis()) / 60_000L).toInt().coerceAtLeast(1) + HOME_EXTRA_MINUTES, "session ends soon")
++        }
++        // A fight in progress is finished first, like a player who kills the mob before leaving the keyboard.
++        if (session.isOver() && (bot.target == null || session.activity == null)) nextSegment()
++
++        when (session.activity) {
++            SessionPlan.Activity.Afk -> afk()
++            SessionPlan.Activity.Trade -> trade()
++            SessionPlan.Activity.Home -> goHome()
++            else -> hunt()
++        }
++    }
++
++    private fun context() = SessionPlan.Context(
++            hasGoal = quests.hasBusiness(),
++            canTrade = economy && StoreKeeper.hasBusiness(bot),
++            isCrafter = CraftBook.isCrafter(bot))
++
++    /** Ends the current segment and sets the bot up for the next one. */
++    private fun nextSegment(canTrade: Boolean? = null, reason: String = "segment over") {
++        val previous = session.activity
++        val context = context().let { if (canTrade == null) it else SessionPlan.Context(it.hasGoal, canTrade, it.isCrafter) }
++        val next = session.next(context, reason)
++        if (next != SessionPlan.Activity.Trade) StoreKeeper.close(bot)
++        if ((previous == SessionPlan.Activity.Afk || previous == SessionPlan.Activity.Home) && bot.isSitting) bot.standUp()
++        afkRetreats = 0
++        // A trader leaves the hunting spot to others; a break keeps it.
++        if (next == SessionPlan.Activity.Trade) {
++            dropSpot()
++            storeAttempts = 0
++        }
++    }
++
++    /** Away from the keyboard: sitting, but not among aggressive monsters, which a player would step away from first. */
++    private suspend fun afk() {
++        if (bot.isSitting || bot.isMoving) return
++        val threat = if (bot.isInsideZone(ZoneId.TOWN)) null else bot.getKnownTypeInRadius(Monster::class.java, AFK_SAFE_RADIUS)
++                .filter { !it.isDead && it.isAggressive }
++                .minByOrNull { distance(bot, it) }
++        if (threat != null && afkRetreats < MAX_AFK_RETREATS) {
++            afkRetreats++
++            val dx = (bot.x - threat.x).toDouble()
++            val dy = (bot.y - threat.y).toDouble()
++            val length = hypot(dx, dy).coerceAtLeast(1.0)
++            val away = Location(bot.x + (dx / length * AFK_RETREAT).toInt(), bot.y + (dy / length * AFK_RETREAT).toInt(), bot.z)
++            WalkToSequence(bot, away, 100) {}.execute()
++            return
+         }
++        bot.sitDown()
++    }
++
++    /** The end of a session: back to town, a last visit to the shops, then waiting there for the logout. */
++    private suspend fun goHome() {
++        if (!bot.isInsideZone(ZoneId.TOWN) && !homeUnreachable) {
++            if (bot.isSitting) bot.standUp() else if (!goToTown()) homeUnreachable = true
++            return
++        }
++        if (bot.isInsideZone(ZoneId.TOWN) && economy && !tripDoneInTown) {
++            visitShops()
++            return
++        }
++        if (!bot.isSitting && !bot.isMoving) bot.sitDown()
+     }
+ 
+     /**
+@@ -118,6 +189,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     fun onDeath() {
+         fitness.onDeath()
++        if (!bot.isInParty) session.onDeath(context())
++    }
++
++    fun onLevelUp() {
++        if (!bot.isInParty) session.onLevelUp(context())
+     }
+ 
+     fun onLogout() {
+@@ -138,25 +214,16 @@ internal class LifeBehavior(private val bot: Autobot) {
+             val crafter = CraftBook.isCrafter(bot)
+             val hasGoods = if (crafter) StoreKeeper.hasBusiness(bot) else StoreKeeper.storeGoods(bot).isNotEmpty()
+             if (economy && Rnd.get(100) < (if (crafter) CRAFTER_LINGER_PERCENT else LINGER_PERCENT) && hasGoods) {
+-                lingerUntil = System.currentTimeMillis() + Rnd.get(LINGER_MIN_MINUTES, LINGER_MAX_MINUTES) * 60_000L
+-                activity = Activity.Trade
++                val minutes = Rnd.get(LINGER_MIN_MINUTES, LINGER_MAX_MINUTES)
++                lingerUntil = System.currentTimeMillis() + minutes * 60_000L
++                session.switchTo(SessionPlan.Activity.Trade, minutes, "keeps a store after the session")
++                storeAttempts = 0
+                 bot.cancelSequence()
+             }
+         }
+         return System.currentTimeMillis() < lingerUntil
+     }
+ 
+-    private fun chooseActivity(): Activity {
+-        val chosen = when {
+-            // Crafters spend more of their time behind a store than hunters do.
+-            Rnd.get(100) >= (if (CraftBook.isCrafter(bot)) CRAFTER_TRADE_SESSION_PERCENT else AFK_SESSION_PERCENT) || quests.hasBusiness() -> Activity.Hunt
+-            economy && StoreKeeper.hasBusiness(bot) -> Activity.Trade
+-            else -> Activity.Afk
+-        }
+-        activity = chosen
+-        return chosen
+-    }
+-
+     private suspend fun trade() {
+         if (!bot.isInsideZone(ZoneId.TOWN)) {
+             if (!goToTown()) giveUpTrading()
+@@ -179,8 +246,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+     }
+ 
+     private fun giveUpTrading() {
+-        activity = Activity.Afk
+         lingerUntil = 0
++        nextSegment(canTrade = false, reason = "nothing to trade")
+     }
+ 
+     private suspend fun hunt() {
+@@ -230,6 +297,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         TownTrip(bot, cautious = fitness.isSaving).execute()
+         tripDoneInTown = true
+         lastTripAt = System.currentTimeMillis()
++        if (!bot.isInParty) session.onTownTrip(context())
+     }
+ 
+     /** @return false when town can't be reached from here (no scroll, too far to walk). */
+@@ -318,7 +386,6 @@ internal class LifeBehavior(private val bot: Autobot) {
+     }
+ 
+     companion object {
+-        private const val AFK_SESSION_PERCENT = 10
+         private const val SPOT_RADIUS = 1500
+         private const val PARTY_LEG = 2000.0
+         private const val PARTY_LEG_ARRIVAL = 150
+@@ -329,10 +396,16 @@ internal class LifeBehavior(private val bot: Autobot) {
+         private const val TOWN_RETRY_MS = 10 * 60 * 1000L
+         private const val LINGER_PERCENT = 30
+         private const val CRAFTER_LINGER_PERCENT = 60
+-        private const val CRAFTER_TRADE_SESSION_PERCENT = 30
+         private const val LINGER_MIN_MINUTES = 30
+         private const val LINGER_MAX_MINUTES = 90
+         private const val MAX_STORE_ATTEMPTS = 5
+         private const val STORE_STEP = 400
++        private const val WRAP_UP_MIN_MINUTES = 10
++        private const val WRAP_UP_MAX_MINUTES = 20
++        // Home is kept past the scheduled end while the population manager waits for a fight to end.
++        private const val HOME_EXTRA_MINUTES = 15
++        private const val AFK_SAFE_RADIUS = 700
++        private const val AFK_RETREAT = 800
++        private const val MAX_AFK_RETREATS = 3
+     }
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index 8d64c1f..cdcac74 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -76,6 +76,13 @@ internal object PopulationManager {
+                     .filter { it.controller == null && !it.isInCombat && it.life?.keepsOnline() != true }
+                     .forEach { logout(it) }
+ 
++            // Bots learn when their session ends, so they can head back to town before logging out.
++            val nowMillis = System.currentTimeMillis()
++            playing.forEach { member ->
++                AutobotsManager.activeBots[member.name]?.life?.sessionEndsAt =
++                        if (settings.populationAlwaysOnline) 0L else nowMillis + member.schedule.minutesLeft(now) * 60_000L
++            }
++
+             playing.filter { !AutobotsManager.activeBots.containsKey(it.name) }
+                     .shuffled()
+                     .take(settings.populationLoginsPerTick)
+@@ -89,6 +96,7 @@ internal object PopulationManager {
+             }
+             if ((ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
+                 GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
++                SessionPlan.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
+             }
+             val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
+             if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt b/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
+new file mode 100644
+index 0000000..08db6ab
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
+@@ -0,0 +1,169 @@
++package dev.l2j.autobots.population
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import net.sf.l2j.commons.random.Rnd
++import java.time.ZoneId
++import java.time.ZonedDateTime
++import java.util.Random
++
++/**
++ * One play session of a population bot as a chain of segments, like a player who hunts for an hour, goes AFK for a
++ * smoke, sits in a store for a while and hunts again, then walks back to town before logging out.
++ *
++ * Segments end on time or for a reason a player would have: a death, a new level, a town trip that ends with goods to
++ * sell. Each bot has a stable [Style] that sets how long it hunts and how often it takes breaks or trades.
++ * A session is never AFK the whole way: AFK segments are short, never follow each other, and a bot with a pending
++ * goal (a quest) mostly plays and does not open stores.
++ */
++internal class SessionPlan(private val bot: Autobot) {
++
++    enum class Activity { Hunt, Afk, Trade, Home }
++
++    /** How a player likes to spend a session. Crafters are traders; the others are fixed by the object id. */
++    enum class Style { Grinder, Casual, Trader }
++
++    /** What the bot knows when it picks the next segment. */
++    class Context(val hasGoal: Boolean, val canTrade: Boolean, val isCrafter: Boolean)
++
++    var activity: Activity? = null
++        private set
++    private var endsAt = 0L
++    // Hunting time since the last break: the longer, the likelier a break.
++    private var huntingSince = 0L
++    // An event that ended the current segment early, and how it shapes the next choice.
++    private var cause: Cause? = null
++
++    private enum class Cause(val text: String) { Death("died"), LevelUp("new level"), TownTrip("goods to sell after a town trip") }
++
++    private val baseStyle: Style = Random(bot.objectId * STYLE_SEED + 7L).nextInt(100).let {
++        when {
++            it < GRINDER_PERCENT -> Style.Grinder
++            it < GRINDER_PERCENT + TRADER_PERCENT -> Style.Trader
++            else -> Style.Casual
++        }
++    }
++
++    fun style(context: Context): Style = if (context.isCrafter) Style.Trader else baseStyle
++
++    /** True when the current segment ran out, an event cut it short, or none started yet. */
++    fun isOver(): Boolean = activity == null || System.currentTimeMillis() >= endsAt
++
++    /** A death in the middle of hunting: some players take a break or go trade, others just run back. */
++    fun onDeath(context: Context) {
++        val chance = when (style(context)) { Style.Grinder -> 15; Style.Casual -> 45; Style.Trader -> 35 }
++        if (activity == Activity.Hunt && !context.hasGoal && Rnd.get(100) < chance) cut(Cause.Death)
++    }
++
++    /** A new level is a good moment to stretch, look at the skills and the chat. */
++    fun onLevelUp(context: Context) {
++        val chance = when (style(context)) { Style.Grinder -> 5; Style.Casual -> 25; Style.Trader -> 15 }
++        if (activity == Activity.Hunt && Rnd.get(100) < chance) cut(Cause.LevelUp)
++    }
++
++    /** Back in town with goods to sell: a trader may stay behind a store instead of running back to the spot. */
++    fun onTownTrip(context: Context) {
++        val chance = when (style(context)) { Style.Grinder -> 5; Style.Casual -> 15; Style.Trader -> 45 }
++        if (activity == Activity.Hunt && context.canTrade && !context.hasGoal && Rnd.get(100) < chance) cut(Cause.TownTrip)
++    }
++
++    /** Chooses the next segment and returns it. */
++    fun next(context: Context, reason: String = "segment over"): Activity {
++        val previous = activity
++        val weights = weights(previous, context)
++        var roll = Rnd.get(weights.values.sum().coerceAtLeast(1))
++        val chosen = weights.entries.firstOrNull { roll -= it.value; roll < 0 }?.key ?: Activity.Hunt
++        start(chosen, minutes(chosen, previous, context), cause?.text ?: reason)
++        return chosen
++    }
++
++    /** Switches to [next] for [minutes] right away: going home before logout, a store kept after the session. */
++    fun switchTo(next: Activity, minutes: Int, reason: String) = start(next, minutes, reason)
++
++    private fun cut(why: Cause) {
++        cause = why
++        endsAt = 0
++    }
++
++    private fun start(next: Activity, minutes: Int, reason: String) {
++        val now = System.currentTimeMillis()
++        if (AutobotData.settings.populationSessionLog && next != activity) {
++            println("Autobots session: ${bot.name} lv ${bot.level} ${activity ?: "login"} -> $next for $minutes min ($reason)")
++        }
++        if (next == Activity.Hunt && activity != Activity.Hunt) huntingSince = now
++        activity = next
++        endsAt = now + minutes * 60_000L
++        cause = null
++    }
++
++    private fun weights(previous: Activity?, context: Context): Map<Activity, Int> {
++        val style = style(context)
++        val base: Map<Activity, Double> = when (previous) {
++            null -> mapOf(Activity.Hunt to 75.0, Activity.Trade to 15.0, Activity.Afk to 10.0)
++            Activity.Afk -> mapOf(Activity.Hunt to 75.0, Activity.Trade to 25.0)
++            Activity.Trade, Activity.Home -> mapOf(Activity.Hunt to 80.0, Activity.Afk to 20.0)
++            Activity.Hunt -> when (cause) {
++                Cause.TownTrip -> mapOf(Activity.Trade to 100.0)
++                Cause.LevelUp -> mapOf(Activity.Afk to 100.0)
++                Cause.Death -> mapOf(Activity.Hunt to 25.0, Activity.Afk to 45.0, Activity.Trade to 30.0)
++                null -> mapOf(Activity.Hunt to 45.0, Activity.Afk to 35.0, Activity.Trade to 20.0)
++            }
++        }
++        val fatigueHours = if (previous == Activity.Hunt) (System.currentTimeMillis() - huntingSince) / 3_600_000.0 else 0.0
++        return base.mapValues { (activity, weight) ->
++            when (activity) {
++                Activity.Hunt -> weight * when (style) { Style.Grinder -> 1.6; Style.Casual -> 1.0; Style.Trader -> 0.8 }
++                Activity.Afk -> weight * (1 + fatigueHours) * (if (isNight()) 2.0 else 1.0) *
++                        when (style) { Style.Grinder -> 0.5; Style.Casual -> 1.3; Style.Trader -> 1.0 }
++                Activity.Trade -> weight * when (style) { Style.Grinder -> 0.4; Style.Casual -> 1.0; Style.Trader -> 2.5 }
++                Activity.Home -> weight
++            }
++        }.filter { (activity, _) ->
++            when (activity) {
++                Activity.Trade -> context.canTrade && !context.hasGoal
++                // At login or with a goal waiting, a break only comes after some hunting.
++                Activity.Afk -> !context.hasGoal || previous == Activity.Hunt
++                else -> true
++            }
++        }.mapValues { it.value.toInt() }
++    }
++
++    private fun minutes(next: Activity, previous: Activity?, context: Context): Int {
++        val style = style(context)
++        return when (next) {
++            Activity.Hunt -> when (style) {
++                Style.Grinder -> Rnd.get(60, 120)
++                Style.Casual -> Rnd.get(30, 75)
++                Style.Trader -> Rnd.get(20, 50)
++            }
++            Activity.Trade -> if (style == Style.Trader) Rnd.get(30, 90) else Rnd.get(15, 40)
++            Activity.Afk -> {
++                // Right after login, after a new level or with a goal waiting, AFK is just a moment away from the keyboard.
++                val short = previous == null || context.hasGoal || cause == Cause.LevelUp
++                val minutes = if (short) Rnd.get(2, 8) else Rnd.get(3, if (style == Style.Casual) 25 else 15)
++                if (isNight()) minutes * 3 / 2 else minutes
++            }
++            Activity.Home -> HOME_MINUTES
++        }
++    }
++
++    private fun isNight(): Boolean = ZonedDateTime.now(ZoneId.of(AutobotData.settings.populationTimeZone)).hour in NIGHT_HOURS
++
++    companion object {
++        private const val STYLE_SEED = 1_000_033L
++        private const val GRINDER_PERCENT = 30
++        private const val TRADER_PERCENT = 20
++        private val NIGHT_HOURS = 1..5
++        // Long enough to cover the rest of the session; the population manager logs the bot out.
++        private const val HOME_MINUTES = 60
++
++        /** One line for the every-10-minutes log: what the online population is busy with. */
++        fun summary(online: Collection<Autobot>) {
++            val solo = online.filter { !it.isInParty }.mapNotNull { it.life?.activity }
++            val counts = Activity.values().associateWith { activity -> solo.count { it == activity } }
++            println("Autobots session summary: online=${online.size} hunting=${counts[Activity.Hunt]} trading=${counts[Activity.Trade]} " +
++                    "afk=${counts[Activity.Afk]} goingHome=${counts[Activity.Home]} inParty=${online.count { it.isInParty }} " +
++                    "inStore=${online.count { it.isInStoreMode }}")
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+index dbc8ea6..23d62dd 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+@@ -3,6 +3,7 @@ package dev.l2j.autobots.population.group
+ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.SessionPlan
+ import dev.l2j.autobots.population.economy.Gear
+ import dev.l2j.autobots.utils.distance
+ import kotlinx.coroutines.delay
+@@ -148,7 +149,9 @@ internal object GroupFinder {
+         }
+     }
+ 
+-    private fun isFree(bot: Autobot) = !bot.isInParty && !bot.isDead && !bot.isInStoreMode && bot.life != null && bot.controller == null
++    // A bot away from the keyboard or about to log out does not answer party searches.
++    private fun isFree(bot: Autobot) = !bot.isInParty && !bot.isDead && !bot.isInStoreMode && bot.life != null && bot.controller == null &&
++            bot.life?.activity.let { it != SessionPlan.Activity.Afk && it != SessionPlan.Activity.Home }
+ 
+     /** Picks members around the leader's level: a healer first when the level asks for one, then the others. */
+     private fun compose(leader: Autobot, pool: List<Autobot>, now: Long): List<Autobot>? {
