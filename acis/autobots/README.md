@@ -94,7 +94,7 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - `GroupChat`: party chat is a teammate's suggestion, never an order. "assist me", "rest", "buff",
     "let's move", "brb", "bye" (Russian or English keywords) are weighed against the party's state and answered
     in the player's language.
-  - `GroupFinder` (`groupFinderEnabled`, every 30 s): team players in 60% of sessions from level 18, regulars in
+  - `GroupFinder` (`groupFinderEnabled`, every 30 s): team players in 60% of sessions from `groupFinderMinLevel` (10), regulars in
     25%, and anyone who keeps dying look for a group. Lookers of one map region within 5 levels team up behind
     the most sociable one: a healer from level 25 (or damage dealers after 5 minutes without one), then tank,
     buffer, spoiler and damage dealers, 3-5 members, people they dislike left out. At most
@@ -127,6 +127,38 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - Upstream bugs fixed on the way: the busy check used `ConcurrentHashMap.contains` (a value lookup), so ticks
     overlapped; preferences of every class were read with the active class types; `onEnterWorld` could throw
     for a class without a behavior.
+- `l2autobots-craft.patch` - crafting for population bots (stage 2v), applied after the autofarm patch so the groups
+  and economy work keeps its own diffs. New code in `population/economy/craft/`, `craftEnabled` and
+  `crafterArtisanPercent` in `config.xml`. Everything goes through the core: the `Recipes` item handler,
+  `RecipeItemMaker` (own craft and Dwarven Manufacture).
+  - Crafters are the Artisan line: `crafterArtisanPercent` (60) of population dwarves take Artisan at level 20 (a trait
+    of the object id), the others Scavenger. Any dwarf with Create Item crafts what its book allows.
+  - `Crafter` (in town, during `TownTrip`): learns the recipes it carries (book limit and skill level checked by the
+    handler; recipes up to 5 levels ahead are kept), buys missing materials in stores and shops (town NPCs sell only Soul and Spirit Ore, Gemstones and Rope of Magic),
+    then crafts: intermediates first, then the best recipe by demand and margin, waiting for MP sitting. Unwanted gear
+    stops at one piece; shots and materials go on while materials last. `Crystals` (dwarves break surplus gear into
+    crystals for summoners) skips what the crafter made itself.
+  - `CraftPlanner`: demand = next kit pieces and shots of the bots online (refreshed each minute); craft cost = own
+    materials at the NPC sell price + missing ones at the best town price, divided by the success rate.
+  - `Workshop`: a crafter's store session is a Dwarven Manufacture 40% of the time (up to 20 recipes, fee 5-15% of the
+    product value), otherwise a sell store of its work (never below its cost + 10%) or a buy store for its shopping list
+    and for recipes in demand it could learn. Crafters trade in 30% of their sessions (others 10%) and linger in 60%.
+    Store ads go to trade chat (`+`) at most every 15-30 minutes.
+  - `Sourcing`: for its next kit pieces a bot compares shop, private store, workshop order (fee + missing materials
+    + its own materials at NPC value, / success rate) and its own craft, and orders when the workshop is cheapest; a
+    store price above the order cost is no longer accepted. Gear above the bot's grade is never ordered.
+  - `CraftStock`: materials, parts and recipes for the bot's own crafts and next kit pieces are kept, up to 25% of the
+    weight limit (no warehouse yet). Materials and recipes are never sold to NPCs as junk: they go to stores (stacks
+    worth 300+) or to crafters' buy stores; a bag over 40% weight still sells them.
+  - `Prospecting`: half of the Scavenger line (a trait of the object id) picks hunting spots whose monsters give the
+    materials crafters want when spoiled; a fifth of other hunters pick spots that drop the parts of their next kit
+    piece. Spot scores get up to 5x for matching monsters (`HuntingSpots.lootBonus`).
+  - Recipe books live in `autobots_recipebook` (`sql/autobots_recipebook.sql`): the core purges `character_recipebook`
+    rows of ids missing from `characters` at every start.
+  - The Ivory Tower sales cat (31075, a GM shop with crystals, recipes and materials) is excluded from the shop index
+    even if someone spawns it.
+  - The summary line gets `Craft CraftFail CraftOrder RecipeLearn Workshop` counts and
+    `crafters workshops recipes adenaPerCrafter adenaPerOtherSameLevel`.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 

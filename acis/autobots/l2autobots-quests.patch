@@ -1,9 +1,9 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index 7b342bb..583e2f8 100644
+index 84c1891..321ba03 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -42,6 +42,10 @@
-   <groupFinderEnabled>true</groupFinderEnabled>
+@@ -44,6 +44,10 @@
+   <groupFinderMinLevel>10</groupFinderMinLevel>
    <groupMaxPopulationPercent>40</groupMaxPopulationPercent>
    <groupLog>true</groupLog>
 +  <!-- Population bots earn their first profession through the real Path quest and a guild master, with no free
@@ -12,7 +12,7 @@ index 7b342bb..583e2f8 100644
 +  <questLog>true</questLog>
    <!-- Test only: a newly created population bot starts at this level (0 = level 1, like a real newbie). -->
    <populationTestLevel>0</populationTestLevel>
- </settings>
+   <!-- Crafting (needs economyEnabled): dwarves learn recipes, craft and run workshops, spoilers supply them, other bots
 diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 index 44ce79f..b12098b 100644
 --- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
@@ -37,31 +37,33 @@ index 44ce79f..b12098b 100644
              CoScopes.generalScope.launch {
                  val newClassId = getNewClassId(classId)
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index ec93c09..11b5bf0 100644
+index 0d3c68e..da987de 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -46,6 +46,8 @@ internal data class AutobotSettings(
-         @JsonProperty("groupFinderEnabled") var groupFinderEnabled: Boolean = true,
-         @JsonProperty("groupMaxPopulationPercent") var groupMaxPopulationPercent: Int = 40,
+@@ -49,7 +49,9 @@ internal data class AutobotSettings(
          @JsonProperty("groupLog") var groupLog: Boolean = true,
+         @JsonProperty("populationTestLevel") var populationTestLevel: Int = 0,
+         @JsonProperty("craftEnabled") var craftEnabled: Boolean = true,
+-        @JsonProperty("crafterArtisanPercent") var crafterArtisanPercent: Int = 60
++        @JsonProperty("crafterArtisanPercent") var crafterArtisanPercent: Int = 60,
 +        @JsonProperty("questsEnabled") var questsEnabled: Boolean = true,
-+        @JsonProperty("questLog") var questLog: Boolean = true,
-         @JsonProperty("populationTestLevel") var populationTestLevel: Int = 0
++        @JsonProperty("questLog") var questLog: Boolean = true
  ){
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
+         setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index f9231e3..cf15b98 100644
+index 5b7d75c..051a7f4 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-@@ -12,6 +12,7 @@ import dev.l2j.autobots.population.economy.StoreKeeper
- import dev.l2j.autobots.population.economy.TownTrip
- import dev.l2j.autobots.population.group.PartyBehavior
- import dev.l2j.autobots.population.group.PartyPlan
+@@ -17,6 +17,7 @@ import dev.l2j.autobots.population.group.PartyPlan
+ import dev.l2j.autobots.population.economy.craft.CraftBook
+ import dev.l2j.autobots.population.economy.craft.Prospecting
+ import dev.l2j.autobots.population.economy.craft.RecipeBookDao
 +import dev.l2j.autobots.population.quests.QuestRunner
  import dev.l2j.autobots.utils.distance
  import net.sf.l2j.commons.random.Rnd
  import net.sf.l2j.gameserver.data.xml.TeleportLocationData
-@@ -40,6 +41,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -45,6 +46,7 @@ internal class LifeBehavior(private val bot: Autobot) {
      private val economy get() = AutobotData.settings.economyEnabled
      private val fitness = Fitness(bot)
      private val party = PartyBehavior(bot)
@@ -69,7 +71,7 @@ index f9231e3..cf15b98 100644
      // A party member's own trip to town: the party goes on hunting meanwhile.
      private var partyErrand = false
  
-@@ -110,6 +112,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -119,6 +121,7 @@ internal class LifeBehavior(private val bot: Autobot) {
      }
  
      fun onLogout() {
@@ -77,16 +79,16 @@ index f9231e3..cf15b98 100644
          spot?.let { HuntingSpots.leave(it) }
          spot = null
          StoreKeeper.close(bot)
-@@ -133,7 +136,7 @@ internal class LifeBehavior(private val bot: Autobot) {
- 
+@@ -146,7 +149,7 @@ internal class LifeBehavior(private val bot: Autobot) {
      private fun chooseActivity(): Activity {
          val chosen = when {
--            Rnd.get(100) >= AFK_SESSION_PERCENT -> Activity.Hunt
-+            Rnd.get(100) >= AFK_SESSION_PERCENT || quests.hasBusiness() -> Activity.Hunt
+             // Crafters spend more of their time behind a store than hunters do.
+-            Rnd.get(100) >= (if (CraftBook.isCrafter(bot)) CRAFTER_TRADE_SESSION_PERCENT else AFK_SESSION_PERCENT) -> Activity.Hunt
++            Rnd.get(100) >= (if (CraftBook.isCrafter(bot)) CRAFTER_TRADE_SESSION_PERCENT else AFK_SESSION_PERCENT) || quests.hasBusiness() -> Activity.Hunt
              economy && StoreKeeper.hasBusiness(bot) -> Activity.Trade
              else -> Activity.Afk
          }
-@@ -181,6 +184,12 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -194,6 +197,12 @@ internal class LifeBehavior(private val bot: Autobot) {
              return
          }
  

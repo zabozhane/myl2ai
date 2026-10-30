@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index ef03838..7b342bb 100644
+index ef03838..0d7d68d 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -2,11 +2,46 @@
+@@ -2,11 +2,48 @@
  <settings>
    <thinkIteration>350</thinkIteration>
    <defaultTitle>Welcome to L2</defaultTitle>
@@ -46,6 +46,8 @@ index ef03838..7b342bb 100644
 +       shout for missing members and answer players who look for a group in chat. At most this percent of the
 +       online population plays in parties; the rest hunt alone. groupLog prints every formed party. -->
 +  <groupFinderEnabled>true</groupFinderEnabled>
++  <!-- Lowest level at which bots look for a party on their own (players group up from about 10-15 in Interlude). -->
++  <groupFinderMinLevel>10</groupFinderMinLevel>
 +  <groupMaxPopulationPercent>40</groupMaxPopulationPercent>
 +  <groupLog>true</groupLog>
 +  <!-- Test only: a newly created population bot starts at this level (0 = level 1, like a real newbie). -->
@@ -1226,10 +1228,10 @@ index 0000000..8536d63
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
 new file mode 100644
-index 0000000..afc1459
+index 0000000..11d29af
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,88 @@
 +package dev.l2j.autobots.behaviors.sequences
 +
 +import dev.l2j.autobots.extensions.location
@@ -1238,11 +1240,18 @@ index 0000000..afc1459
 +import dev.l2j.autobots.utils.CancellationToken
 +import dev.l2j.autobots.utils.distance
 +import kotlinx.coroutines.delay
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.geoengine.GeoEngine
 +import net.sf.l2j.gameserver.model.actor.Player
 +import net.sf.l2j.gameserver.model.location.Location
++import kotlin.math.atan2
++import kotlin.math.cos
++import kotlin.math.sin
 +
 +/**
 + * Walks to [destination] in short legs, so pathfinding only has to solve nearby obstacles.
++ * When a leg leads nowhere (the server finds no path to it, as with a point inside a wall or on another floor),
++ * the bot sidesteps a few times like a player feeling its way around a building, then goes on.
 + * Stops when the bot is attacked, and calls [onStuck] when it stops getting closer.
 + */
 +internal class WalkToSequence(override val bot: Player, private val destination: Location, private val arrivalRadius: Int, private val onStuck: () -> Unit) : Sequence {
@@ -1252,6 +1261,7 @@ index 0000000..afc1459
 +    override suspend fun definition() {
 +        var bestDistance = Double.MAX_VALUE
 +        var checksWithoutProgress = 0
++        var detours = 0
 +
 +        while (true) {
 +            val remaining = distance(bot.location(), destination)
@@ -1266,7 +1276,13 @@ index 0000000..afc1459
 +            }
 +
 +            if (!bot.isMoving) {
-+                val leg = nextLeg(remaining)
++                val leg = if (checksWithoutProgress >= CHECKS_BEFORE_DETOUR && detours < MAX_DETOURS) {
++                    detours++
++                    checksWithoutProgress = 0
++                    detour()
++                } else {
++                    nextLeg(remaining)
++                }
 +                bot.moveTo(leg.x, leg.y, leg.z)
 +            }
 +            delay(CHECK_INTERVAL_MS)
@@ -1276,24 +1292,39 @@ index 0000000..afc1459
 +    private fun nextLeg(remaining: Double): Location {
 +        if (remaining <= LEG_LENGTH) return destination
 +        val ratio = LEG_LENGTH / remaining
-+        return Location(
-+                bot.x + ((destination.x - bot.x) * ratio).toInt(),
-+                bot.y + ((destination.y - bot.y) * ratio).toInt(),
-+                bot.z + ((destination.z - bot.z) * ratio).toInt())
++        val x = bot.x + ((destination.x - bot.x) * ratio).toInt()
++        val y = bot.y + ((destination.y - bot.y) * ratio).toInt()
++        // A straight-line height is often under a floor or over a bridge; the ground under the point is reachable.
++        val z = bot.z + ((destination.z - bot.z) * ratio).toInt()
++        return Location(x, y, GeoEngine.getInstance().getHeight(x, y, z).toInt())
++    }
++
++    /** A step to one side of the straight line, so the next leg starts from somewhere the pathfinder can solve. */
++    private fun detour(): Location {
++        val heading = atan2((destination.y - bot.y).toDouble(), (destination.x - bot.x).toDouble())
++        val turn = Math.toRadians(Rnd.get(45, 120).toDouble()) * (if (Rnd.nextBoolean()) 1 else -1)
++        val length = Rnd.get(DETOUR_MIN, DETOUR_MAX)
++        val x = bot.x + (cos(heading + turn) * length).toInt()
++        val y = bot.y + (sin(heading + turn) * length).toInt()
++        return Location(x, y, GeoEngine.getInstance().getHeight(x, y, bot.z).toInt())
 +    }
 +
 +    companion object {
 +        private const val LEG_LENGTH = 2000.0
++        private const val CHECKS_BEFORE_DETOUR = 2
++        private const val MAX_DETOURS = 6
++        private const val DETOUR_MIN = 300
++        private const val DETOUR_MAX = 900
 +        private const val MIN_PROGRESS = 100
 +        private const val CHECK_INTERVAL_MS = 2000L
 +        private const val MAX_CHECKS_WITHOUT_PROGRESS = 15
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index 323190c..ec93c09 100644
+index 323190c..a2f93b7 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -24,7 +24,29 @@ internal data class AutobotSettings(
+@@ -24,7 +24,30 @@ internal data class AutobotSettings(
          @JsonProperty("useManaPots") var useManaPots: Boolean = true,
          @JsonProperty("useQuickHealingPots") var useQuickHealingPots: Boolean = false,
          @JsonProperty("useGreaterHealingPots") var useGreaterHealingPots: Boolean = true,
@@ -1318,6 +1349,7 @@ index 323190c..ec93c09 100644
 +        @JsonProperty("professionWeightSummoner") var professionWeightSummoner: Int = 100,
 +        @JsonProperty("groupsEnabled") var groupsEnabled: Boolean = true,
 +        @JsonProperty("groupFinderEnabled") var groupFinderEnabled: Boolean = true,
++        @JsonProperty("groupFinderMinLevel") var groupFinderMinLevel: Int = 10,
 +        @JsonProperty("groupMaxPopulationPercent") var groupMaxPopulationPercent: Int = 40,
 +        @JsonProperty("groupLog") var groupLog: Boolean = true,
 +        @JsonProperty("populationTestLevel") var populationTestLevel: Int = 0
@@ -2599,10 +2631,10 @@ index 0000000..698845b
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
 new file mode 100644
-index 0000000..5da5fd1
+index 0000000..54e0f4f
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,209 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.population.group.Role
@@ -2615,6 +2647,7 @@ index 0000000..5da5fd1
 +import net.sf.l2j.gameserver.data.sql.SpawnTable
 +import net.sf.l2j.gameserver.enums.actors.StoreType
 +import net.sf.l2j.gameserver.model.ItemRequest
++import net.sf.l2j.gameserver.model.actor.Npc
 +import net.sf.l2j.gameserver.model.actor.Player
 +import net.sf.l2j.gameserver.model.actor.instance.Merchant
 +import net.sf.l2j.gameserver.model.buylist.Product
@@ -2662,6 +2695,15 @@ index 0000000..5da5fd1
 +            .minByOrNull { (shop, _) -> distance(bot, shop.merchant) }
 +
 +    fun closestShop(bot: Player): Shop? = shopsNear(bot).minByOrNull { distance(bot, it.merchant) }
++
++    /** Village Newbie Guides: their "support magic" buffs novices of level 10-24 for free, as on retail. */
++    private val newbieGuides: List<Npc> by lazy {
++        SpawnTable.getInstance().spawns.mapNotNull { it.npc }.filter { it.npcId in NEWBIE_GUIDE_IDS }
++    }
++
++    fun newbieGuideNear(bot: Player): Npc? = newbieGuides.filter { distance(bot, it) <= TOWN_RADIUS }.minByOrNull { distance(bot, it) }
++
++    private val NEWBIE_GUIDE_IDS = setOf(30598, 30599, 30600, 30601, 30602, 31076, 31077)
 +
 +    /** Price per piece with the castle tax, as RequestBuyItem charges it. */
 +    fun priceWithTax(shop: Shop, product: Product): Int = (product.price * (1 + (shop.merchant.castle?.taxRate ?: 0.0))).toInt()
@@ -2951,10 +2993,10 @@ index 0000000..eabb9c1
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 new file mode 100644
-index 0000000..af4974f
+index 0000000..538f966
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,251 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -3064,6 +3106,16 @@ index 0000000..af4974f
 +        sellToNpc((leftovers + heavy).distinct().filter { bot.inventory.getItemByObjectId(it.objectId) != null })
 +        Enchanter.enchantWorn(bot, cautious)
 +        bot.refreshOverloaded()
++        getNewbieBuffs()
++    }
++
++    /** Last stop before leaving town, so the buffs last into the hunt; the guide itself checks level and class. */
++    private suspend fun getNewbieBuffs() {
++        if (!bot.isNewbie || bot.level < NEWBIE_BUFF_MIN_LEVEL) return
++        val guide = Market.newbieGuideNear(bot) ?: return
++        if (!walkTo(guide, "for newbie buffs")) return
++        guide.onBypassFeedback(bot, "SupportMagic")
++        delay(Rnd.get(1000, 3000).toLong())
 +    }
 +
 +    /** Cheap surplus that isn't worth a store slot. */
@@ -3186,6 +3238,7 @@ index 0000000..af4974f
 +        private const val MAX_STORE_VISITS = 4
 +        private const val SHOTS_PER_TRIP = 1000
 +        private const val APPROACH_RADIUS = 300
++        private const val NEWBIE_BUFF_MIN_LEVEL = 10
 +        private const val FINAL_APPROACH_SECONDS = 15
 +
 +        private fun shotsFor(level: Int) = when {
@@ -3402,10 +3455,10 @@ index 0000000..b519018
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
 new file mode 100644
-index 0000000..3747691
+index 0000000..dbc8ea6
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,277 @@
 +package dev.l2j.autobots.population.group
 +
 +import dev.l2j.autobots.Autobot
@@ -3425,13 +3478,12 @@ index 0000000..3747691
 +
 +/**
 + * Bots gathering parties on their own, every 30 seconds. A bot looks for a group when it keeps dying (needsGroup),
-+ * or because it likes company: team players in most sessions from level 18, regular ones now and then, loners only
++ * or because it likes company: team players in most sessions from `groupFinderMinLevel`, regular ones now and then, loners only
 + * when they must. Lookers of one map region and close levels team up behind the most sociable of them; the party
 + * wants a healer from level 25 and settles for damage dealers after a few minutes without one. A bot-led party
 + * with free places shouts for members and answers players looking for a group, inviting the ones it can use.
 + */
 +internal object GroupFinder {
-+    private const val MIN_LEVEL = 18
 +    private const val HEALER_FROM_LEVEL = 25
 +    private const val MAX_LEVEL_SPREAD = 5
 +    private const val MIN_SIZE = 3
@@ -3457,7 +3509,7 @@ index 0000000..3747691
 +
 +    /** Decided once per session, when the bot logs in. */
 +    fun onSessionStart(bot: Autobot) {
-+        if (!enabled || bot.level < MIN_LEVEL) return
++        if (!enabled || bot.level < settings.groupFinderMinLevel) return
 +        val percent = when (Sociability.of(bot)) {
 +            Sociability.TeamPlayer -> 60
 +            Sociability.Regular -> 25
@@ -3468,7 +3520,7 @@ index 0000000..3747691
 +
 +    /** A bot that keeps dying, or whose spot is too hard, wants a group before it falls back to farming. */
 +    fun wantGroup(bot: Autobot) {
-+        if (enabled && bot.level >= MIN_LEVEL && !bot.isInParty) looking.putIfAbsent(bot.objectId, System.currentTimeMillis())
++        if (enabled && bot.level >= settings.groupFinderMinLevel && !bot.isInParty) looking.putIfAbsent(bot.objectId, System.currentTimeMillis())
 +    }
 +
 +    fun isLooking(bot: Autobot) = looking.containsKey(bot.objectId)

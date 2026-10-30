@@ -66,7 +66,7 @@ index dea7ec6..8d64c1f 100644
              if ((ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
                  GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
-index 698845b..4ae8fc1 100644
+index 2918ff5..d38ff04 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
 @@ -1,5 +1,6 @@
@@ -76,7 +76,7 @@ index 698845b..4ae8fc1 100644
  import dev.l2j.autobots.AutobotData
  import dev.l2j.autobots.behaviors.attributes.PetOwner
  import dev.l2j.autobots.behaviors.preferences.PetOwnerPreferences
-@@ -186,6 +187,7 @@ internal object Gear {
+@@ -187,6 +188,7 @@ internal object Gear {
          summonCrystal(bot)?.let { keep += it }
          petShot(bot)?.let { keep += it }
          keep += wishes(bot).map { it.itemId }
@@ -85,7 +85,7 @@ index 698845b..4ae8fc1 100644
          val worn = bot.inventory.paperdollItems
          keep += AbstractEnchantPacket._scrolls.filter { (_, scroll) -> worn.any { scroll.isValid(it) } }.keys
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
-index eabb9c1..9847078 100644
+index 6fb2d19..8acad61 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
 @@ -1,5 +1,6 @@
@@ -93,32 +93,32 @@ index eabb9c1..9847078 100644
  
 +import dev.l2j.autobots.population.skills.SkillLearner
  import dev.l2j.autobots.Autobot
- import net.sf.l2j.commons.random.Rnd
- import net.sf.l2j.gameserver.data.ItemTable
-@@ -45,7 +46,9 @@ internal object StoreKeeper {
+ import dev.l2j.autobots.population.economy.craft.CraftBook
+ import dev.l2j.autobots.population.economy.craft.CraftPlanner
+@@ -54,7 +55,9 @@ internal object StoreKeeper {
                  .keys
          // Summoners buy crystals from dwarves' stores: no town shop sells them.
          val crystals = listOfNotNull(Gear.summonCrystal(bot)?.takeIf { Gear.count(bot, it) < Crystals.WANTED })
--        return (gear + crystals + scrolls).distinct()
+-        return (gear + crystals + scrolls + craftWants(bot).keys).distinct()
 +        // Spellbooks no town shop sells come from drops: a buy store asks other players for them.
 +        val books = SkillLearner.missingBooks(bot).filter { Market.npcPrice(it) == null }.take(1)
-+        return (gear + books + crystals + scrolls).distinct()
++        return (gear + books + crystals + scrolls + craftWants(bot).keys).distinct()
      }
  
-     fun hasBusiness(bot: Autobot): Boolean = storeGoods(bot).isNotEmpty() || (bot.adena > 0 && wanted(bot).any { bidPrice(bot, it) in 1..bot.adena })
+     /** A crafter's buy store bids on the materials of its next crafts and on recipes in demand it could learn. */
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-index af4974f..0ffe4a5 100644
+index 6dcab7b..22ceef1 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-@@ -5,6 +5,7 @@ import dev.l2j.autobots.behaviors.sequences.Sequence
- import dev.l2j.autobots.behaviors.sequences.WalkToSequence
- import dev.l2j.autobots.extensions.location
- import dev.l2j.autobots.extensions.useItem
+@@ -8,6 +8,7 @@ import dev.l2j.autobots.extensions.useItem
+ import dev.l2j.autobots.population.economy.craft.CraftBook
+ import dev.l2j.autobots.population.economy.craft.Crafter
+ import dev.l2j.autobots.population.economy.craft.Sourcing
 +import dev.l2j.autobots.population.skills.SkillLearner
  import dev.l2j.autobots.utils.CancellationToken
  import dev.l2j.autobots.utils.distance
  import kotlinx.coroutines.delay
-@@ -35,6 +36,7 @@ internal object Errands {
+@@ -38,6 +39,7 @@ internal object Errands {
      fun shouldLeaveSpot(bot: Autobot, lastTripAt: Long): Boolean {
          val minutesSinceTrip = (System.currentTimeMillis() - lastTripAt) / 60_000
          if (minutesSinceTrip < MIN_MINUTES_BETWEEN_TRIPS) return false
@@ -126,9 +126,9 @@ index af4974f..0ffe4a5 100644
          if (loadPercent(bot) >= HEAVY_LOAD_PERCENT) return true
          if (outOfShots(bot)) return true
          if (Gear.isArcher(bot) && Gear.count(bot, Gear.arrowId(bot)) < 50) return true
-@@ -99,6 +101,8 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
-         Crystals.crystallizeJunk(bot)
-         tradeWithStores()
+@@ -105,6 +107,8 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         Sourcing.orderCheapest(bot) { walkTo(it, "to a workshop or store") }
+         Crafter.work(bot)
          sellToNpc(junk())
 +        // Skills before gear: a spellbook and the trainer's lesson come first, like for a player.
 +        SkillLearner.learn(bot)
