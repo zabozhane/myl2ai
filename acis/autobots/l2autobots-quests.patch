@@ -50,7 +50,7 @@ index ec93c09..11b5bf0 100644
  ){
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index f9231e3..6401653 100644
+index f9231e3..cf15b98 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 @@ -12,6 +12,7 @@ import dev.l2j.autobots.population.economy.StoreKeeper
@@ -77,6 +77,15 @@ index f9231e3..6401653 100644
          spot?.let { HuntingSpots.leave(it) }
          spot = null
          StoreKeeper.close(bot)
+@@ -133,7 +136,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     private fun chooseActivity(): Activity {
+         val chosen = when {
+-            Rnd.get(100) >= AFK_SESSION_PERCENT -> Activity.Hunt
++            Rnd.get(100) >= AFK_SESSION_PERCENT || quests.hasBusiness() -> Activity.Hunt
+             economy && StoreKeeper.hasBusiness(bot) -> Activity.Trade
+             else -> Activity.Afk
+         }
 @@ -181,6 +184,12 @@ internal class LifeBehavior(private val bot: Autobot) {
              return
          }
@@ -416,10 +425,10 @@ index 0000000..85c0faa
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
 new file mode 100644
-index 0000000..caf9104
+index 0000000..25ae84d
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
-@@ -0,0 +1,367 @@
+@@ -0,0 +1,371 @@
 +package dev.l2j.autobots.population.quests
 +
 +import dev.l2j.autobots.AutobotData
@@ -490,6 +499,10 @@ index 0000000..caf9104
 +        QuestLog.setActive(bot, busy)
 +        return busy
 +    }
++
++    /** A bot due for its profession quest plays this session rather than idling or trading, as a player would. */
++    fun hasBusiness(): Boolean = AutobotData.settings.questsEnabled && bot.classId.level() == 0 && bot.level >= START_LEVEL &&
++            !bot.isInParty && System.currentTimeMillis() >= pausedUntil && PathQuests.forBaseClass(bot.classId).any { it.to in getSupportedClasses }
 +
 +    fun onLogout() {
 +        relax()
