@@ -6,6 +6,7 @@ ACIS_HOME=/opt/acis
 GAME_SERVER_ID=1
 DB_HOST=db
 DB_PORT=3306
+NO_GEODATA_MARKER="#no-geodata#"
 
 fail() {
 	echo "entrypoint: $*" >&2
@@ -67,13 +68,16 @@ ensure_hexid() {
 
 # Without geodata files every listed region fails to load and the server exits,
 # so with an empty geodata folder the region list is dropped (no collision checks in the world).
+# Dropped regions carry their own marker and are restored first: "docker compose restart" keeps the
+# edited config, and geodata may have been added since the previous start.
 configure_geodata() {
 	geoengine_config=$1
+	sed -i -E "s/^${NO_GEODATA_MARKER}//" "$geoengine_config"
 	if ls /opt/acis/geodata/ | grep -Eq '^[0-9]+_[0-9]+'; then
 		return
 	fi
 	echo "entrypoint: WARNING no geodata files in /opt/acis/geodata, starting without geodata" >&2
-	sed -i -E 's/^([0-9]+_[0-9]+)/#\1/' "$geoengine_config"
+	sed -i -E "s/^([0-9]+_[0-9]+)/${NO_GEODATA_MARKER}\1/" "$geoengine_config"
 }
 
 role=${1:-}
