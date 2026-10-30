@@ -119,10 +119,10 @@ index ce85df0..29c2062 100644
          }
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt
 new file mode 100644
-index 0000000..a2d78d8
+index 0000000..e6679fb
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,50 @@
 +package dev.l2j.autobots.behaviors
 +
 +import dev.l2j.autobots.utils.distance
@@ -138,8 +138,9 @@ index 0000000..a2d78d8
 + */
 +internal class LootPicker(private val player: Player) {
 +
-+    // Items the bot could not take (weight, slots, someone else took it): never retried, so the bot does not loop on them.
-+    private val skippedItemIds = mutableSetOf<Int>()
++    // Pick-up attempts per item: an attempt can be dropped silently (the AI refuses PICK_UP mid-attack or mid-cast,
++    // the path is blocked), so an item is retried a few times and then given up, so the bot never loops on it.
++    private val attemptsByItemId = mutableMapOf<Int, Int>()
 +
 +    /** @return true while the bot is busy looting, so the combat step of this tick is skipped. */
 +    fun onUpdate(): Boolean {
@@ -147,7 +148,10 @@ index 0000000..a2d78d8
 +        if (player.ai.desire.intention == IntentionType.PICK_UP) return true
 +
 +        val item = findClosestLootableItem() ?: return false
-+        skippedItemIds.add(item.objectId)
++        // The AI ignores PICK_UP while an attack or cast is in progress; wait for it to end instead of spending an attempt.
++        if (player.isAttackingNow || player.isCastingNow) return true
++
++        attemptsByItemId.merge(item.objectId, 1, Int::plus)
 +        player.ai.setIntention(IntentionType.PICK_UP, item)
 +        return true
 +    }
@@ -157,7 +161,7 @@ index 0000000..a2d78d8
 +            .minByOrNull { distance(player.x, player.y, player.z, it.x, it.y, it.z) }
 +
 +    private fun isLootable(item: ItemInstance): Boolean = item.isVisible &&
-+            item.objectId !in skippedItemIds &&
++            attemptsByItemId.getOrDefault(item.objectId, 0) < MAX_PICK_UP_ATTEMPTS &&
 +            (item.ownerId == 0 || player.isLooterOrInLooterParty(item.ownerId)) &&
 +            player.inventory.validateWeight(item.count * item.item.weight) &&
 +            player.inventory.validateCapacity(item) &&
@@ -166,6 +170,7 @@ index 0000000..a2d78d8
 +    companion object {
 +        private const val LOOT_RADIUS = 400
 +        private const val MIN_HEALTH_PERCENT_TO_LOOT = 40.0
++        private const val MAX_PICK_UP_ATTEMPTS = 3
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt

@@ -22,7 +22,8 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   Targeting: monsters only within bot level -5..+3 (unless they attack the bot) and in line of sight
   (geodata); `config.xml` defaults to the closest target in 1000 range instead of a random one in 2000.
   Looting (`LootPicker`): bots pick up their own and ownerless drops within 400, one per tick, before fighting
-  back; below 40% HP they fight instead. Items they cannot take (weight, slots) are not retried.
+  back; below 40% HP they fight instead. Items over the weight or slot limit are skipped; a pick-up the AI
+  ignores (mid-attack or mid-cast) is retried up to 3 times.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 
