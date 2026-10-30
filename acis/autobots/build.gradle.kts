@@ -9,6 +9,8 @@ repositories { mavenCentral() }
 
 dependencies {
     compileOnly(fileTree("$acisSources/aCis_gameserver/lib") { include("*.jar") })
+    // jackson-module-kotlin pulls an old kotlin-reflect; it must match the stdlib version.
+    implementation(kotlin("reflect"))
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.10.5")
     implementation("com.fasterxml.jackson.dataformat:jackson-dataformat-xml:2.10.5")
     implementation("org.mindrot:jbcrypt:0.4")
@@ -25,4 +27,11 @@ sourceSets.main {
     // aCis Java sources are only read for symbol resolution; javac never compiles them here.
     kotlin.srcDir("$acisSources/aCis_gameserver/java")
     java.setSrcDirs(emptyList<String>())
+}
+
+// The aCis ant build picks up every jar in aCis_gameserver/lib, so the module and its runtime deps go there.
+tasks.register<Copy>("installIntoAcisLib") {
+    from(tasks.jar)
+    from(configurations.runtimeClasspath)
+    into("$acisSources/aCis_gameserver/lib")
 }

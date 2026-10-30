@@ -1,0 +1,43 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+index d304168..442015e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
++++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+@@ -329,6 +329,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+                 }
+                 when (effect.effectType) {
+                     L2EffectType.SIGNET_GROUND, L2EffectType.SIGNET_EFFECT -> effect.exit()
++                    else -> {}
+                 }
+             }
+             
+diff --git a/src/main/kotlin/dev/l2j/autobots/admincommands/AdminAutobots.kt b/src/main/kotlin/dev/l2j/autobots/admincommands/AdminAutobots.kt
+index d6c9c8f..06fa0da 100644
+--- a/src/main/kotlin/dev/l2j/autobots/admincommands/AdminAutobots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/admincommands/AdminAutobots.kt
+@@ -351,7 +351,7 @@ class AdminAutobots : IAdminCommandHandler {
+                     "ls"-> { //load and spawn selected
+                         CoScopes.generalScope.launch {
+                                 ViewStates.indexViewState(activeChar).selectedBots.forEach {
+-                                    innerLaunch@CoScopes.massSpawnerScope.launch {
++                                    CoScopes.massSpawnerScope.launch innerLaunch@{
+                                         val autobot = AutobotsDao.loadByName(it.value.name) ?: return@innerLaunch
+                                         if (autobot.isOnline) return@innerLaunch
+ 
+@@ -728,7 +728,7 @@ class AdminAutobots : IAdminCommandHandler {
+ 
+                         CoScopes.generalScope.launch {
+                             bots.forEach {
+-                                innerLaunch@CoScopes.massSpawnerScope.launch {
++                                CoScopes.massSpawnerScope.launch innerLaunch@{
+                                     val autobot = AutobotsDao.loadByName(it.value.name) ?: return@innerLaunch
+ 
+                                     autobot.setXYZ(activeChar.x + Rnd.get(-150, 150), activeChar.y + Rnd.get(-150, 150), activeChar.z)
+@@ -744,7 +744,7 @@ class AdminAutobots : IAdminCommandHandler {
+ 
+                         CoScopes.generalScope.launch {
+                             bots.forEach {
+-                                innerLaunch@CoScopes.massDespawnerScope.launch {
++                                CoScopes.massDespawnerScope.launch innerLaunch@{
+                                     val autobot = AutobotsManager.activeBots.getOrDefault(it.value.name, null) ?: return@innerLaunch
+                                     AdminActions.despawnAutobot(autobot)
+                                 }

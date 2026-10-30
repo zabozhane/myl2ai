@@ -1,17 +1,26 @@
-# L2Autobots on aCis 382 (work in progress)
+# L2Autobots on aCis 382
 
-Source: https://github.com/Elfocrash/L2Autobots, commit f990c61 (Kotlin, written for aCis 382).
+Source: https://github.com/Elfocrash/L2Autobots, commit `f990c61d` (Kotlin, written for aCis 382), pinned in `.env`.
+Everything is applied at image build time in `acis/Dockerfile`; the upstream trees are never committed here.
 
 ## Files
-- `acis-382-autobots.patch` - upstream `patch.diff` rebased onto stock aCis 382 (commit 452cd109):
-  paths mapped from `src/main/java` to `aCis_gameserver/java`, applies to sources with LF line endings
-  (aCis ships CRLF). Upstream diff was made against an already partly patched tree, so three hunks were
-  redone by hand: IdFactory (items cleanup also keeps autobot items), Player (import), Say2 (onChat hook).
-- `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources (kotlinc reads them for
-  symbols), producing a jar plus runtime deps that go into `aCis_gameserver/lib` before the stock ant build.
+- `acis-382-autobots.patch` - upstream `patch.diff` rebased onto stock aCis 382 (commit `452cd109`), LF line
+  endings (the Dockerfile normalizes the CRLF files it touches first). The upstream diff was taken against an
+  already partly patched tree, so it lacked changes the Kotlin code depends on. Added by hand:
+  - `Player`, `GameClient` not final, `Player` constructor protected: `Autobot` and `AutobotClient` extend them.
+  - `Player.checkDoCastConditions` public, `Clan.getClanMembers()`: called from bot behaviors and the DAO.
+  - `AdminAutobots` registered in `AdminCommandHandler`, `admin_a` (access level 7) in `adminCommands.xml`.
+  - Redone hunks: IdFactory (items cleanup keeps autobot items), Player (import), Say2 (`onChat` hook).
+  - `RequestBypassToServer`: null check moved before `player.isGM()` (upstream could NPE).
+- `l2autobots-kotlin-1.9.patch` - source fixes for Kotlin 1.9 (exhaustive `when`, lambda labels).
+- `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
+  runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 
-## Status / next steps
-1. Get the Kotlin module to compile (blocked so far by Maven Central HTTP 429 in the cloud build).
-2. Check what the patch lacks: AdminAutobots handler registration, AutobotsManager start-up, `sql/*.sql`
-   and `data/autobots/*.xml` deployment.
-3. Wire into `acis/Dockerfile`; geodata: aCis 382 loads only `.l2d` (L2OFF/L2J need GeoDataConverter).
+Runtime: `data/autobots/*.xml` go to `gameserver/data/autobots`, `sql/*.sql` to `/opt/acis/sql/addons`
+(applied by `init-db` on every start, the tables are `CREATE TABLE IF NOT EXISTS`).
+
+Review of upstream code: no process execution or hidden network calls; the only outbound call is
+`CrestService`, which downloads a clan crest image from a URL a GM enters in the dashboard.
+
+## Usage
+GM character (access level 7+), type `//a b` in game: the dashboard creates, spawns and controls bots.

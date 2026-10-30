@@ -6,6 +6,7 @@ x-acis-image: &acis-image
     context: ./acis
     args:
       ACIS_COMMIT: ${ACIS_COMMIT}
+      AUTOBOTS_COMMIT: ${AUTOBOTS_COMMIT}
       JDK_VERSION: ${JDK_VERSION}
 
 x-db-credentials: &db-credentials

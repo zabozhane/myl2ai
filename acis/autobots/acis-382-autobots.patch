@@ -32,6 +32,26 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/data/xml/TeleportLocat
  	public static TeleportLocationData getInstance()
  	{
  		return SingletonHolder.INSTANCE;
+diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/handler/AdminCommandHandler.java work/aCis_gameserver/java/net/sf/l2j/gameserver/handler/AdminCommandHandler.java
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/handler/AdminCommandHandler.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/handler/AdminCommandHandler.java
+@@ -47,6 +47,8 @@
+ import net.sf.l2j.gameserver.handler.admincommandhandlers.AdminTeleport;
+ import net.sf.l2j.gameserver.handler.admincommandhandlers.AdminZone;
+ 
++import dev.l2j.autobots.admincommands.AdminAutobots;
++
+ public class AdminCommandHandler
+ {
+ 	private final Map<Integer, IAdminCommandHandler> _entries = new HashMap<>();
+@@ -96,6 +98,7 @@
+ 		registerHandler(new AdminTarget());
+ 		registerHandler(new AdminTeleport());
+ 		registerHandler(new AdminZone());
++		registerHandler(new AdminAutobots());
+ 	}
+ 	
+ 	private void registerHandler(IAdminCommandHandler handler)
 diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java work/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java
 --- a/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java
 +++ b/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java
@@ -64,6 +84,15 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.jav
  import net.sf.l2j.Config;
  import net.sf.l2j.L2DatabaseFactory;
  import net.sf.l2j.gameserver.LoginServerThread;
+@@ -246,7 +247,7 @@
+  * This class represents a player in the world.<br>
+  * There is always a client-thread connected to this (except if a player-store is activated upon logout).
+  */
+-public final class Player extends Playable
++public class Player extends Playable
+ {
+ 	private static final String RESTORE_SKILLS_FOR_CHAR = "SELECT skill_id,skill_level FROM character_skills WHERE char_obj_id=? AND class_index=?";
+ 	private static final String ADD_OR_UPDATE_SKILL = "INSERT INTO character_skills (char_obj_id,skill_id,skill_level,class_index) VALUES (?,?,?,?) ON DUPLICATE KEY UPDATE skill_level=VALUES(skill_level)";
 @@ -513,6 +514,26 @@
  	
  	private Door _requestedGate;
@@ -91,6 +120,24 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.jav
  	/**
  	 * Constructor of Player (use Creature constructor).
  	 * <ul>
+@@ -525,7 +546,7 @@
+ 	 * @param accountName The name of the account including this Player
+ 	 * @param app The PcAppearance of the Player
+ 	 */
+-	private Player(int objectId, PlayerTemplate template, String accountName, Appearance app)
++	protected Player(int objectId, PlayerTemplate template, String accountName, Appearance app)
+ 	{
+ 		super(objectId, template);
+ 		
+@@ -2652,7 +2673,7 @@
+ 	}
+ 	
+ 	@Override
+-	protected boolean checkDoCastConditions(L2Skill skill)
++	public boolean checkDoCastConditions(L2Skill skill)
+ 	{
+ 		if (!super.checkDoCastConditions(skill))
+ 			return false;
 @@ -2778,8 +2799,9 @@
  	@Override
  	public void onActionShift(Player player)
@@ -233,6 +280,30 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/model/pledge/Clan.java
  				
  				try (ResultSet rs = ps.executeQuery())
  				{
+@@ -788,6 +789,11 @@
+ 		}
+ 	}
+ 	
++	public Map<Integer, ClanMember> getClanMembers()
++	{
++		return _members;
++	}
++	
+ 	public Collection<ClanMember> getMembers()
+ 	{
+ 		return _members.values();
+diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/network/GameClient.java work/aCis_gameserver/java/net/sf/l2j/gameserver/network/GameClient.java
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/GameClient.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/GameClient.java
+@@ -34,7 +34,7 @@
+  * <br>
+  * It is linked to a {@link Player} and hold account informations (flood protectors, connection time, etc).
+  */
+-public final class GameClient extends MMOClient<MMOConnection<GameClient>> implements Runnable
++public class GameClient extends MMOClient<MMOConnection<GameClient>> implements Runnable
+ {
+ 	private static final CLogger LOGGER = new CLogger(GameClient.class.getName());
+ 	
 diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/Action.java work/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/Action.java
 --- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/Action.java
 +++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/Action.java
@@ -417,22 +488,26 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/
  public final class RequestBypassToServer extends L2GameClientPacket
  {
  	private static final Logger GMAUDIT_LOG = Logger.getLogger("gmaudit");
-@@ -39,11 +40,12 @@
+@@ -39,14 +40,15 @@
  	{
  		if (_command.isEmpty())
  			return;
-+
-+        final Player player = getClient().getPlayer();
- 		
+-		
 -		if (!FloodProtectors.performAction(getClient(), Action.SERVER_BYPASS))
 -			return;
-+		if (!FloodProtectors.performAction(getClient(), Action.SERVER_BYPASS) && !player.isGM())
-+			return;		
- 		
--		final Player player = getClient().getPlayer();
+-		
++
+ 		final Player player = getClient().getPlayer();
  		if (player == null)
  			return;
  		
++		// The autobots dashboard fires bypasses faster than the flood protector allows; GMs are exempt.
++		if (!FloodProtectors.performAction(getClient(), Action.SERVER_BYPASS) && !player.isGM())
++			return;
++		
+ 		if (_command.startsWith("admin_"))
+ 		{
+ 			String command = _command.split(" ")[0];
 @@ -185,5 +187,7 @@
  			final int arenaId = Integer.parseInt(_command.substring(12).trim());
  			player.enterOlympiadObserverMode(arenaId);
@@ -503,3 +578,14 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/
  		handler.handleChat(_type, player, _target, _text);
  	}
  	
+--- a/aCis_datapack/data/xml/adminCommands.xml
++++ b/aCis_datapack/data/xml/adminCommands.xml
+@@ -334,4 +334,7 @@
+ 	<!-- ZONE -->
+ 	<aCar name="admin_zone_check" accessLevel="7"/>
+ 	<aCar name="admin_zone_visual" accessLevel="7"/>
++	
++	<!-- AUTOBOTS -->
++	<aCar name="admin_a" accessLevel="7"/>
+ </list>
+\ No newline at end of file
