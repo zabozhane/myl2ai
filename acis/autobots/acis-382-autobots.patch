@@ -96,6 +96,20 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/handler/AdminCommandHa
 diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java work/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java
 --- a/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java
 +++ b/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java
+@@ -226,11 +226,11 @@
+ 				cleanCount += stmt.executeUpdate("DELETE FROM character_hennas WHERE character_hennas.char_obj_id NOT IN (SELECT obj_Id FROM characters);");
+ 				cleanCount += stmt.executeUpdate("DELETE FROM character_macroses WHERE character_macroses.char_obj_id NOT IN (SELECT obj_Id FROM characters);");
+ 				cleanCount += stmt.executeUpdate("DELETE FROM character_memo WHERE character_memo.charId NOT IN (SELECT obj_Id FROM characters);");
+-				cleanCount += stmt.executeUpdate("DELETE FROM character_quests WHERE character_quests.charId NOT IN (SELECT obj_Id FROM characters);");
++				cleanCount += stmt.executeUpdate("DELETE FROM character_quests WHERE character_quests.charId NOT IN (SELECT obj_Id FROM characters UNION SELECT obj_Id FROM autobots);");
+ 				cleanCount += stmt.executeUpdate("DELETE FROM character_raid_points WHERE character_raid_points.char_id NOT IN (SELECT obj_Id FROM characters);");
+ 				cleanCount += stmt.executeUpdate("DELETE FROM character_recipebook WHERE character_recipebook.charId NOT IN (SELECT obj_Id FROM characters);");
+ 				cleanCount += stmt.executeUpdate("DELETE FROM character_shortcuts WHERE character_shortcuts.char_obj_id NOT IN (SELECT obj_Id FROM characters);");
+-				cleanCount += stmt.executeUpdate("DELETE FROM character_skills WHERE character_skills.char_obj_id NOT IN (SELECT obj_Id FROM characters);");
++				cleanCount += stmt.executeUpdate("DELETE FROM character_skills WHERE character_skills.char_obj_id NOT IN (SELECT obj_Id FROM characters UNION SELECT obj_Id FROM autobots);");
+ 				cleanCount += stmt.executeUpdate("DELETE FROM character_skills_save WHERE character_skills_save.char_obj_id NOT IN (SELECT obj_Id FROM characters);");
+ 				cleanCount += stmt.executeUpdate("DELETE FROM character_subclasses WHERE character_subclasses.char_obj_id NOT IN (SELECT obj_Id FROM characters);");
+ 				cleanCount += stmt.executeUpdate("DELETE FROM cursed_weapons WHERE cursed_weapons.playerId NOT IN (SELECT obj_Id FROM characters);");
 @@ -249,7 +249,7 @@
  				cleanCount += stmt.executeUpdate("DELETE FROM auction_bid WHERE auctionId IN (SELECT id FROM clanhall WHERE ownerId <> 0 AND sellerClanName='');");
  				
