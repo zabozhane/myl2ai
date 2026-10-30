@@ -10,10 +10,10 @@ index 0000000..37f942c
 +  PRIMARY KEY (obj_Id)
 +);
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-index 39b5507..c5663e2 100644
+index 6937602..15b9a7d 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-@@ -68,6 +68,8 @@ object AutobotsManager {
+@@ -75,6 +75,8 @@ object AutobotsManager {
      }
  
      fun onChat(type: Int, chatter: Player, target: String?, text: String, handler : IChatHandler) : Boolean{
@@ -22,7 +22,7 @@ index 39b5507..c5663e2 100644
          if(chatter.isGM) {
              if(chatter.isControllingBot()) {
                  handler.handleChat(type, chatter.getControllingBot(), target, text)
-@@ -116,6 +118,7 @@ object AutobotsManager {
+@@ -135,6 +137,7 @@ object AutobotsManager {
      }
  
      fun onMove(player: Player, targetX: Int, targetY: Int, targetZ: Int): Boolean {
@@ -30,7 +30,7 @@ index 39b5507..c5663e2 100644
          if (!player.isGM) return false
          
          if(BotZoneService.player == player) {
-@@ -136,6 +139,7 @@ object AutobotsManager {
+@@ -155,6 +158,7 @@ object AutobotsManager {
      }
  
      fun onUseMagic(player: Player, skillId: Int, ctrlPressed: Boolean) : Boolean {
@@ -38,7 +38,7 @@ index 39b5507..c5663e2 100644
          if (!player.isGM) return false
          
          if(player.isControllingBot()) {
-@@ -149,6 +153,7 @@ object AutobotsManager {
+@@ -168,6 +172,7 @@ object AutobotsManager {
      }
  
      fun onAction(player: Player, target: WorldObject, isShiftPressed: Boolean) : Boolean {
@@ -46,7 +46,7 @@ index 39b5507..c5663e2 100644
          if (!player.isGM) return false
          
          if(isShiftPressed) {
-@@ -177,6 +182,7 @@ object AutobotsManager {
+@@ -196,6 +201,7 @@ object AutobotsManager {
      }
      
      fun onAttackRequest(player: Player, target: WorldObject, isShiftPressed: Boolean) : Boolean {
@@ -656,7 +656,7 @@ index 0000000..c9723ca
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-index c7ac93f..54893b9 100644
+index c606b93..9d43c68 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 @@ -1,6 +1,7 @@
@@ -667,8 +667,8 @@ index c7ac93f..54893b9 100644
  import dev.l2j.autobots.behaviors.attributes.*
  import dev.l2j.autobots.behaviors.preferences.*
  import dev.l2j.autobots.extensions.*
-@@ -40,14 +41,15 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
-     
+@@ -43,15 +44,16 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+ 
      internal suspend fun onUpdate() {
          if(player.isDead) {
 -            handleDeath()
@@ -676,6 +676,7 @@ index c7ac93f..54893b9 100644
 +            if(player is Autobot) handleDeath()
              return
          }
+         deadSince = 0
          
          ensureSummonPet()        
          handleShots()
@@ -686,7 +687,7 @@ index c7ac93f..54893b9 100644
          targetAppropriateTarget()
          checkSelfSupportingSkills()
          beforeAttack()
-@@ -111,7 +113,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -137,7 +139,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
              handleMiscItems(player)
          }
          
@@ -696,7 +697,7 @@ index c7ac93f..54893b9 100644
          
          if(this is Kiter) {
              kite(this.player)
-@@ -157,6 +160,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -183,6 +186,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
  
          var skillToUse: L2Skill? = null
          for(botSkill in getOffensiveSkills) {
@@ -704,7 +705,7 @@ index c7ac93f..54893b9 100644
              val skill = player.getSkill(botSkill.skillId) ?: continue
  
              if(!player.checkDoCastConditions(skill))
-@@ -172,11 +176,16 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -198,11 +202,16 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
          
          return skillToUse
      }
@@ -721,7 +722,7 @@ index c7ac93f..54893b9 100644
              val skill = player.getSkill(supportSkill.skillId) ?: continue
              
              if(skill.isToggle && supportSkill.isTogglableSkill && 
-@@ -287,9 +296,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -313,9 +322,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
      private fun targetAppropriateCreatureByTypeInRadius(radius: Int, targetingPreference: TargetingPreference) { // TODO alive only?
          
          val targets: MutableList<Creature> = when(targetingPreference) {

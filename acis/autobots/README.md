@@ -13,6 +13,8 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - `AutobotsManager.start()` called from `GameServer`: it starts the bots' think loop.
   - Redone hunks: IdFactory (items cleanup keeps autobot items), Player (import), Say2 (`onChat` hook).
   - `RequestBypassToServer`: null check moved before `player.isGM()` (upstream could NPE).
+  - Not from upstream: `RequestJoinParty` calls `AutobotsManager.onPartyInvite`: a bot never sees the
+    AskJoinParty window, so it answers the invite in code.
   - Not from upstream: `AutoLootAdena` in `server.properties` (on): adena goes straight to the killer's
     inventory for everyone, other drops stay on the ground.
 - `l2autobots-fixes.patch` - upstream fixes: Kotlin 1.9 compatibility (exhaustive `when`, lambda labels,
@@ -73,6 +75,42 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - Every 10 minutes one `Autobots economy summary:` line counts the deals by kind and shows the bots online
     (average and max level, adena, stores, farming, needsGroup). `scripts/economy-report.sh [since]` prints those
     summaries, deal counts with samples, bot errors and the game container's load.
+  Professions (`behaviors/classes/`): every Interlude class plays now. Healers (Cleric line, Elven and Shillien
+  Oracle line) heal by priority (tank first, group heal when 2+ members are hurt, battle heals below 35%), raise
+  the dead, recharge and buff; buffers (Prophet, Warcryer line) keep party buffs and chants up; summoners
+  (Warlock, Elemental and Phantom Summoner lines) call, heal, recharge and buff their servitor. Summons consume
+  the crystals the skill asks for: dwarves with Crystallize turn junk gear into crystals in town and sell them in
+  stores, summoners buy them there. The behavior is rebuilt after a class change. `professionWeight*` in
+  `config.xml` tune how often bots pick a healer, buffer, tank or summoner branch; the summary shows `roles=`.
+  Parties (`population/group/`, `groupsEnabled`):
+  - `PartyBehavior`: members follow the leader (gatekeeper or SoE when far), assist the agreed target, the tank
+    or the leader, fight back, sit when the leader sits; the leader rests when a healer is low on mana or a member
+    is hurt, and picks spots for the party's level (+1..+3 with a healer and more members).
+  - A dead member accepts a raise (the ConfirmDlg answered in code) and waits up to 2 minutes for one when a
+    resurrector is near.
+  - `PartyInvites`: a bot answers `/invite` after 2-6 s by its sociability (loner 30%, regular 70%, team
+    player 95%; a bot that needs a group or a healer almost always accepts), refusing PKs, busy states and a
+    level gap of 8+, and whispers why now and then.
+  - `GroupChat`: party chat is a teammate's suggestion, never an order. "assist me", "rest", "buff",
+    "let's move", "brb", "bye" (Russian or English keywords) are weighed against the party's state and answered
+    in the player's language.
+  - `GroupFinder` (`groupFinderEnabled`, every 30 s): team players in 60% of sessions from level 18, regulars in
+    25%, and anyone who keeps dying look for a group. Lookers of one map region within 5 levels team up behind
+    the most sociable one: a healer from level 25 (or damage dealers after 5 minutes without one), then tank,
+    buffer, spoiler and damage dealers, 3-5 members, people they dislike left out. At most
+    `groupMaxPopulationPercent` of the bots online play in parties. A bot-led party with free places shouts for
+    the missing roles every 3-5 minutes and breaks up after 10 minutes below 3 members. `groupLog` prints formed
+    parties.
+  - Players: "ищу пати" / "lfp" in public chat brings whispered offers from up to two fitting bot-led parties
+    (who, levels, where). A whisper to a leader with room ("+", "invite", "возьмите") makes it inspect the
+    player like a player would (level, karma, a role the party lacks, weapon grade for the level; a friend is
+    taken with weaker gear) and invite or explain why not. First come, first served: the place is held for a
+    minute while the invite is open.
+  - `Relations` (`autobot_relations`): each bot remembers up to 50 characters it played with: minutes together
+    and a liking that grows with play and help and drops with wipes. Groups prefer friends. Clans (4a) and
+    pooling (4b) build on it; trust is for social trading (2g).
+  - `populationTestLevel` (test stands only, 0 by default): new population bots start at that level with gear of
+    the level, so groups can be watched without days of play.
 - `l2autobots-autofarm.patch` - auto hunt for live players (Essence style), applied after the fixes patch.
   Built on the upstream `autofarm/` stub, which ran the bots' `CombatBehavior` for a `Player` but could not be
   opened without the GM dashboard. Spec: `docs/autofarm.md`.
