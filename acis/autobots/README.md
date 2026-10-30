@@ -75,6 +75,8 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - Every 10 minutes one `Autobots economy summary:` line counts the deals by kind and shows the bots online
     (average and max level, adena, stores, farming, needsGroup). `scripts/economy-report.sh [since]` prints those
     summaries, deal counts with samples, bot errors and the game container's load.
+  - Every bot death prints an `Autobots death:` line (with `economyLog`): the killer, its level and whether it is
+    aggressive, the monsters on the bot, potions left, mode, hunt level, spot, party size, weapon grade, coordinates.
   Professions (`behaviors/classes/`): every Interlude class plays now. Healers (Cleric line, Elven and Shillien
   Oracle line) heal by priority (tank first, group heal when 2+ members are hurt, battle heals below 35%), raise
   the dead, recharge and buff; buffers (Prophet, Warcryer line) keep party buffs and chants up; summoners
@@ -96,11 +98,17 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     in the player's language.
   - `GroupFinder` (`groupFinderEnabled`, every 30 s): team players in 60% of sessions from `groupFinderMinLevel` (10), regulars in
     25%, and anyone who keeps dying look for a group. Lookers of one map region within 5 levels team up behind
-    the most sociable one: a healer from level 25 (or damage dealers after 5 minutes without one), then tank,
-    buffer, spoiler and damage dealers, 3-5 members, people they dislike left out. At most
-    `groupMaxPopulationPercent` of the bots online play in parties. A bot-led party with free places shouts for
-    the missing roles every 3-5 minutes and breaks up after 10 minutes below 3 members. `groupLog` prints formed
-    parties.
+    the most sociable one, people they dislike left out. Two kinds of parties:
+    - full (from level 20; 70% of team players, 30% of regulars, 10% of loners set out for one): a tank and a
+      healer or nothing, a buffer and a spoiler when there are any, damage dealers up to 7 members (5 at least).
+      It hunts monsters 4 levels above its average and stays together. A bot without the roles around waits 10
+      minutes, then joins a casual party.
+    - casual: whoever is around, any professions, 3-5 members, hunting at +1..+3; it goes separate ways after
+      30-90 minutes, once out of a fight.
+
+    At most `groupMaxPopulationPercent` of the bots online play in parties. A bot-led party with free places
+    shouts every 3-5 minutes (a full one for the roles it lacks, a casual one for anybody) and breaks up after
+    10 minutes below 3 members. `groupLog` prints formed parties with their kind.
   - Players: "ищу пати" / "lfp" in public chat brings whispered offers from up to two fitting bot-led parties
     (who, levels, where). A whisper to a leader with room ("+", "invite", "возьмите") makes it inspect the
     player like a player would (level, karma, a role the party lacks, weapon grade for the level; a friend is
@@ -159,6 +167,8 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     even if someone spawns it.
   - The summary line gets `Craft CraftFail CraftOrder RecipeLearn Workshop` counts and
     `crafters workshops recipes adenaPerCrafter adenaPerOtherSameLevel`.
+- `l2autobots-raids.patch` - raid bosses (stage 4v, spec in `docs/raids.md`), applied last.
+  - A bot never picks a raid boss or its minion as prey (`isWorthTargeting`); it only fights one that attacks it.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 

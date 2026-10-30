@@ -14,7 +14,7 @@ index 321ba03..e32be24 100644
         in private stores. economyLog writes every deal to the game server log, economyChat lets bots comment in chat. -->
    <economyEnabled>true</economyEnabled>
 diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
-index f103e8a..84962f8 100644
+index ab1915e..015c95f 100644
 --- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 @@ -514,6 +514,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
@@ -57,7 +57,7 @@ index 4c7caff..8578f82 100644
          val rnd = Random(botId.toLong() * DAY_SEED_MULTIPLIER + day.toEpochDay())
          val awakeMinutes = (24 - sleepHours) * 60
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index 051a7f4..92cd4dd 100644
+index 2b2f0af..838af7e 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 @@ -26,6 +26,7 @@ import net.sf.l2j.gameserver.model.actor.Player
@@ -204,9 +204,9 @@ index 051a7f4..92cd4dd 100644
      }
  
      /**
-@@ -118,6 +196,11 @@ internal class LifeBehavior(private val bot: Autobot) {
- 
-     fun onDeath() {
+@@ -136,6 +214,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+                     " weapon ${bot.activeWeaponItem?.crystalType ?: "none"}, at ${bot.x},${bot.y},${bot.z}")
+         }
          fitness.onDeath()
 +        if (!bot.isInParty) session.onDeath(context())
 +    }
@@ -216,7 +216,7 @@ index 051a7f4..92cd4dd 100644
      }
  
      fun onLogout() {
-@@ -138,25 +221,16 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -156,25 +239,16 @@ internal class LifeBehavior(private val bot: Autobot) {
              val crafter = CraftBook.isCrafter(bot)
              val hasGoods = if (crafter) StoreKeeper.hasBusiness(bot) else StoreKeeper.storeGoods(bot).isNotEmpty()
              if (economy && Rnd.get(100) < (if (crafter) CRAFTER_LINGER_PERCENT else LINGER_PERCENT) && hasGoods) {
@@ -246,7 +246,7 @@ index 051a7f4..92cd4dd 100644
      private suspend fun trade() {
          if (!bot.isInsideZone(ZoneId.TOWN)) {
              if (!goToTown()) giveUpTrading()
-@@ -179,8 +253,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -197,8 +271,8 @@ internal class LifeBehavior(private val bot: Autobot) {
      }
  
      private fun giveUpTrading() {
@@ -256,7 +256,7 @@ index 051a7f4..92cd4dd 100644
      }
  
      private suspend fun hunt() {
-@@ -230,12 +304,13 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -248,12 +322,13 @@ internal class LifeBehavior(private val bot: Autobot) {
          TownTrip(bot, cautious = fitness.isSaving).execute()
          tripDoneInTown = true
          lastTripAt = System.currentTimeMillis()
@@ -272,7 +272,7 @@ index 051a7f4..92cd4dd 100644
          if (failed) townTravelFailedAt = System.currentTimeMillis()
          return !failed
      }
-@@ -318,7 +393,6 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -336,7 +411,6 @@ internal class LifeBehavior(private val bot: Autobot) {
      }
  
      companion object {
@@ -280,7 +280,7 @@ index 051a7f4..92cd4dd 100644
          private const val SPOT_RADIUS = 1500
          private const val PARTY_LEG = 2000.0
          private const val PARTY_LEG_ARRIVAL = 150
-@@ -329,10 +403,17 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -347,10 +421,17 @@ internal class LifeBehavior(private val bot: Autobot) {
          private const val TOWN_RETRY_MS = 10 * 60 * 1000L
          private const val LINGER_PERCENT = 30
          private const val CRAFTER_LINGER_PERCENT = 60
@@ -529,7 +529,7 @@ index 6fe5bc5..4b122b7 100644
  }
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-index dbc8ea6..23d62dd 100644
+index df4b036..f7f30a5 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
 @@ -3,6 +3,7 @@ package dev.l2j.autobots.population.group
@@ -540,7 +540,7 @@ index dbc8ea6..23d62dd 100644
  import dev.l2j.autobots.population.economy.Gear
  import dev.l2j.autobots.utils.distance
  import kotlinx.coroutines.delay
-@@ -148,7 +149,9 @@ internal object GroupFinder {
+@@ -185,7 +186,9 @@ internal object GroupFinder {
          }
      }
  
@@ -549,5 +549,5 @@ index dbc8ea6..23d62dd 100644
 +    private fun isFree(bot: Autobot) = !bot.isInParty && !bot.isDead && !bot.isInStoreMode && bot.life != null && bot.controller == null &&
 +            bot.life?.activity.let { it != SessionPlan.Activity.Afk && it != SessionPlan.Activity.Home }
  
-     /** Picks members around the leader's level: a healer first when the level asks for one, then the others. */
-     private fun compose(leader: Autobot, pool: List<Autobot>, now: Long): List<Autobot>? {
+     /** Lookers around the leader's level it doesn't avoid, the ones it likes best first. */
+     private fun fitting(leader: Autobot, pool: List<Autobot>) =
