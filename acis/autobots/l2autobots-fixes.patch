@@ -1,3 +1,19 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index ef03838..8e2a714 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -2,9 +2,9 @@
+ <settings>
+   <thinkIteration>350</thinkIteration>
+   <defaultTitle>Welcome to L2</defaultTitle>
+-  <defaultTargetingRange>2000</defaultTargetingRange>
++  <defaultTargetingRange>1000</defaultTargetingRange>
+   <defaultAttackPlayerType>None</defaultAttackPlayerType>
+-  <defaultTargetingPreference>Random</defaultTargetingPreference>
++  <defaultTargetingPreference>Closest</defaultTargetingPreference>
+   <useManaPots>true</useManaPots>
+   <useQuickHealingPots>true</useQuickHealingPots>
+   <useGreaterHealingPots>true</useGreaterHealingPots>
 diff --git a/sql/autobots.sql b/sql/autobots.sql
 index b824d98..a8b6830 100644
 --- a/sql/autobots.sql
@@ -145,3 +161,32 @@ index 0968ad1..765d56c 100644
  }
  
  private fun addToTradeList(itemObjectId: Int, count: Int, price: Int, list: TradeList): Boolean {
+diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+index 8c88e5c..a6ba498 100644
+--- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
++++ b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+@@ -19,6 +19,7 @@ import net.sf.l2j.gameserver.enums.actors.ClassRace
+ import net.sf.l2j.gameserver.enums.actors.Sex
+ import net.sf.l2j.gameserver.enums.items.ShotType
+ import net.sf.l2j.gameserver.enums.skills.L2EffectType
++import net.sf.l2j.gameserver.geoengine.GeoEngine
+ import net.sf.l2j.gameserver.model.WorldObject
+ import net.sf.l2j.gameserver.model.WorldRegion
+ import net.sf.l2j.gameserver.model.actor.Creature
+@@ -450,6 +451,15 @@ internal fun Creature.getKnownTargatablesInRadius(radius: Int, attackPlayerType:
+         }
+     }
+ 
+-    return region.surroundingRegions.flatMap { it.objects }.filterIsInstance<Creature>().filter { condition(it) && shouldTarget(it, attackPlayerType) && !it.isGM && !it.isDead && it !== this && MathUtil.checkIfInRange(radius, this, it, true)}
++    return region.surroundingRegions.flatMap { it.objects }.filterIsInstance<Creature>().filter { condition(it) && shouldTarget(it, attackPlayerType) && !it.isGM && !it.isDead && it !== this && MathUtil.checkIfInRange(radius, this, it, true) && isWorthTargeting(it) && GeoEngine.getInstance().canSeeTarget(this, it)}
+ }
+ 
++
++// Monsters outside the level window give little or no exp (or are too dangerous), unless they already attack us.
++private const val TARGET_LEVEL_BELOW = 5
++private const val TARGET_LEVEL_ABOVE = 3
++
++private fun Creature.isWorthTargeting(target: Creature): Boolean {
++    if (target !is Monster || target.target === this) return true
++    return target.level in (level - TARGET_LEVEL_BELOW)..(level + TARGET_LEVEL_ABOVE)
++}
