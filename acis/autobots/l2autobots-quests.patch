@@ -1,0 +1,989 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 84c1891..321ba03 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -44,6 +44,10 @@
+   <groupFinderMinLevel>10</groupFinderMinLevel>
+   <groupMaxPopulationPercent>40</groupMaxPopulationPercent>
+   <groupLog>true</groupLog>
++  <!-- Population bots earn their first profession through the real Path quest and a guild master, with no free
++       class change at 20/40/76 (second and third professions are not scripted yet). questLog prints quest steps. -->
++  <questsEnabled>true</questsEnabled>
++  <questLog>true</questLog>
+   <!-- Test only: a newly created population bot starts at this level (0 = level 1, like a real newbie). -->
+   <populationTestLevel>0</populationTestLevel>
+   <!-- Crafting (needs economyEnabled): dwarves learn recipes, craft and run workshops, spoilers supply them, other bots
+diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+index 44ce79f..b12098b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
++++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+@@ -77,6 +77,9 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+     
+     // Set for bots of the living population; they decide what to do themselves.
+     internal var life: LifeBehavior? = null
++
++    // Monsters a quest needs killed; while set, the bot only picks those (and whatever attacks it).
++    internal var questTargets: Set<Int>? = null
+     
+     // Set when the bot keeps dying even in easy spots: the group logic picks such bots up.
+     internal var needsGroup: Boolean = false
+@@ -504,6 +507,8 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+     @OptIn(ExperimentalStdlibApi::class)
+     internal fun onLevelChange(oldLevel: Int, newLevel: Int){
+         // Gear is no longer handed out on level up; bots keep what they own.
++        // Population bots earn their professions through the quests, like players.
++        if(life != null && AutobotData.settings.questsEnabled) return
+         if(shouldChangeClass(oldLevel, newLevel)) {
+             CoScopes.generalScope.launch {
+                 val newClassId = getNewClassId(classId)
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index 0d3c68e..da987de 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -49,7 +49,9 @@ internal data class AutobotSettings(
+         @JsonProperty("groupLog") var groupLog: Boolean = true,
+         @JsonProperty("populationTestLevel") var populationTestLevel: Int = 0,
+         @JsonProperty("craftEnabled") var craftEnabled: Boolean = true,
+-        @JsonProperty("crafterArtisanPercent") var crafterArtisanPercent: Int = 60
++        @JsonProperty("crafterArtisanPercent") var crafterArtisanPercent: Int = 60,
++        @JsonProperty("questsEnabled") var questsEnabled: Boolean = true,
++        @JsonProperty("questLog") var questLog: Boolean = true
+ ){
+     @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
+         setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 5b7d75c..051a7f4 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -17,6 +17,7 @@ import dev.l2j.autobots.population.group.PartyPlan
+ import dev.l2j.autobots.population.economy.craft.CraftBook
+ import dev.l2j.autobots.population.economy.craft.Prospecting
+ import dev.l2j.autobots.population.economy.craft.RecipeBookDao
++import dev.l2j.autobots.population.quests.QuestRunner
+ import dev.l2j.autobots.utils.distance
+ import net.sf.l2j.commons.random.Rnd
+ import net.sf.l2j.gameserver.data.xml.TeleportLocationData
+@@ -45,6 +46,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private val economy get() = AutobotData.settings.economyEnabled
+     private val fitness = Fitness(bot)
+     private val party = PartyBehavior(bot)
++    private val quests = QuestRunner(bot)
+     // A party member's own trip to town: the party goes on hunting meanwhile.
+     private var partyErrand = false
+ 
+@@ -119,6 +121,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     }
+ 
+     fun onLogout() {
++        quests.onLogout()
+         spot?.let { HuntingSpots.leave(it) }
+         spot = null
+         StoreKeeper.close(bot)
+@@ -146,7 +149,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private fun chooseActivity(): Activity {
+         val chosen = when {
+             // Crafters spend more of their time behind a store than hunters do.
+-            Rnd.get(100) >= (if (CraftBook.isCrafter(bot)) CRAFTER_TRADE_SESSION_PERCENT else AFK_SESSION_PERCENT) -> Activity.Hunt
++            Rnd.get(100) >= (if (CraftBook.isCrafter(bot)) CRAFTER_TRADE_SESSION_PERCENT else AFK_SESSION_PERCENT) || quests.hasBusiness() -> Activity.Hunt
+             economy && StoreKeeper.hasBusiness(bot) -> Activity.Trade
+             else -> Activity.Afk
+         }
+@@ -194,6 +197,12 @@ internal class LifeBehavior(private val bot: Autobot) {
+             return
+         }
+ 
++        // A quest leads the bot its own way; a party keeps hunting together instead.
++        if (!bot.isInParty && quests.onUpdate()) {
++            dropSpot()
++            return
++        }
++
+         val target = currentSpot()
+         if (target == null) {
+             if (!inTown) bot.combatBehavior.onUpdate()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index 37ee210..dea7ec6 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -12,6 +12,7 @@ import dev.l2j.autobots.dao.AutobotsDao
+ import dev.l2j.autobots.models.RespawnAction
+ import dev.l2j.autobots.extensions.pickWeighted
+ import dev.l2j.autobots.population.economy.EconomyLog
++import dev.l2j.autobots.population.quests.QuestLog
+ import dev.l2j.autobots.population.group.GroupFinder
+ import dev.l2j.autobots.population.group.Relations
+ import dev.l2j.autobots.utils.giveItemsByClassAndLevel
+@@ -80,7 +81,9 @@ internal object PopulationManager {
+                     .forEach { login(it) }
+ 
+             if (settings.economyEnabled && (ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
+-                EconomyLog.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
++                val bots = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
++                EconomyLog.summary(bots)
++                QuestLog.summary(bots)
+             }
+             if ((ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
+                 GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/PathQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/PathQuests.kt
+new file mode 100644
+index 0000000..85c0faa
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/PathQuests.kt
+@@ -0,0 +1,295 @@
++package dev.l2j.autobots.population.quests
++
++import net.sf.l2j.gameserver.enums.actors.ClassId
++import net.sf.l2j.gameserver.enums.actors.ClassId.*
++
++/**
++ * The first profession quests of aCis 382 (scripting/quests/Q401-Q418) as steps a bot can play. Npc, monster, item
++ * ids and event names are the scripts' own; where a quest offers two routes, the one with spawned NPCs is taken.
++ * Path to become a Scavenger (Q417) is left out: it needs Spoil on a quest monster and a random dialog game, so
++ * dwarven fighters go the Artisan way.
++ */
++internal object PathQuests {
++
++    /** Guild masters that change a base class through the FirstClassChange script (its onTalk race checks). */
++    val guildMasters: Map<ClassId, List<Int>> = mapOf(
++            HUMAN_FIGHTER to listOf(30373, 30288, 30066, 30026),
++            HUMAN_MYSTIC to listOf(30070, 30037, 30289, 32098, 30031),
++            ELVEN_FIGHTER to listOf(30154, 30373, 30288, 30066),
++            ELVEN_MYSTIC to listOf(30070, 30037, 30289, 32098, 30154),
++            DARK_FIGHTER to listOf(30290, 30297, 30462, 30358),
++            DARK_MYSTIC to listOf(30290, 30297, 30462, 30358),
++            ORC_FIGHTER to listOf(30500, 30505, 30508, 32097, 30565),
++            ORC_MYSTIC to listOf(30500, 30505, 30508, 32097, 30565),
++            DWARVEN_FIGHTER to listOf(30503, 30594, 30498, 32092, 32093, 30504, 30595, 30499, 30525, 30520))
++
++    val all: List<PathQuest> = listOf(
++            path("Q401_PathToAWarrior", HUMAN_FIGHTER, WARRIOR, mark = 1145, masterEvent = "HW") {
++                start(30010, "30010-05.htm", "30010-06.htm")
++                cond(1, talk(30253, "30253-02.htm"))
++                cond(2, hunt(20035, 20042))
++                cond(3, talk(30253))
++                cond(4, talk(30010, "30010-11.htm"))
++                // Only kills made with the Rusted Bronze Sword count.
++                cond(5, hunt(20038, 20043, weapon = 1142))
++                cond(6, talk(30010))
++            },
++            humanKnight(),
++            path("Q403_PathToARogue", HUMAN_FIGHTER, ROGUE, mark = 1190, masterEvent = "HR") {
++                start(30379, "30379-05.htm", "30379-06.htm")
++                cond(1, talk(30425, "30425-05.htm"))
++                // Only kills made with Neti's dagger or bow count.
++                cond(2, hunt(20035, 20042, 20045, 20051, 20054, 20060, weapon = 1182))
++                cond(3, talk(30425))
++                cond(4, talk(30379))
++                cond(5, hunt(27038, weapon = 1182))
++                cond(6, talk(30379))
++            },
++            path("Q404_PathToAHumanWizard", HUMAN_MYSTIC, HUMAN_WIZARD, mark = 1292, masterEvent = "HWI") {
++                start(30391, "30391-08.htm")
++                cond(1, talk(30411))
++                cond(2, hunt(20359))
++                cond(3, talk(30411))
++                cond(4, talk(30412))
++                cond(5, talk(30410, "30410-03.htm"))
++                cond(6, talk(30412))
++                cond(7, talk(30413))
++                cond(8, hunt(27030))
++                cond(9, talk(30413))
++                cond(10, talk(30409))
++                cond(11, hunt(20021))
++                cond(12, talk(30409))
++                cond(13, talk(30391))
++            },
++            path("Q405_PathToACleric", HUMAN_MYSTIC, CLERIC, mark = 1201, masterEvent = "HC") {
++                start(30022, "30022-05.htm")
++                // Three books in any order: Simplon's first, Praga's needs a pendant from the monsters.
++                rule({ it.cond == 1 && !it.has(BOOK_OF_SIMPLON) }, talk(30253))
++                rule({ it.cond == 1 && !it.has(BOOK_OF_VIVYAN) }, talk(30030))
++                rule({ it.cond == 1 && !it.has(BOOK_OF_PRAGA) && !it.has(NECKLACE_OF_MOTHER) }, talk(30333))
++                rule({ it.cond == 1 && it.has(NECKLACE_OF_MOTHER) && !it.has(PENDANT_OF_MOTHER) }, hunt(20029, 20026))
++                rule({ it.cond == 1 && it.has(PENDANT_OF_MOTHER) }, talk(30333))
++                cond(2, talk(30022))
++                cond(3, talk(30408))
++                cond(4, talk(30017))
++                cond(5, talk(30408))
++                cond(6, talk(30022))
++            },
++            path("Q406_PathToAnElvenKnight", ELVEN_FIGHTER, ELVEN_KNIGHT, mark = 1204, masterEvent = "EK") {
++                start(30327, "30327-05.htm", "30327-06.htm")
++                cond(1, hunt(20035, 20042, 20045, 20051, 20054, 20060))
++                cond(2, talk(30327))
++                cond(3, talk(30317, "30317-02.htm"))
++                cond(4, hunt(20782))
++                cond(5, talk(30317))
++                cond(6, talk(30327))
++            },
++            path("Q407_PathToAnElvenScout", ELVEN_FIGHTER, ELVEN_SCOUT, mark = 1217, masterEvent = "ES") {
++                start(30328, "30328-05.htm")
++                cond(1, talk(30337, "30337-03.htm"))
++                cond(2, hunt(20053))
++                cond(3, talk(30337))
++                cond(4, talk(30426))
++                cond(5, hunt(27031))
++                cond(6, talk(30426))
++                cond(7, talk(30337))
++                cond(8, talk(30328))
++            },
++            elvenWizard(),
++            path("Q409_PathToAnElvenOracle", ELVEN_MYSTIC, ELVEN_ORACLE, mark = 1235, masterEvent = "EO") {
++                start(30293, "30293-05.htm")
++                cond(1, talk(30424, "spawn_lizards"))
++                // The lizardmen are spawned by Allana's event; asking again spawns them again.
++                cond(2, hunt(27032, 27033, 27034, orElse = talk(30424, "spawn_lizards")))
++                cond(3, talk(30424))
++                cond(4, hunt(27035, orElse = talk(30428, "30428-06.htm")))
++                cond(5, talk(30428))
++                cond(6, talk(30424))
++                cond(7, talk(30293))
++            },
++            path("Q410_PathToAPalusKnight", DARK_FIGHTER, PALUS_KNIGHT, mark = 1244, masterEvent = "PK") {
++                start(30329, "30329-05.htm", "30329-06.htm")
++                cond(1, hunt(20049))
++                cond(2, talk(30329, "30329-10.htm"))
++                cond(3, talk(30422, "30422-02.htm"))
++                cond(4, hunt(20038, 20043))
++                cond(5, talk(30422, "30422-06.htm"))
++                cond(6, talk(30329))
++            },
++            path("Q411_PathToAnAssassin", DARK_FIGHTER, ASSASSIN, mark = 1252, masterEvent = "AS") {
++                start(30416, "30416-05.htm")
++                cond(1, talk(30419, "30419-05.htm"))
++                cond(2, talk(30382, "30382-03.htm"))
++                cond(3, hunt(20369))
++                cond(4, talk(30382))
++                cond(5, hunt(27036))
++                cond(6, talk(30419))
++                cond(7, talk(30416))
++            },
++            darkWizard(),
++            path("Q413_PathToAShillienOracle", DARK_MYSTIC, SHILLIEN_ORACLE, mark = 1270, masterEvent = "SO") {
++                start(30330, "30330-05.htm", "30330-06.htm")
++                cond(1, talk(30377, "30377-02.htm"))
++                cond(2, hunt(20776))
++                cond(3, talk(30377))
++                cond(4, talk(30375, "30375-04.htm"))
++                cond(5, hunt(20457, 20458, 20514, 20515))
++                cond(6, talk(30375))
++                cond(7, talk(30330))
++            },
++            path("Q414_PathToAnOrcRaider", ORC_FIGHTER, ORC_RAIDER, mark = 1592, masterEvent = "OR") {
++                start(30570, "30570-05.htm")
++                // Goblin tomb raider leaders call a Kuruka ratman leader, which carries the teeth.
++                cond(1, hunt(20320, 27045))
++                cond(2, talk(30570, "30570-07a.htm"))
++                rule({ it.cond == 3 || (it.cond == 4 && it.count(HEAD_OF_BETRAYER) < 2) }, hunt(27054))
++                cond(4, talk(30501))
++            },
++            path("Q415_PathToAMonk", ORC_FIGHTER, MONK, mark = 1615, masterEvent = "OM") {
++                start(30587, "30587-05.htm", "30587-06.htm")
++                // Kills only count with bare hands or fist weapons.
++                cond(1, talk(30590))
++                cond(2, hunt(20479, weapon = BARE_HANDS))
++                cond(3, talk(30590))
++                cond(4, hunt(20478, weapon = BARE_HANDS))
++                cond(5, talk(30590))
++                cond(6, hunt(20415, weapon = BARE_HANDS))
++                cond(7, talk(30590))
++                cond(8, talk(30587, "30587-09a.htm"))
++                cond(9, talk(30501))
++                cond(10, talk(30591))
++                cond(11, hunt(20014, 20017, 20024, 20359, weapon = BARE_HANDS))
++                cond(12, talk(30591))
++                cond(13, talk(30501))
++            },
++            path("Q416_PathToAnOrcShaman", ORC_MYSTIC, ORC_SHAMAN, mark = 1631, masterEvent = "OS") {
++                start(30585, "30585-05.htm", "30585-06.htm")
++                cond(1, hunt(20479, 20478, 20415))
++                cond(2, talk(30585))
++                cond(3, talk(30592, "30592-03.htm"))
++                cond(4, talk(30585, "30585-11b.htm"))
++                cond(5, talk(30502))
++                cond(6, hunt(20335))
++                cond(7, talk(30502))
++                cond(8, talk(30593, "30593-03.htm"))
++                // Spiders give parasites until a Durka spirit shows up; killing the spirit binds it.
++                cond(9, hunt(20038, 20043, 27056))
++                cond(10, talk(30593))
++                cond(11, talk(30502, "30502-07.htm"))
++            },
++            path("Q418_PathToAnArtisan", DWARVEN_FIGHTER, ARTISAN, mark = 1635, masterEvent = "AR") {
++                start(30527, "30527-05.htm", "30527-06.htm")
++                cond(1, hunt(20389, 20390))
++                cond(2, talk(30527, "30527-08a.htm"))
++                cond(3, talk(30317, "30317-04.htm"))
++                cond(4, talk(30298, "30298-03.htm"))
++                cond(5, hunt(20017))
++                cond(6, talk(30298, "30298-06.htm"))
++                cond(7, talk(30317, "30317-10.htm"))
++            })
++
++    private const val BARE_HANDS = 0
++
++    // Q405 Path to a Cleric
++    private const val NECKLACE_OF_MOTHER = 1199
++    private const val PENDANT_OF_MOTHER = 1198
++    private const val BOOK_OF_SIMPLON = 1195
++    private const val BOOK_OF_VIVYAN = 1194
++    private const val BOOK_OF_PRAGA = 1196
++
++    // Q414 Path to an Orc Raider
++    private const val HEAD_OF_BETRAYER = 1591
++
++    /** One of Sir Klaus Vasper's errands: a mark from [npcId], [count] trophies from [monsters], a coin back. */
++    private class Errand(val npcId: Int, val event: String, val mark: Int, val trophy: Int, val count: Int, val coin: Int, val monsters: IntArray)
++
++    /**
++     * Q402: three coins of lords out of six errands, one errand at a time, the easier hunting grounds first.
++     * Klaus takes three coins as well as six.
++     */
++    private fun humanKnight() = path("Q402_PathToAHumanKnight", HUMAN_FIGHTER, KNIGHT, mark = 1161, masterEvent = "HK") {
++        val errands = listOf(
++                Errand(30332, "30332-02.htm", 1168, 1169, 10, 1162, intArrayOf(20775)),
++                Errand(30379, "30379-02.htm", 1172, 1173, 20, 1164, intArrayOf(20038, 20043, 20050)),
++                Errand(30037, "30037-02.htm", 1174, 1175, 20, 1165, intArrayOf(20030, 20027, 20024)),
++                Errand(30289, "30289-03.htm", 1170, 1171, 12, 1163, intArrayOf(27024)),
++                Errand(30039, "30039-02.htm", 1176, 1177, 20, 1166, intArrayOf(20103, 20106, 20108)),
++                Errand(30031, "30031-02.htm", 1178, 1179, 10, 1167, intArrayOf(20404)))
++        val coins = { view: QuestView -> errands.count { view.has(it.coin) } }
++
++        start(30417, "30417-05.htm", "30417-08.htm")
++        rule({ coins(it) >= 3 }, talk(30417, "30417-13.htm"))
++        for (errand in errands) {
++            rule({ it.has(errand.mark) && it.count(errand.trophy) < errand.count }, hunt(*errand.monsters))
++            rule({ it.has(errand.mark) }, talk(errand.npcId))
++        }
++        for (errand in errands) {
++            rule({ !it.has(errand.coin) }, talk(errand.npcId, errand.event))
++        }
++    }
++
++    /** Q408: a ruby, an aquamarine and an amethyst, each from its own NPC, in any order. */
++    private fun elvenWizard() = path("Q408_PathToAnElvenWizard", ELVEN_MYSTIC, ELVEN_WIZARD, mark = 1230, masterEvent = "EW") {
++        val rosella = 30414
++        start(rosella, "30414-06.htm")
++        rule({ it.has(MAGICAL_POWERS_RUBY, PURE_AQUAMARINE, NOBILITY_AMETHYST) }, talk(rosella))
++        gem(MAGICAL_POWERS_RUBY, rosella, "30414-07.htm", ROSELLA_LETTER, 30157, "30157-02.htm", CHARM_OF_GRAIN, RED_DOWN, 5, 20466)
++        gem(PURE_AQUAMARINE, rosella, "30414-14.htm", APPETIZING_APPLE, 30371, "30371-02.htm", SAP_OF_THE_MOTHER_TREE, GOLD_LEAVES, 5, 20019)
++        gem(NOBILITY_AMETHYST, rosella, "30414-18.htm", IMMORTAL_LOVE, 30423, null, LUCKY_POTPOURRI, AMETHYST, 2, 20047)
++    }
++
++    /**
++     * One gem of Q408: Rosella gives a [token] for the [npcId], who trades it for a [charm] (by event or on talk);
++     * with the charm, [count] [trophy] from [monster] buy the [gem].
++     */
++    private fun PathQuestBuilder.gem(gem: Int, rosella: Int, rosellaEvent: String, token: Int, npcId: Int, npcEvent: String?,
++                                     charm: Int, trophy: Int, count: Int, monster: Int) {
++        rule({ !it.has(gem) && it.has(token) }, if (npcEvent != null) talk(npcId, npcEvent) else talk(npcId))
++        rule({ !it.has(gem) && it.has(charm) && it.count(trophy) < count }, hunt(monster))
++        rule({ !it.has(gem) && it.has(charm) }, talk(npcId))
++        rule({ !it.has(gem) }, talk(rosella, rosellaEvent))
++    }
++
++    // Q408 Path to an Elven Wizard
++    private const val ROSELLA_LETTER = 1218
++    private const val RED_DOWN = 1219
++    private const val MAGICAL_POWERS_RUBY = 1220
++    private const val PURE_AQUAMARINE = 1221
++    private const val APPETIZING_APPLE = 1222
++    private const val GOLD_LEAVES = 1223
++    private const val IMMORTAL_LOVE = 1224
++    private const val AMETHYST = 1225
++    private const val NOBILITY_AMETHYST = 1226
++    private const val CHARM_OF_GRAIN = 1272
++    private const val SAP_OF_THE_MOTHER_TREE = 1273
++    private const val LUCKY_POTPOURRI = 1274
++
++    /** Q412: three seeds, each from its own NPC for trophies, in any order. */
++    private fun darkWizard() = path("Q412_PathToADarkWizard", DARK_MYSTIC, DARK_WIZARD, mark = 1261, masterEvent = "DW") {
++        start(30421, "30421-05.htm")
++        rule({ it.has(SEED_OF_ANGER, SEED_OF_HORROR, SEED_OF_LUNACY) }, talk(30421))
++        seed(SEED_OF_ANGER, 30415, "30415-03.htm", LUCKY_KEY, FAMILY_REMAINS, 3, 20015)
++        seed(SEED_OF_HORROR, 30418, "30418-02.htm", CANDLE, KNEE_BONE, 2, 20022, 20517, 20518)
++        // Arkenia hands the scent on talk, no event needed.
++        seed(SEED_OF_LUNACY, 30419, null, HUB_SCENT, HEART_OF_LUNACY, 3, 20045)
++    }
++
++    private fun PathQuestBuilder.seed(seed: Int, npcId: Int, event: String?, token: Int, trophy: Int, count: Int, vararg monsters: Int) {
++        rule({ !it.has(seed) && it.has(token) && it.count(trophy) < count }, hunt(*monsters))
++        rule({ !it.has(seed) && it.has(token) }, talk(npcId))
++        rule({ !it.has(seed) }, if (event != null) talk(npcId, event) else talk(npcId))
++    }
++
++    // Q412 Path to a Dark Wizard
++    private const val SEED_OF_ANGER = 1253
++    private const val SEED_OF_HORROR = 1255
++    private const val SEED_OF_LUNACY = 1256
++    private const val FAMILY_REMAINS = 1257
++    private const val KNEE_BONE = 1259
++    private const val HEART_OF_LUNACY = 1260
++    private const val LUCKY_KEY = 1277
++    private const val CANDLE = 1278
++    private const val HUB_SCENT = 1279
++
++    fun forBaseClass(classId: ClassId): List<PathQuest> = all.filter { it.from == classId }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+new file mode 100644
+index 0000000..25ae84d
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -0,0 +1,371 @@
++package dev.l2j.autobots.population.quests
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.behaviors.sequences.TravelByGatekeeperSequence
++import dev.l2j.autobots.behaviors.sequences.WalkToSequence
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.extensions.pickWeighted
++import dev.l2j.autobots.population.economy.GoToTownSequence
++import dev.l2j.autobots.utils.distance
++import dev.l2j.autobots.utils.getBehaviorByClassId
++import dev.l2j.autobots.utils.getSupportedClasses
++import dev.l2j.autobots.utils.supportedCombatPrefs
++import kotlinx.coroutines.delay
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.xml.TeleportLocationData
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.actor.Npc
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
++import net.sf.l2j.gameserver.model.item.kind.Item
++import net.sf.l2j.gameserver.model.itemcontainer.Inventory
++import net.sf.l2j.gameserver.model.location.Location
++import net.sf.l2j.gameserver.model.location.TeleportLocation
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
++
++/**
++ * A population bot's quest play. For now the first profession: from level 19 the bot takes the Path quest of the
++ * branch it chose, plays it step by step through the script (dialogs as bypasses, kills through onKill), and at 20
++ * with the mark goes to a guild master of its race, who changes the class. Nothing is given by this module.
++ */
++internal class QuestRunner(private val bot: Autobot) {
++
++    private var loaded = false
++    private var chosen: PathQuest? = null
++
++    // Progress watch: a quest that does not move for a long time is put aside for a while, like a player who gives up
++    // for the evening.
++    private var lastSignature = -1L
++    private var lastProgressAt = System.currentTimeMillis()
++    private var pausedUntil = 0L
++    private var travelFailures = 0
++    private var lastFailure = ""
++    // After a failed teleport (no adena, no gatekeeper) or escape (no scroll) the bot walks for a while, like a
++    // player who can't pay.
++    private var walkOnlyUntil = 0L
++
++    // Hunting for the quest.
++    private var huntSpot: Location? = null
++    private val emptySpots = mutableMapOf<Location, Long>()
++    private var idleTicks = 0
++    private var liveScanAt = 0L
++    private var liveTarget: Location? = null
++
++    // The bot's own weapon while it holds a quest weapon (or none).
++    private var ownWeaponObjectId = 0
++
++    /** True while the bot works on a quest; it then owns the tick. */
++    var isActive = false
++        private set
++
++    /** @return true when the quest took care of this tick. */
++    suspend fun onUpdate(): Boolean {
++        val busy = AutobotData.settings.questsEnabled && update()
++        if (!busy) relax()
++        isActive = busy
++        QuestLog.setActive(bot, busy)
++        return busy
++    }
++
++    /** A bot due for its profession quest plays this session rather than idling or trading, as a player would. */
++    fun hasBusiness(): Boolean = AutobotData.settings.questsEnabled && bot.classId.level() == 0 && bot.level >= START_LEVEL &&
++            !bot.isInParty && System.currentTimeMillis() >= pausedUntil && PathQuests.forBaseClass(bot.classId).any { it.to in getSupportedClasses }
++
++    fun onLogout() {
++        relax()
++        QuestLog.setActive(bot, false)
++    }
++
++    private suspend fun update(): Boolean {
++        if (bot.classId.level() != 0 || bot.level < START_LEVEL) return false
++        if (System.currentTimeMillis() < pausedUntil) return false
++        if (!loaded) {
++            QuestWorld.loadQuestStates(bot)
++            loaded = true
++        }
++
++        val path = currentPath() ?: return false
++        val view = QuestView(bot, bot.getQuestState(path.questName))
++        if (view.has(path.mark)) {
++            if (bot.level < CLASS_CHANGE_LEVEL) return false
++            relax()
++            watchProgress(path, view)
++            changeClass(path)
++            return true
++        }
++
++        watchProgress(path, view)
++        if (System.currentTimeMillis() < pausedUntil) return false
++
++        val action = if (!view.started) Talk(path.startNpc, path.startEvents) else path.rules.firstOrNull { it.applies(view) }?.action
++        if (action == null) {
++            giveUp(path, "no step for cond ${view.cond}")
++            return false
++        }
++        execute(path, action)
++        return true
++    }
++
++    /** The Path quest under way, else the one for the branch the bot wants (weighted like the free change was). */
++    private fun currentPath(): PathQuest? {
++        val paths = PathQuests.forBaseClass(bot.classId).filter { it.to in getSupportedClasses }
++        if (paths.isEmpty()) return null
++        paths.firstOrNull { bot.getQuestState(it.questName)?.isStarted == true || QuestView(bot, null).has(it.mark) }?.let { return it }
++        chosen?.takeIf { it in paths }?.let { return it }
++        val target = pickWeighted(paths.map { it.to }) ?: return null
++        return paths.first { it.to == target }.also { chosen = it }
++    }
++
++    private suspend fun execute(path: PathQuest, action: QuestAction) {
++        when (action) {
++            is Talk -> {
++                holdWeapon(null)
++                bot.questTargets = null
++                talk(path, action)
++            }
++            is Hunt -> hunt(path, action)
++        }
++    }
++
++    private suspend fun talk(path: PathQuest, talk: Talk) {
++        val npc = QuestWorld.closestNpc(bot, listOf(talk.npcId)) ?: return giveUp(path, "npc ${talk.npcId} is not in the world")
++        if (!reach(npc)) return
++
++        val before = describe(path)
++        bot.target = npc
++        delay(Rnd.get(1500, 4000).toLong())
++        npc.onBypassFeedback(bot, "Quest ${path.questName}")
++        for (event in talk.events) {
++            delay(Rnd.get(1500, 4000).toLong())
++            bot.processQuestEvent(path.questName, event)
++        }
++        bot.target = null
++        // A talk may have spawned the monsters to hunt next.
++        liveScanAt = 0
++        val after = describe(path)
++        if (after != before) QuestLog.log(bot, QuestEvent.Step, "${path.questName}: talked to ${npc.name}, $after")
++        if (before == "not taken" && after != before) QuestLog.log(bot, QuestEvent.Started, "${path.questName} taken from ${npc.name}")
++    }
++
++    private suspend fun hunt(path: PathQuest, hunt: Hunt) {
++        holdWeapon(hunt.weapon)
++        bot.questTargets = hunt.monsterIds
++
++        val near = bot.getKnownTypeInRadius(Monster::class.java, NEAR_RADIUS).any { !it.isDead && it.npcId in hunt.monsterIds }
++        if (near || bot.target != null) {
++            idleTicks = 0
++            bot.combatBehavior.onUpdate()
++            return
++        }
++
++        val spot = nextHuntSpot(hunt) ?: liveMonster(hunt)
++        if (spot == null) {
++            if (hunt.orElse != null) execute(path, hunt.orElse) else giveUp(path, "no ${hunt.monsterIds} to hunt")
++            return
++        }
++        if (distance(bot.location(), spot) > SPOT_RADIUS) {
++            travelTo(spot, SPOT_RADIUS)
++            return
++        }
++
++        // At the spot with nothing in sight: wait for a respawn a little, then try another spawn point.
++        bot.combatBehavior.onUpdate()
++        if (bot.target == null && !bot.isMoving && !bot.isSitting && ++idleTicks >= MAX_IDLE_TICKS) {
++            idleTicks = 0
++            emptySpots[spot] = System.currentTimeMillis()
++            huntSpot = null
++            liveTarget = null
++        }
++    }
++
++    private fun nextHuntSpot(hunt: Hunt): Location? {
++        huntSpot?.let { return it }
++        val now = System.currentTimeMillis()
++        emptySpots.entries.removeIf { now - it.value > EMPTY_SPOT_MS }
++        val points = QuestWorld.spawnPoints(bot, hunt.monsterIds)
++        if (points.isEmpty()) return null
++        // All spawn points were empty a moment ago: start over from the closest one.
++        val next = points.firstOrNull { it !in emptySpots } ?: points.first().also { emptySpots.clear() }
++        huntSpot = next
++        return next
++    }
++
++    /** A monster the quest spawned somewhere (scanned at most every half minute: it walks the whole world). */
++    private fun liveMonster(hunt: Hunt): Location? {
++        if (QuestWorld.hasSpawns(hunt.monsterIds)) return null
++        val now = System.currentTimeMillis()
++        if (now - liveScanAt > LIVE_SCAN_MS) {
++            liveScanAt = now
++            liveTarget = QuestWorld.liveMonsters(hunt.monsterIds).minByOrNull { distance(bot, it) }?.location()
++        }
++        return liveTarget
++    }
++
++    /** Hands the guild master the mark; the FirstClassChange script checks race, class and level and changes the class. */
++    private suspend fun changeClass(path: PathQuest) {
++        val masters = PathQuests.guildMasters[path.from] ?: return
++        val master = QuestWorld.closestNpc(bot, masters) ?: return giveUp(path, "no guild master in the world")
++        if (!reach(master)) return
++
++        bot.target = master
++        delay(Rnd.get(1500, 4000).toLong())
++        master.onBypassFeedback(bot, "Quest $CLASS_CHANGE_SCRIPT")
++        delay(Rnd.get(2000, 5000).toLong())
++        bot.processQuestEvent(CLASS_CHANGE_SCRIPT, path.masterEvent)
++
++        if (bot.classId != path.to) return giveUp(path, "${master.name} did not change the class")
++        bot.rewardSkills()
++        val attackPlayerType = bot.combatBehavior.combatPreferences.attackPlayerType
++        supportedCombatPrefs[bot.classId]?.let { bot.combatBehavior = getBehaviorByClassId(bot.classId, bot, it.invoke()) }
++        bot.combatBehavior.combatPreferences.attackPlayerType = attackPlayerType
++        chosen = null
++        QuestLog.log(bot, QuestEvent.ClassChanged, "became ${bot.classId} at ${master.name}")
++    }
++
++    /** Walks (or takes a gatekeeper) to an NPC until it can talk. @return true once in talking range. */
++    private suspend fun reach(npc: Npc): Boolean {
++        if (distance(bot, npc) <= Npc.INTERACTION_DISTANCE) return true
++        travelTo(npc.location(), Npc.INTERACTION_DISTANCE - 50)
++        return distance(bot, npc) <= Npc.INTERACTION_DISTANCE
++    }
++
++    private suspend fun travelTo(destination: Location, radius: Int) {
++        if (bot.isSitting) {
++            bot.standUp()
++            return
++        }
++        val far = distance(bot.location(), destination) > MIN_WALK_SAVED_BY_TELEPORT && System.currentTimeMillis() >= walkOnlyUntil
++        val inTown = bot.isInsideZone(ZoneId.TOWN)
++        val exit = if (far && inTown) gatekeeperExitFor(destination) else null
++        when {
++            exit != null -> TravelByGatekeeperSequence(bot, exit) { failed("no teleport to ${exit.x},${exit.y} (adena ${bot.adena})", walk = true) }.execute()
++            // Far from town and from the target: back to town first, then the gatekeeper.
++            far && !inTown && gatekeeperExitFor(destination) != null && distance(bot.location(), destination) > FAR_FROM_TOWN ->
++                GoToTownSequence(bot) { failed("couldn't get back to town", walk = true) }.execute()
++            else -> WalkToSequence(bot, destination, radius) {
++                failed("stuck walking to ${destination.x},${destination.y} from ${bot.x},${bot.y}", walk = false)
++            }.execute()
++        }
++    }
++
++    private fun failed(reason: String, walk: Boolean) {
++        travelFailures++
++        lastFailure = reason
++        if (walk) walkOnlyUntil = System.currentTimeMillis() + WALK_ONLY_MS
++    }
++
++    private fun gatekeeperExitFor(destination: Location): TeleportLocation? {
++        val exit = TeleportLocationData.getInstance().allTeleportLocations
++                .filter { !it.isNoble }
++                .minByOrNull { distance(it, destination) } ?: return null
++        val walkSaved = distance(bot.location(), destination) - distance(exit, destination)
++        return if (walkSaved > MIN_WALK_SAVED_BY_TELEPORT) exit else null
++    }
++
++    /**
++     * Holds [weapon] (an item id, 0 for bare hands) while a quest counts only such kills; null gives the bot its own
++     * weapon back.
++     */
++    private fun holdWeapon(weapon: Int?) {
++        val held = bot.inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND)
++        if (weapon == null) {
++            if (ownWeaponObjectId == 0) return
++            val own = bot.inventory.getItemByObjectId(ownWeaponObjectId)
++            ownWeaponObjectId = 0
++            if (own != null && !own.isEquipped) bot.useEquippableItem(own, true)
++            return
++        }
++        if (held?.itemId == weapon || (weapon == 0 && held == null)) return
++        if (held != null && ownWeaponObjectId == 0 && held.item.type2 != Item.TYPE2_QUEST) ownWeaponObjectId = held.objectId
++        if (weapon == 0) {
++            if (held != null) bot.useEquippableItem(held, true)
++        } else {
++            bot.inventory.getItemByItemId(weapon)?.let { bot.useEquippableItem(it, true) }
++        }
++    }
++
++    /** Back to normal hunting: own weapon, any monster. */
++    private fun relax() {
++        bot.questTargets = null
++        holdWeapon(null)
++        huntSpot = null
++        liveTarget = null
++    }
++
++    private fun watchProgress(path: PathQuest, view: QuestView) {
++        val questItems = bot.inventory.items.filter { it.item.type2 == Item.TYPE2_QUEST }.sumOf { it.count.toLong() }
++        val signature = (if (view.started) 1L shl 40 else 0L) + (view.cond.toLong() shl 24) + questItems + bot.classId.id * 7919L
++        val now = System.currentTimeMillis()
++        if (signature != lastSignature) {
++            lastSignature = signature
++            lastProgressAt = now
++            travelFailures = 0
++            return
++        }
++        if (now - lastProgressAt > STUCK_MS || travelFailures > MAX_TRAVEL_FAILURES) {
++            giveUp(path, if (travelFailures > MAX_TRAVEL_FAILURES) "can't get where the quest leads ($lastFailure)" else "no progress for ${STUCK_MS / 60_000} minutes")
++        }
++    }
++
++    private fun giveUp(path: PathQuest, reason: String) {
++        pausedUntil = System.currentTimeMillis() + PAUSE_MS
++        lastProgressAt = pausedUntil
++        travelFailures = 0
++        relax()
++        QuestLog.log(bot, QuestEvent.Stuck, "${path.questName} put aside (${describe(path)}): $reason")
++    }
++
++    private fun describe(path: PathQuest): String {
++        val state = bot.getQuestState(path.questName)
++        return when {
++            QuestView(bot, null).has(path.mark) -> "mark in the bag"
++            state == null || !state.isStarted -> "not taken"
++            else -> "cond ${state.getInt("cond")}"
++        }
++    }
++
++    companion object {
++        // The Path quests refuse players below 19.
++        private const val START_LEVEL = 19
++        private const val CLASS_CHANGE_LEVEL = 20
++        private const val CLASS_CHANGE_SCRIPT = "FirstClassChange"
++        private const val NEAR_RADIUS = 1200
++        private const val SPOT_RADIUS = 1200
++        private const val MIN_WALK_SAVED_BY_TELEPORT = 12000
++        private const val FAR_FROM_TOWN = 20000
++        // About 30 seconds at the default think interval.
++        private const val MAX_IDLE_TICKS = 90
++        private const val EMPTY_SPOT_MS = 10 * 60 * 1000L
++        private const val LIVE_SCAN_MS = 30 * 1000L
++        private const val STUCK_MS = 60 * 60 * 1000L
++        private const val PAUSE_MS = 3 * 60 * 60 * 1000L
++        private const val MAX_TRAVEL_FAILURES = 8
++        private const val WALK_ONLY_MS = 10 * 60 * 1000L
++    }
++}
++
++internal enum class QuestEvent { Started, Step, ClassChanged, Stuck }
++
++/** Quest events by kind for the periodic summary, and the bots busy with a quest right now. */
++internal object QuestLog {
++    private val counts = ConcurrentHashMap<QuestEvent, AtomicInteger>()
++    private val active = ConcurrentHashMap.newKeySet<Int>()
++
++    fun log(bot: Player, event: QuestEvent, message: String) {
++        counts.computeIfAbsent(event) { AtomicInteger() }.incrementAndGet()
++        if (AutobotData.settings.questLog) println("Autobots quests: ${bot.name} (lv ${bot.level} ${bot.classId}): $message")
++    }
++
++    fun setActive(bot: Player, isActive: Boolean) {
++        if (isActive) active.add(bot.objectId) else active.remove(bot.objectId)
++    }
++
++    fun summary(bots: Collection<Autobot>) {
++        val events = QuestEvent.values().joinToString(" ") { "${it.name}=${counts[it]?.getAndSet(0) ?: 0}" }
++        // Bots past 20 still without a profession: those that haven't finished their Path quest yet.
++        val waiting = bots.count { it.level >= 20 && it.classId.level() == 0 }
++        println("Autobots quest summary: $events questing=${active.count { id -> bots.any { it.objectId == id } }} noProfessionAt20=$waiting")
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+new file mode 100644
+index 0000000..8f73e4c
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+@@ -0,0 +1,78 @@
++package dev.l2j.autobots.population.quests
++
++import net.sf.l2j.gameserver.enums.actors.ClassId
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.scripting.QuestState
++
++/**
++ * What a bot does next in a quest. The quest script itself decides what that achieves: a talk is the same bypass a
++ * client sends, a kill goes through the script's own onKill.
++ */
++internal sealed class QuestAction
++
++/** Walk up to an NPC, open its quest dialog and click [events] in order, like a player reading the window. */
++internal class Talk(val npcId: Int, val events: List<String>) : QuestAction()
++
++/**
++ * Hunt [monsterIds] until a rule further up applies. [weapon] is held while hunting (0 for bare hands) when the script
++ * only counts kills made with it; [orElse] runs when none of those monsters can be found (one the quest spawns).
++ */
++internal class Hunt(val monsterIds: Set<Int>, val weapon: Int?, val orElse: QuestAction?) : QuestAction()
++
++/** What the bot knows about its quest when it decides the next step: the journal step and its own bag. */
++internal class QuestView(val player: Player, val state: QuestState?) {
++    val started get() = state?.isStarted == true
++    val cond get() = state?.getInt("cond") ?: 0
++
++    fun count(itemId: Int): Int {
++        val items = player.inventory.getItemsByItemId(itemId)
++        if (items.isEmpty()) return 0
++        return if (items[0].isStackable) items[0].count else items.size
++    }
++
++    fun has(vararg itemIds: Int) = itemIds.all { count(it) > 0 }
++}
++
++internal class QuestRule(val applies: (QuestView) -> Boolean, val action: QuestAction)
++
++/**
++ * A first profession quest ("Path to ..."): taken from [startNpc] with [startEvents], played by the first matching
++ * rule, and handed in for [mark]. With the mark, a guild master of the bot's race changes the class through the
++ * FirstClassChange script with [masterEvent].
++ */
++internal class PathQuest(
++        val questName: String,
++        val from: ClassId,
++        val to: ClassId,
++        val mark: Int,
++        val masterEvent: String,
++        val startNpc: Int,
++        val startEvents: List<String>,
++        val rules: List<QuestRule>)
++
++internal class PathQuestBuilder(private val questName: String, private val from: ClassId, private val to: ClassId,
++                                private val mark: Int, private val masterEvent: String) {
++    private var startNpc = 0
++    private var startEvents = emptyList<String>()
++    private val rules = mutableListOf<QuestRule>()
++
++    fun start(npcId: Int, vararg events: String) {
++        startNpc = npcId
++        startEvents = events.toList()
++    }
++
++    fun cond(cond: Int, action: QuestAction) = rule({ it.cond == cond }, action)
++
++    fun rule(applies: (QuestView) -> Boolean, action: QuestAction) {
++        rules += QuestRule(applies, action)
++    }
++
++    fun talk(npcId: Int, vararg events: String) = Talk(npcId, events.toList())
++
++    fun hunt(vararg monsterIds: Int, weapon: Int? = null, orElse: QuestAction? = null) = Hunt(monsterIds.toSet(), weapon, orElse)
++
++    fun build() = PathQuest(questName, from, to, mark, masterEvent, startNpc, startEvents, rules.toList())
++}
++
++internal fun path(questName: String, from: ClassId, to: ClassId, mark: Int, masterEvent: String, body: PathQuestBuilder.() -> Unit): PathQuest =
++        PathQuestBuilder(questName, from, to, mark, masterEvent).apply(body).build()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
+new file mode 100644
+index 0000000..7731704
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
+@@ -0,0 +1,76 @@
++package dev.l2j.autobots.population.quests
++
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.data.sql.SpawnTable
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Npc
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
++import net.sf.l2j.gameserver.model.location.Location
++import net.sf.l2j.gameserver.model.spawn.L2Spawn
++import net.sf.l2j.gameserver.scripting.QuestState
++import net.sf.l2j.gameserver.data.xml.ScriptData
++
++/** Where quest NPCs and monsters are: the server's spawn list, plus a world scan for monsters a quest spawned itself. */
++internal object QuestWorld {
++    // The spawn is kept rather than its NPC: the NPC object is replaced when it respawns.
++    private class SpawnPoint(val location: Location, val spawn: L2Spawn)
++
++    private val spawnsByNpcId: Map<Int, List<SpawnPoint>> by lazy {
++        SpawnTable.getInstance().spawns
++                .mapNotNull { spawn ->
++                    val loc = spawn.loc ?: spawn.npc?.position ?: return@mapNotNull null
++                    spawn.template.npcId to SpawnPoint(Location(loc.x, loc.y, loc.z), spawn)
++                }
++                .groupBy({ it.first }, { it.second })
++    }
++
++    /** The closest spawned NPC of [npcIds] that is in the world. */
++    fun closestNpc(bot: Player, npcIds: Collection<Int>): Npc? = npcIds.asSequence()
++            .flatMap { spawnsByNpcId[it].orEmpty().asSequence() }
++            .mapNotNull { it.spawn.npc?.takeIf { npc -> npc.isVisible && !npc.isDead } }
++            .minByOrNull { distance(bot.location(), it.location()) }
++
++    /** Where [monsterIds] spawn, closest first. */
++    fun spawnPoints(bot: Player, monsterIds: Set<Int>): List<Location> = monsterIds
++            .flatMap { id -> spawnsByNpcId[id].orEmpty().map { it.location } }
++            .sortedBy { distance(bot.location(), it) }
++
++    fun hasSpawns(monsterIds: Set<Int>) = monsterIds.any { spawnsByNpcId[it].orEmpty().isNotEmpty() }
++
++    /** Living monsters of [monsterIds] anywhere in the world: those a quest spawns are in no spawn list. */
++    fun liveMonsters(monsterIds: Set<Int>): List<Monster> = World.getInstance().objects
++            .filterIsInstance<Monster>()
++            .filter { !it.isDead && it.npcId in monsterIds }
++
++    /**
++     * Restores the bot's quest journal like EnterWorld does for a player: bots never pass through EnterWorld, and their
++     * rows in character_quests are kept between sessions like a player's.
++     */
++    fun loadQuestStates(bot: Player) {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("SELECT name,var,value FROM character_quests WHERE charId=?").use { ps ->
++                    ps.setInt(1, bot.objectId)
++                    val rows = mutableListOf<Triple<String, String, String>>()
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) rows += Triple(rs.getString("name"), rs.getString("var"), rs.getString("value"))
++                    }
++                    // States first, so a variable never arrives before the state it belongs to.
++                    for ((name, variable, value) in rows.sortedByDescending { it.second == "<state>" }) {
++                        val quest = ScriptData.getInstance().getQuest(name) ?: continue
++                        if (variable == "<state>") {
++                            if (bot.getQuestState(name) == null) QuestState(bot, quest, value.toByte())
++                        } else {
++                            bot.getQuestState(name)?.setInternal(variable, value)
++                        }
++                    }
++                }
++            }
++        } catch (e: Exception) {
++            println("Autobots quests: couldn't load quests of ${bot.name}: $e")
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+index 66226ed..7f502b5 100644
+--- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
++++ b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+@@ -1,5 +1,7 @@
+ package dev.l2j.autobots.utils
+ 
++import dev.l2j.autobots.Autobot
++
+ import dev.l2j.autobots.population.economy.Gear
+ import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.behaviors.CombatBehavior
+@@ -467,5 +469,6 @@ private const val TARGET_LEVEL_ABOVE = 3
+ 
+ private fun Creature.isWorthTargeting(target: Creature): Boolean {
+     if (target !is Monster || target.target === this) return true
++    (this as? Autobot)?.questTargets?.let { return target.npcId in it }
+     return target.level in (level - TARGET_LEVEL_BELOW)..(level + TARGET_LEVEL_ABOVE)
+ }
