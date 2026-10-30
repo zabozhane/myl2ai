@@ -1,0 +1,13 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+index 7f502b5..a9cef6e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
++++ b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+@@ -469,6 +469,8 @@ private const val TARGET_LEVEL_ABOVE = 3
+ 
+ private fun Creature.isWorthTargeting(target: Creature): Boolean {
+     if (target !is Monster || target.target === this) return true
++    // A raid boss or its minion is no prey for a bot on its own: a passing hunter would only die to it.
++    if (this is Autobot && target.isRaidRelated) return false
+     (this as? Autobot)?.questTargets?.let { return target.npcId in it }
+     return target.level in (level - TARGET_LEVEL_BELOW)..(level + TARGET_LEVEL_ABOVE)
+ }
