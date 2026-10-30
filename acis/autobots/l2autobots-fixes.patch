@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index ef03838..386cbb6 100644
+index ef03838..32af5f2 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -2,11 +2,30 @@
+@@ -2,11 +2,36 @@
  <settings>
    <thinkIteration>350</thinkIteration>
    <defaultTitle>Welcome to L2</defaultTitle>
@@ -34,6 +34,12 @@ index ef03838..386cbb6 100644
 +  <economyEnabled>true</economyEnabled>
 +  <economyLog>true</economyLog>
 +  <economyChat>true</economyChat>
++  <!-- Profession mix: the relative chance (100 = same as any other branch) that a bot picks a healer, buffer, tank
++       or summoner profession when it has a choice at 20 and 40. The every-10-minutes summary shows the result. -->
++  <professionWeightHealer>100</professionWeightHealer>
++  <professionWeightBuffer>100</professionWeightBuffer>
++  <professionWeightTank>100</professionWeightTank>
++  <professionWeightSummoner>100</professionWeightSummoner>
  </settings>
 diff --git a/sql/autobots.sql b/sql/autobots.sql
 index b824d98..a8b6830 100644
@@ -53,7 +59,7 @@ index b824d98..a8b6830 100644
  
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
-index d304168..9b31fbb 100644
+index d304168..70d55ac 100644
 --- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 @@ -6,7 +6,6 @@ import dev.l2j.autobots.behaviors.SocialBehavior
@@ -64,7 +70,7 @@ index d304168..9b31fbb 100644
  import dev.l2j.autobots.behaviors.sequences.Sequence
  import dev.l2j.autobots.dao.AutobotsDao
  import dev.l2j.autobots.extensions.getNewClassId
-@@ -15,6 +14,7 @@ import dev.l2j.autobots.models.AutobotLoc
+@@ -15,12 +14,14 @@ import dev.l2j.autobots.models.AutobotLoc
  import dev.l2j.autobots.models.BotChat
  import dev.l2j.autobots.models.BotDebugAction
  import dev.l2j.autobots.models.RespawnAction
@@ -72,7 +78,22 @@ index d304168..9b31fbb 100644
  import dev.l2j.autobots.utils.clearCircle
  import dev.l2j.autobots.utils.getBehaviorByClassId
  import dev.l2j.autobots.utils.supportedCombatPrefs
-@@ -73,6 +73,12 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+ import kotlinx.coroutines.GlobalScope
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.launch
++import net.sf.l2j.commons.random.Rnd
+ import net.sf.l2j.Config
+ import net.sf.l2j.L2DatabaseFactory
+ import net.sf.l2j.commons.math.MathUtil
+@@ -67,12 +68,19 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+     
+     internal var isBusyThinking: AtomicBoolean = AtomicBoolean(false)
+     
+-    internal val combatBehavior : CombatBehavior = getBehaviorByClassId(classId, this, (supportedCombatPrefs[classId] ?: error("Unsupported class with id $classId")).invoke())
++    // Rebuilt when the bot changes profession, so a new healer starts healing right away.
++    internal var combatBehavior : CombatBehavior = getBehaviorByClassId(classId, this, (supportedCombatPrefs[classId] ?: error("Unsupported class with id $classId")).invoke())
+     
+     internal var socialBehavior: SocialBehavior = SocialBehavior(this, SocialPreferences(TownAction.TeleToRandomLocation))
      
      internal var respawnAction: RespawnAction = RespawnAction.ReturnToDeathLocation
      
@@ -85,7 +106,7 @@ index d304168..9b31fbb 100644
      internal val chatMessages = mutableListOf<BotChat>()    
      
      internal var spawnTime: Long = 0
-@@ -104,10 +110,11 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -104,10 +112,11 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
          
          isBusyThinking.set(true)
          handleScheduledLogout()
@@ -100,7 +121,7 @@ index d304168..9b31fbb 100644
              socialBehavior.onUpdate()
          } else {
              combatBehavior.onUpdate()
-@@ -235,16 +242,17 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -235,16 +244,17 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
          onTeleported()
      }
      
@@ -121,7 +142,7 @@ index d304168..9b31fbb 100644
      }
  
      internal fun setBotClass(newClassId: ClassId){
-@@ -301,6 +309,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -301,6 +311,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
          }
          
          try{
@@ -129,7 +150,7 @@ index d304168..9b31fbb 100644
              clearDevActions()
              setOnlineStatus(false, true)
              abortAttack()
-@@ -329,6 +338,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -329,6 +340,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
                  }
                  when (effect.effectType) {
                      L2EffectType.SIGNET_GROUND, L2EffectType.SIGNET_EFFECT -> effect.exit()
@@ -137,9 +158,21 @@ index d304168..9b31fbb 100644
                  }
              }
              
-@@ -384,7 +394,9 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -383,8 +395,21 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+         if (hasAI()) ai.stopAITask()
      }
  
++    /** The raise dialog never reaches a bot: it accepts after a moment, like a player clicking yes. */
++    override fun reviveRequest(reviver: Player?, skill: L2Skill?, pet: Boolean) {
++        super.reviveRequest(reviver, skill, pet)
++        if (isReviveRequested) {
++            CoScopes.generalScope.launch {
++                delay(Rnd.get(1500L, 4000L))
++                reviveAnswer(1)
++            }
++        }
++    }
++
      override fun doDie(killer: Creature?): Boolean {
 -        return super.doDie(killer)
 +        val died = super.doDie(killer)
@@ -148,7 +181,7 @@ index d304168..9b31fbb 100644
      }
      
      override fun rewardSkills() {
-@@ -478,15 +490,9 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+@@ -478,25 +503,17 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
      
      @OptIn(ExperimentalStdlibApi::class)
      internal fun onLevelChange(oldLevel: Int, newLevel: Int){
@@ -166,9 +199,10 @@ index d304168..9b31fbb 100644
                  val newClassId = getNewClassId(classId)
                  
                  if(newClassId != null && newClassId != classId) {
-@@ -494,9 +500,6 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+                     delay(2500)
                      setClassId(newClassId.id)
                      rewardSkills()
++                    supportedCombatPrefs[newClassId]?.let { combatBehavior = getBehaviorByClassId(newClassId, this@Autobot, it.invoke()) }
                  }
 -
 -                delay(1000)
@@ -246,10 +280,10 @@ index d6c9c8f..06fa0da 100644
                                      AdminActions.despawnAutobot(autobot)
                                  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-index ce85df0..c2618dd 100644
+index ce85df0..453b9dc 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-@@ -34,6 +34,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -34,14 +34,24 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
      
      private val blacklistedTargets: MutableList<Int> = mutableListOf()
      
@@ -257,10 +291,15 @@ index ce85df0..c2618dd 100644
 +    
 +    private val rester = Rester(player)
 +    
++    // When the bot died; a raise from the party is waited for only so long.
++    private var deadSince = 0L
++
      internal suspend fun onUpdate() {
          if(player.isDead) {
              handleDeath()
-@@ -42,6 +46,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+             return
+         }
++        deadSince = 0
          
          ensureSummonPet()        
          handleShots()
@@ -269,7 +308,21 @@ index ce85df0..c2618dd 100644
          targetAppropriateTarget()
          checkSelfSupportingSkills()
          beforeAttack()
-@@ -110,10 +116,6 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -58,10 +68,11 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+     }
+ 
+     private suspend fun handleDeath() {
++        if (deadSince == 0L) deadSince = System.currentTimeMillis()
+         val reserAround = player.getClosestEntityInRadius<Autobot>(2000)
+-        { it is Autobot && it.combatBehavior is Reser && ((player.isInParty && it.isInParty && player.party == it.party) || player.clan != null && it.clan != null && player.clanId == it.clanId) }
++        { it is Autobot && !it.isDead && it.combatBehavior is Reser && ((player.isInParty && it.isInParty && player.party == it.party) || player.clan != null && it.clan != null && player.clanId == it.clanId) }
+ 
+-        if (reserAround != null) {
++        if ((reserAround != null || player.isReviveRequested) && System.currentTimeMillis() - deadSince < MAX_WAIT_FOR_RAISE) {
+             delay(3000)
+             return
+         }
+@@ -110,10 +121,6 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
          if(this is Kiter) {
              kite(this.player)
          }
@@ -280,7 +333,7 @@ index ce85df0..c2618dd 100644
      }
      
      protected open suspend fun afterAttack(){}
-@@ -287,7 +289,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -287,7 +294,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
          val targets: MutableList<Creature> = when(targetingPreference) {
              TargetingPreference.Random -> player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) }.toMutableList()
              TargetingPreference.Closest -> {
@@ -289,7 +342,7 @@ index ce85df0..c2618dd 100644
                  if(target != null) mutableListOf(target) else mutableListOf()
              }
          }
-@@ -334,19 +336,15 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -334,19 +341,15 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
                  (it is Player && it.clan != null && player.clan != null && player.clanId == it.clanId)
      }
  
@@ -316,7 +369,7 @@ index ce85df0..c2618dd 100644
              player.rechargeShots(true, true)
          }
      }
-@@ -355,7 +353,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -355,7 +358,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
              Consumable(1540) { autobot -> autobot.getCombatBehavior().combatPreferences.useQuickHealingPots &&  autobot.getHealthPercentage() < 30 },
              Consumable(728) { autobot -> autobot.getCombatBehavior().combatPreferences.useManaPots && autobot !is SecretManaRegen &&  autobot.getManaPercentage() < 60 },
              Consumable(1539) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterHealingPots &&  autobot.getHealthPercentage() < 80 && !autobot.hasEffect(2037) },
@@ -328,7 +381,7 @@ index ce85df0..c2618dd 100644
      )
  
      internal fun validateConditionalSkill(skill: L2Skill) =
-@@ -374,4 +375,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -374,4 +380,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
      init {
          player.setIsRunning(true)
      }
@@ -336,6 +389,7 @@ index ce85df0..c2618dd 100644
 +    companion object {
 +        private const val BEGINNER_SOULSHOT_ID = 5789
 +        private const val BEGINNER_SPIRITSHOT_ID = 5790
++        private const val MAX_WAIT_FOR_RAISE = 120_000L
 +    }
  }
 \ No newline at end of file
@@ -479,6 +533,58 @@ index 6fe02b1..5561f1b 100644
  
          //TODO fix this broken shit
  
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/PetOwner.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/PetOwner.kt
+index dfc1a98..7f79cb1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/PetOwner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/PetOwner.kt
+@@ -18,23 +18,18 @@ internal interface PetOwner {
+     
+     val petBuffs: Array<IntArray>
+     
++    /** Summons with the bot's own crystals; the summon skill consumes them like it does for a player. */
+     fun summonPet(bot: Player){
+         if(bot.hasServitor()) {
+             return
+         }
+         
+         val skill = bot.getSkill(summonInfo.first.skillId) ?: return
++        if (skill.itemConsumeId > 0 && (bot.inventory.getItemByItemId(skill.itemConsumeId)?.count ?: 0) < skill.itemConsume) return
+ 
+-        if(summonInfo.second != null) {
+-            if (bot.inventory.getItemByItemId(summonInfo.second!!.miscItemId(bot)) != null) {
+-                if (bot.inventory.getItemByItemId(summonInfo.second!!.miscItemId(bot)).count <= summonInfo.second!!.minimumAmountBeforeGive) {
+-                    bot.inventory.addItem("", summonInfo.second!!.miscItemId(bot), summonInfo.second!!.countToGive, bot, null)
+-                }
+-            } else {
+-                bot.inventory.addItem("", summonInfo.second!!.miscItemId(bot), summonInfo.second!!.countToGive, bot, null)
+-                val consumable: ItemInstance = bot.inventory.getItemByItemId(summonInfo.second!!.miscItemId(bot))
+-                if (consumable.isEquipable) bot.inventory.equipItem(consumable)
+-            }
++        summonInfo.second?.let { misc ->
++            val consumable: ItemInstance? = bot.inventory.getItemByItemId(misc.miscItemId(bot))
++            if (consumable != null && consumable.isEquipable && !consumable.isEquipped) bot.inventory.equipItem(consumable)
+         }
+         
+         if(summonInfo.first.condition(bot, skill, bot.target as Creature?)) {
+@@ -64,15 +59,9 @@ internal interface PetOwner {
+                         }
+                         if (servitor.target != null && GeoEngine.getInstance().canSeeTarget(servitor, servitor.target)) {
+ 
+-                            if(prefs.petUsesShots) {
+-                                if (bot.inventory.getItemByItemId(prefs.petShotId) != null) {
+-                                    if (bot.inventory.getItemByItemId(prefs.petShotId).count <= 5) {
+-                                        bot.inventory.addItem("", prefs.petShotId, 100, bot, null)
+-                                    }
+-                                } else {
+-                                    bot.inventory.addItem("", prefs.petShotId, 100, bot, null)
+-                                }                                
+-                                
++                            // Beast shots the bot owns, no longer created from nothing.
++                            val ownsShots = bot.inventory.getItemByItemId(prefs.petShotId) != null
++                            if(prefs.petUsesShots && ownsShots) {
+                                 if(!bot.autoSoulShot.contains(prefs.petShotId)) {
+                                     bot.addAutoSoulShot(prefs.petShotId)
+                                     bot.rechargeShots(true, true)
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/RequiresMiscItem.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/RequiresMiscItem.kt
 index 2402cc2..4fe7dcf 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/RequiresMiscItem.kt
@@ -513,6 +619,406 @@ index 2402cc2..4fe7dcf 100644
          }
      }
  }
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/SummonerBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/SummonerBehavior.kt
+new file mode 100644
+index 0000000..52830b3
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/SummonerBehavior.kt
+@@ -0,0 +1,90 @@
++package dev.l2j.autobots.behaviors.classes
++
++import dev.l2j.autobots.behaviors.CombatBehavior
++import dev.l2j.autobots.behaviors.attributes.MiscItem
++import dev.l2j.autobots.behaviors.attributes.PetOwner
++import dev.l2j.autobots.behaviors.preferences.CombatPreferences
++import dev.l2j.autobots.behaviors.preferences.SkillPreferences
++import dev.l2j.autobots.extensions.useMagicSkill
++import dev.l2j.autobots.skills.BotSkill
++import dev.l2j.autobots.utils.distance
++import dev.l2j.autobots.utils.getHealthPercentage
++import dev.l2j.autobots.utils.getManaPercentage
++import dev.l2j.autobots.utils.hasEffect
++import net.sf.l2j.gameserver.enums.items.ShotType
++import net.sf.l2j.gameserver.model.actor.Player
++
++/**
++ * Warlock, Elemental Summoner, Phantom Summoner and their third professions. The servitor does the fighting: the
++ * bot summons it with its own crystals (the skill consumes them, and more over time while it stays out), keeps it
++ * healed and buffed with servitor skills, sends it at the target and adds a nuke when it has mana to spare.
++ */
++internal class SummonerBehavior(player: Player, combatPreferences: CombatPreferences,
++                                private val summons: List<Int>, private val nukes: List<BotSkill>) : CombatBehavior(player, combatPreferences), PetOwner {
++
++    override var skillPreferences: SkillPreferences = SkillPreferences(true)
++
++    override fun getShotType(): ShotType = ShotType.BLESSED_SPIRITSHOT
++
++    override val conditionalSkills: List<Int> = emptyList()
++
++    /** The strongest attacking servitor the bot knows; summoned out of combat, like a player would. */
++    override val summonInfo: Pair<BotSkill, MiscItem?>
++        get() = Pair(BotSkill(summons.firstOrNull { player.getSkill(it) != null } ?: summons.first()) { bot, _, _ -> !bot.isInCombat }, null)
++
++    // Servitor buffs are cast for real below, not applied from a list.
++    override val petBuffs: Array<IntArray> = emptyArray()
++
++    override val getOffensiveSkills: List<BotSkill>
++        get() = if (player.getManaPercentage() > OWN_NUKE_MP || !player.hasServitor()) nukes else emptyList()
++
++    override val getSelfSupportSkills: List<BotSkill> = listOf(
++            BotSkill(TRANSFER_PAIN) { bot, _, _ -> bot.hasServitor() && !bot.hasEffect(TRANSFER_PAIN) })
++
++    override suspend fun attack() {
++        if (supportServitor()) return
++        super.attack()
++    }
++
++    private fun supportServitor(): Boolean {
++        if (player.isCastingNow || !player.hasServitor()) return false
++        val servitor = player.summon
++        if (servitor.isDead || distance(player, servitor) > SERVITOR_RANGE) return false
++
++        if (servitor.getHealthPercentage() < SERVITOR_HEAL_BELOW && cast(SERVITOR_HEAL)) return true
++        if (servitor.getManaPercentage() < SERVITOR_RECHARGE_BELOW && cast(SERVITOR_RECHARGE)) return true
++        if (player.isInCombat || player.getManaPercentage() < BUFF_OWN_MP) return false
++        return SERVITOR_BUFFS.any { id -> servitor.getFirstEffect(id).let { it == null || it.period - it.time < REBUFF_SECONDS } && cast(id) }
++    }
++
++    private fun cast(skillId: Int): Boolean {
++        val skill = player.getSkill(skillId) ?: return false
++        if (skill.mpConsume > player.currentMp || !player.checkDoCastConditions(skill) || player.isSkillDisabled(skill)) return false
++        val previous = player.target
++        player.target = player.summon
++        player.useMagicSkill(skill)
++        player.target = previous
++        return true
++    }
++
++    companion object {
++        private const val TRANSFER_PAIN = 1262
++        private const val SERVITOR_HEAL = 1127
++        private const val SERVITOR_RECHARGE = 1126
++        private val SERVITOR_BUFFS = listOf(1146, 1145, 1299, 1140, 1141, 1139, 1144) // Mighty/Bright Servitor, Empowerment, shields, Haste, Wind Walk
++        private const val SERVITOR_RANGE = 900
++        private const val SERVITOR_HEAL_BELOW = 60.0
++        private const val SERVITOR_RECHARGE_BELOW = 30.0
++        private const val BUFF_OWN_MP = 40.0
++        private const val OWN_NUKE_MP = 50.0
++        private const val REBUFF_SECONDS = 60
++
++        // Attacking servitors first; Interlude skill ids.
++        val WARLOCK_SUMMONS = listOf(1111, 1276, 1225)            // Kat the Cat, Kai the Cat, Mew the Cat
++        val ELEMENTAL_SUMMONS = listOf(1226, 1277, 1227)          // Boxer, Merrow, Mirage the Unicorn
++        val PHANTOM_SUMMONS = listOf(1128, 1228, 1278)            // Shadow, Silhouette, Soulless
++        val WARLOCK_NUKES = listOf(BotSkill(1220), BotSkill(1274), BotSkill(1181))   // Blaze, Energy Bolt, Flame Strike
++        val ELEMENTAL_NUKES = listOf(BotSkill(1264), BotSkill(1175), BotSkill(1274)) // Solar Spark, Aqua Swirl, Energy Bolt
++        val PHANTOM_NUKES = listOf(BotSkill(1266), BotSkill(1178), BotSkill(1175))   // Shadow Spark, Twister, Aqua Swirl
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt
+new file mode 100644
+index 0000000..b12b246
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt
+@@ -0,0 +1,184 @@
++package dev.l2j.autobots.behaviors.classes.support
++
++import dev.l2j.autobots.behaviors.CombatBehavior
++import dev.l2j.autobots.behaviors.preferences.CombatPreferences
++import dev.l2j.autobots.behaviors.preferences.SkillPreferences
++import dev.l2j.autobots.extensions.useMagicSkill
++import dev.l2j.autobots.skills.BotSkill
++import dev.l2j.autobots.utils.distance
++import dev.l2j.autobots.utils.getHealthPercentage
++import dev.l2j.autobots.utils.getManaPercentage
++import net.sf.l2j.gameserver.enums.items.ShotType
++import net.sf.l2j.gameserver.geoengine.GeoEngine
++import net.sf.l2j.gameserver.model.L2Skill
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
++
++/** Who a buff is worth casting on: mages want casting speed and m.atk, fighters want p.atk, speed and crits. */
++internal enum class BuffFor { All, Mages, Fighters }
++
++internal class Buff(val skillId: Int, val target: BuffFor = BuffFor.All)
++
++/**
++ * Healers and buffers. They heal, raise and buff with their own skills and mana: the party first, themselves when
++ * alone. With nothing to support they fight like any mystic, except a healer in a party keeps its mana for heals.
++ * Everything goes through `useMagic`, the same path as a player's skill use.
++ */
++internal abstract class SupportBehavior(player: Player, combatPreferences: CombatPreferences) : CombatBehavior(player, combatPreferences) {
++
++    override var skillPreferences: SkillPreferences = SkillPreferences(true)
++
++    override fun getShotType(): ShotType = ShotType.BLESSED_SPIRITSHOT
++
++    override val conditionalSkills: List<Int> = emptyList()
++
++    /** Single target heals, strongest first; battle heals are the fast ones for emergencies. */
++    protected open val heals: List<Int> = emptyList()
++    protected open val battleHeals: List<Int> = emptyList()
++    protected open val groupHeals: List<Int> = emptyList()
++    protected open val resurrections: List<Int> = emptyList()
++    protected open val recharges: List<Int> = emptyList()
++    protected open val buffs: List<Buff> = emptyList()
++
++    /** True for classes whose job in a party is healing: they keep their mana for it. */
++    protected open val isHealer: Boolean = heals.isNotEmpty()
++
++    // Set when this tick went to supporting someone, so the regular attack does not override the cast.
++    private var supported = false
++
++    override suspend fun targetAppropriateTarget() {
++        supported = false
++        if (player.isCastingNow || player.isAllSkillsDisabled) return
++
++        supported = support()
++        if (!supported) super.targetAppropriateTarget()
++    }
++
++    override suspend fun attack() {
++        if (supported) return
++        if (isHealer && player.isInParty && player.getManaPercentage() < PARTY_HEALER_ATTACK_MP) return
++        super.attack()
++    }
++
++    private fun support(): Boolean {
++        val members = membersAround()
++        return resurrect(members) || heal(members) || recharge(members) || buff(members)
++    }
++
++    /** Living and dead party members in reach, the bot itself included; just the bot when it has no party. */
++    protected fun membersAround(): List<Player> {
++        val party = player.party ?: return listOf(player)
++        return party.members.filter { it === player || (distance(player, it) <= SUPPORT_RANGE && GeoEngine.getInstance().canSeeTarget(player, it)) }
++    }
++
++    private fun resurrect(members: List<Player>): Boolean {
++        if (resurrections.isEmpty() || inDanger()) return false
++        val dead = members.firstOrNull { it.isDead && it !== player && !it.isReviveRequested } ?: return false
++        return cast(resurrections, dead)
++    }
++
++    private fun heal(members: List<Player>): Boolean {
++        val alive = members.filter { !it.isDead }
++        val wounded = alive.filter { it.getHealthPercentage() < HEAL_BELOW }
++        if (wounded.isEmpty()) return false
++
++        if (wounded.size >= 2 && cast(groupHeals, player)) return true
++
++        // The tank first when it is about as hurt as the others: losing it loses the party.
++        val target = wounded.minByOrNull { it.getHealthPercentage() - if (it.isTank()) TANK_PRIORITY else 0.0 }!!
++        if (target.getHealthPercentage() < EMERGENCY_BELOW && cast(battleHeals, target)) return true
++        if (cast(heals, target) || cast(battleHeals, target)) return true
++
++        // Without real heals (a mystic before its first profession) only Self Heal is left.
++        return target === player && target.getHealthPercentage() < SELF_HEAL_BELOW && cast(listOf(SELF_HEAL), player)
++    }
++
++    /** Oracles and elders give mana to the party's casters; Recharge cannot target the caster itself. */
++    private fun recharge(members: List<Player>): Boolean {
++        if (recharges.isEmpty() || player.getManaPercentage() < RECHARGE_OWN_MP) return false
++        val target = members.filter { it !== player && !it.isDead && it.getManaPercentage() < RECHARGE_BELOW }
++                .minByOrNull { it.getManaPercentage() } ?: return false
++        return cast(recharges, target)
++    }
++
++    /** Missing or expiring buffs, out of combat and with mana to spare; party-wide chants are checked on the caster. */
++    private fun buff(members: List<Player>): Boolean {
++        if (buffs.isEmpty() || inDanger() || player.getManaPercentage() < BUFF_OWN_MP) return false
++
++        for (buff in buffs) {
++            val skill = player.getSkill(buff.skillId) ?: continue
++            if (skill.targetType == L2Skill.SkillTargetType.TARGET_PARTY) {
++                if (needsBuff(player, skill) && cast(skill, player)) return true
++                continue
++            }
++            val target = members.firstOrNull { !it.isDead && wants(it, buff) && needsBuff(it, skill) } ?: continue
++            if (cast(skill, target)) return true
++        }
++        return false
++    }
++
++    private fun wants(member: Player, buff: Buff) = when (buff.target) {
++        BuffFor.All -> true
++        BuffFor.Mages -> member.isMageClass
++        BuffFor.Fighters -> !member.isMageClass
++    }
++
++    private fun needsBuff(member: Player, skill: L2Skill): Boolean {
++        val effect = member.getFirstEffect(skill.id) ?: return true
++        return effect.skill.level < skill.level || effect.period - effect.time < REBUFF_SECONDS
++    }
++
++    /** A monster is busy with someone of the party: no time for raising and buffing. */
++    protected fun inDanger(): Boolean {
++        val members = membersAround()
++        return player.getKnownTypeInRadius(Monster::class.java, DANGER_RADIUS).any { monster ->
++            !monster.isDead && members.any { monster.target === it }
++        }
++    }
++
++    private fun cast(skillIds: List<Int>, target: Player): Boolean {
++        for (id in skillIds) {
++            val skill = player.getSkill(id) ?: continue
++            if (cast(skill, target)) return true
++        }
++        return false
++    }
++
++    private fun cast(skill: L2Skill, target: Player): Boolean {
++        if (skill.mpConsume > player.currentMp || !player.checkDoCastConditions(skill) || player.isSkillDisabled(skill)) return false
++        val previous = player.target
++        player.target = target
++        if (!skill.checkCondition(player, target, false)) {
++            player.target = previous
++            return false
++        }
++        player.useMagicSkill(skill)
++        return true
++    }
++
++    private fun Player.isTank() = classId.name.let { it.contains("KNIGHT") || it == "PALADIN" || it == "DARK_AVENGER" ||
++            it == "PHOENIX_KNIGHT" || it == "HELL_KNIGHT" || it == "EVAS_TEMPLAR" || it == "SHILLIEN_TEMPLAR" }
++
++    companion object {
++        const val SUPPORT_RANGE = 900
++        private const val DANGER_RADIUS = 1200
++        private const val HEAL_BELOW = 70.0
++        private const val EMERGENCY_BELOW = 35.0
++        private const val SELF_HEAL_BELOW = 50.0
++        private const val TANK_PRIORITY = 15.0
++        private const val RECHARGE_BELOW = 40.0
++        private const val RECHARGE_OWN_MP = 50.0
++        private const val BUFF_OWN_MP = 40.0
++        private const val PARTY_HEALER_ATTACK_MP = 70.0
++        private const val REBUFF_SECONDS = 60
++        private const val SELF_HEAL = 1216
++
++        // Skill ids (Interlude). A class owns only part of each list; the first owned and usable one is cast.
++        val HEALS = listOf(1401, 1217, 1011)          // Major Heal, Greater Heal, Heal
++        val BATTLE_HEALS = listOf(1218, 1015)         // Greater Battle Heal, Battle Heal
++        val GROUP_HEALS = listOf(1402, 1219, 1027)    // Major Group Heal, Greater Group Heal, Group Heal
++        val RESURRECTIONS = listOf(1016)              // Resurrection
++        val RECHARGES = listOf(1013)                  // Recharge
++        val MYSTIC_NUKES = listOf(BotSkill(1184), BotSkill(1177), BotSkill(1147)) // Ice Bolt, Wind Strike, Vampiric Touch
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportClasses.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportClasses.kt
+new file mode 100644
+index 0000000..8039145
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportClasses.kt
+@@ -0,0 +1,108 @@
++package dev.l2j.autobots.behaviors.classes.support
++
++import dev.l2j.autobots.behaviors.attributes.Reser
++import dev.l2j.autobots.behaviors.preferences.CombatPreferences
++import dev.l2j.autobots.skills.BotSkill
++import net.sf.l2j.gameserver.model.actor.Player
++
++// Skill ids are Interlude ones; each list holds what the whole class line learns, the bot casts what it owns.
++
++private val COMMON_MYSTIC_BUFFS = listOf(
++        Buff(1068, BuffFor.Fighters), // Might
++        Buff(1040),                   // Shield
++        Buff(1204),                   // Wind Walk
++        Buff(1035),                   // Mental Shield
++        Buff(1078, BuffFor.Mages))    // Concentration
++
++/** Cleric, Bishop, Cardinal: the strongest heals and raising, few buffs. */
++internal class ClericBehavior(player: Player, combatPreferences: CombatPreferences) : SupportBehavior(player, combatPreferences), Reser {
++    override val heals = HEALS
++    override val battleHeals = BATTLE_HEALS
++    override val groupHeals = GROUP_HEALS
++    override val resurrections = RESURRECTIONS
++    override val buffs = COMMON_MYSTIC_BUFFS + listOf(
++            Buff(1077, BuffFor.Fighters), // Focus
++            Buff(1085, BuffFor.Mages),    // Acumen
++            Buff(1062))                   // Berserker Spirit
++    override val getOffensiveSkills: List<BotSkill> = MYSTIC_NUKES
++}
++
++/** Elven Oracle, Elven Elder, Eva's Saint: heals, raising, Recharge for the casters and elven buffs. */
++internal class ElvenOracleBehavior(player: Player, combatPreferences: CombatPreferences) : SupportBehavior(player, combatPreferences), Reser {
++    override val heals = HEALS
++    override val battleHeals = BATTLE_HEALS
++    override val groupHeals = GROUP_HEALS
++    override val resurrections = RESURRECTIONS
++    override val recharges = RECHARGES
++    override val buffs = COMMON_MYSTIC_BUFFS + listOf(
++            Buff(1087),                   // Agility
++            Buff(1243),                   // Bless Shield
++            Buff(1044),                   // Regeneration
++            Buff(1259))                   // Resist Shock
++    override val getOffensiveSkills: List<BotSkill> = listOf(BotSkill(1184), BotSkill(1177))
++}
++
++/** Shillien Oracle, Shillien Elder, Shillien Saint: heals, Recharge and the dark elven offensive buffs. */
++internal class ShillienOracleBehavior(player: Player, combatPreferences: CombatPreferences) : SupportBehavior(player, combatPreferences), Reser {
++    override val heals = HEALS
++    override val battleHeals = BATTLE_HEALS
++    override val groupHeals = GROUP_HEALS
++    override val resurrections = RESURRECTIONS
++    override val recharges = RECHARGES
++    override val buffs = COMMON_MYSTIC_BUFFS + listOf(
++            Buff(1077, BuffFor.Fighters), // Focus
++            Buff(1240, BuffFor.Fighters), // Guidance
++            Buff(1242, BuffFor.Fighters), // Death Whisper
++            Buff(1268, BuffFor.Fighters), // Vampiric Rage
++            Buff(1059, BuffFor.Mages))    // Empower
++    override val getOffensiveSkills: List<BotSkill> = MYSTIC_NUKES
++}
++
++/** Prophet, Hierophant: the human buffer. Heals itself and others a little, raises nobody. */
++internal class ProphetBehavior(player: Player, combatPreferences: CombatPreferences) : SupportBehavior(player, combatPreferences) {
++    override val heals = HEALS
++    override val battleHeals = BATTLE_HEALS
++    override val groupHeals = GROUP_HEALS
++    override val isHealer = false
++    override val buffs = listOf(
++            Buff(1388, BuffFor.Fighters), // Greater Might
++            Buff(1068, BuffFor.Fighters), // Might
++            Buff(1389),                   // Greater Shield
++            Buff(1040),                   // Shield
++            Buff(1086, BuffFor.Fighters), // Haste
++            Buff(1085, BuffFor.Mages),    // Acumen
++            Buff(1045),                   // Blessed Body
++            Buff(1048),                   // Blessed Soul
++            Buff(1036),                   // Magic Barrier
++            Buff(1035),                   // Mental Shield
++            Buff(1077, BuffFor.Fighters), // Focus
++            Buff(1240, BuffFor.Fighters), // Guidance
++            Buff(1242, BuffFor.Fighters), // Death Whisper
++            Buff(1062),                   // Berserker Spirit
++            Buff(1243),                   // Bless Shield
++            Buff(1078, BuffFor.Mages),    // Concentration
++            Buff(1032),                   // Invigor
++            Buff(1044),                   // Regeneration
++            Buff(1204))                   // Wind Walk
++    override val getOffensiveSkills: List<BotSkill> = MYSTIC_NUKES
++}
++
++/** Orc Shaman, Warcryer, Doomcryer: chants buff the whole party at once; nukes and debuffs when alone. */
++internal class WarcryerBehavior(player: Player, combatPreferences: CombatPreferences) : SupportBehavior(player, combatPreferences) {
++    override val isHealer = false
++    override val buffs = listOf(
++            Buff(1390), Buff(1391),       // War Chant, Earth Chant
++            Buff(1006), Buff(1007),       // Chant of Fire, Chant of Battle
++            Buff(1009), Buff(1252),       // Chant of Shielding, Chant of Evasion
++            Buff(1251), Buff(1253),       // Chant of Fury, Chant of Rage
++            Buff(1308), Buff(1309),       // Chant of Predator, Chant of Eagle
++            Buff(1310), Buff(1284),       // Chant of Vampire, Chant of Revenge
++            Buff(1002), Buff(1003),       // Flame Chant, Pa'agrian Gift
++            Buff(1005),                   // Blessings of Pa'agrio
++            Buff(1010))                   // Soul Shield
++    override val getOffensiveSkills: List<BotSkill> = listOf(
++            BotSkill(1245),               // Steal Essence
++            BotSkill(1090),               // Life Drain
++            BotSkill(1107),               // Frost Flame
++            BotSkill(1100))               // Chill Flame
++}
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/preferences/ActivityPreferences.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/preferences/ActivityPreferences.kt
 index 8ebef36..2d2a4d7 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/preferences/ActivityPreferences.kt
@@ -657,10 +1163,10 @@ index 0000000..afc1459
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index 323190c..95c3c8f 100644
+index 323190c..781ea36 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -24,7 +24,20 @@ internal data class AutobotSettings(
+@@ -24,7 +24,24 @@ internal data class AutobotSettings(
          @JsonProperty("useManaPots") var useManaPots: Boolean = true,
          @JsonProperty("useQuickHealingPots") var useQuickHealingPots: Boolean = false,
          @JsonProperty("useGreaterHealingPots") var useGreaterHealingPots: Boolean = true,
@@ -678,12 +1184,16 @@ index 323190c..95c3c8f 100644
 +        @JsonProperty("populationAlwaysOnline") var populationAlwaysOnline: Boolean = false,
 +        @JsonProperty("economyEnabled") var economyEnabled: Boolean = true,
 +        @JsonProperty("economyLog") var economyLog: Boolean = true,
-+        @JsonProperty("economyChat") var economyChat: Boolean = true
++        @JsonProperty("economyChat") var economyChat: Boolean = true,
++        @JsonProperty("professionWeightHealer") var professionWeightHealer: Int = 100,
++        @JsonProperty("professionWeightBuffer") var professionWeightBuffer: Int = 100,
++        @JsonProperty("professionWeightTank") var professionWeightTank: Int = 100,
++        @JsonProperty("professionWeightSummoner") var professionWeightSummoner: Int = 100
  ){
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
          setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
 diff --git a/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt b/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
-index 2a48781..2676dae 100644
+index 2a48781..6431c57 100644
 --- a/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
 @@ -38,6 +38,7 @@ internal object AutobotsDao {
@@ -694,7 +1204,32 @@ index 2a48781..2676dae 100644
      private const val ScheduledBotSpawn = "SELECT char_name, json_extract(activity_prefs, '\$.loginTime') AS loginTime, json_extract(activity_prefs, '\$.logoutTime') AS logoutTime FROM autobots WHERE JSON_CONTAINS(activity_prefs, '\"Schedule\"', '\$.activityType')"
  
      val mapper = jacksonObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-@@ -323,6 +324,21 @@ internal object AutobotsDao {
+@@ -181,7 +182,9 @@ internal object AutobotsDao {
+                     val combatPrefs = if(jsonCombatPrefs.isNullOrEmpty()) {
+                         supportedCombatPrefs[player.classId]!!.invoke()
+                     }else {
+-                        mapper.readValue(jsonCombatPrefs, supportedCombatPrefs.getOrDefault(player.classId) { DefaultCombatPreferences() }.invoke().javaClass)
++                        // Saved before a profession change, the preferences may be of another class's kind: start fresh then.
++                        val fresh = supportedCombatPrefs.getOrDefault(player.classId) { DefaultCombatPreferences() }.invoke()
++                        try { mapper.readValue(jsonCombatPrefs, fresh.javaClass) } catch (e: Exception) { fresh }
+                     }
+                     
+                     player.combatBehavior.combatPreferences = combatPrefs
+@@ -197,8 +200,11 @@ internal object AutobotsDao {
+                     
+                     val jsonSkillPrefs = rs.getString("skill_prefs")
+                     if(!jsonSkillPrefs.isNullOrEmpty()) {
+-                        val skillPrefs = mapper.readValue(jsonSkillPrefs, player.combatBehavior.skillPreferences.javaClass)
+-                        player.combatBehavior.skillPreferences = skillPrefs
++                        try {
++                            player.combatBehavior.skillPreferences = mapper.readValue(jsonSkillPrefs, player.combatBehavior.skillPreferences.javaClass)
++                        } catch (e: Exception) {
++                            // Same as above: kept the class's own defaults.
++                        }
+                     }
+ 
+                     val jsonSocialPrefs = rs.getString("social_prefs")
+@@ -323,6 +329,21 @@ internal object AutobotsDao {
          }
      }
      
@@ -716,7 +1251,7 @@ index 2a48781..2676dae 100644
      fun loadScheduledSpawns() : List<ScheduledSpawnInfo> {        
          val list = mutableListOf<ScheduledSpawnInfo>()
          L2DatabaseFactory.getInstance().connection.use { con ->
-@@ -503,4 +519,6 @@ internal object AutobotsDao {
+@@ -503,4 +524,6 @@ internal object AutobotsDao {
              }
          }
      }
@@ -725,6 +1260,48 @@ index 2a48781..2676dae 100644
 +}
 +
 +internal data class PopulationMemberInfo(val objectId: Int, val name: String, val creationTime: Long)
+diff --git a/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt b/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt
+index 0d5441c..3033c79 100644
+--- a/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt
++++ b/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt
+@@ -1,6 +1,8 @@
+ package dev.l2j.autobots.extensions
+ 
+ import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.population.group.Role
++import net.sf.l2j.commons.random.Rnd
+ import dev.l2j.autobots.utils.getSupportedClasses
+ import net.sf.l2j.gameserver.enums.actors.ClassId
+ 
+@@ -27,7 +29,7 @@ internal fun Autobot.getNewClassId(currentClassId: ClassId) : ClassId? {
+     if(classLevels == 0)
+         return currentClassId
+ 
+-    val newClassId = (if(currentClassId.level() < 2) ClassId.values().filter { it.parent == currentClassId && getSupportedClasses.contains(it) }.randomOrNull() else ClassId.values().firstOrNull { it.parent == currentClassId })
++    val newClassId = (if(currentClassId.level() < 2) pickWeighted(ClassId.values().filter { it.parent == currentClassId && getSupportedClasses.contains(it) }) else ClassId.values().firstOrNull { it.parent == currentClassId })
+             ?: return null
+ 
+     if(newClassId.level() == getClassLevelForPlayerLevel(level)) {
+@@ -35,4 +37,17 @@ internal fun Autobot.getNewClassId(currentClassId: ClassId) : ClassId? {
+     }
+ 
+     return getNewClassId(newClassId)
+-}
+\ No newline at end of file
++}
++
++/** A profession among [choices], weighted by role so the population's mix can be tuned. */
++private fun pickWeighted(choices: List<ClassId>): ClassId? {
++    if (choices.isEmpty()) return null
++    val total = choices.sumOf { Role.professionWeight(it) }
++    if (total <= 0) return choices.random()
++    var roll = Rnd.get(total)
++    for (choice in choices) {
++        roll -= Role.professionWeight(choice)
++        if (roll < 0) return choice
++    }
++    return choices.last()
++}
 diff --git a/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt b/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
 index 0968ad1..765d56c 100644
 --- a/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
@@ -1381,6 +1958,43 @@ index 0000000..ee3f10d
 +        bot.say(lines.random().format(arg))
 +    }
 +}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Crystals.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Crystals.kt
+new file mode 100644
+index 0000000..6fb6559
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Crystals.kt
+@@ -0,0 +1,31 @@
++package dev.l2j.autobots.population.economy
++
++import net.sf.l2j.gameserver.enums.items.CrystalType
++import net.sf.l2j.gameserver.model.L2Skill
++import net.sf.l2j.gameserver.model.actor.Player
++
++/**
++ * Crystals: summoners need them for every summon and no shop sells them. Dwarves with the Crystallize skill break
++ * their unneeded graded gear into crystals instead of selling it to an NPC, and sell the crystals in their stores.
++ */
++internal object Crystals {
++    /** How many crystals a summoner tries to keep. */
++    const val WANTED = 40
++
++    fun crystallizeJunk(bot: Player) {
++        val skillLevel = bot.getSkillLevel(L2Skill.SKILL_CRYSTALLIZE)
++        if (skillLevel <= 0 || bot.isInStoreMode) return
++
++        for (item in Gear.surplus(bot)) {
++            val template = item.item
++            if (!item.isEquipable || item.isHeroItem || item.isShadowItem || !template.isCrystallizable || template.crystalCount <= 0) continue
++            // The same grade limits as RequestCrystallizeItem: level 1 breaks D, each level one grade more.
++            if (template.crystalType == CrystalType.NONE || template.crystalType.id > skillLevel) continue
++
++            val count = item.crystalCount
++            val removed = bot.inventory.destroyItem("Crystalize", item.objectId, item.count, bot, null) ?: continue
++            bot.inventory.addItem("Crystalize", template.crystalItemId, count, bot, bot)
++            EconomyLog.log(bot, Deal.Crystallize, "crystallized ${removed.itemName} into $count ${template.crystalType} crystals")
++        }
++    }
++}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt
 new file mode 100644
 index 0000000..1c39338
@@ -1571,13 +2185,15 @@ index 0000000..244f82c
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
 new file mode 100644
-index 0000000..999c677
+index 0000000..1cc160f
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,175 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.behaviors.attributes.PetOwner
++import dev.l2j.autobots.behaviors.preferences.PetOwnerPreferences
 +import dev.l2j.autobots.extensions.getCombatBehavior
 +import net.sf.l2j.gameserver.data.ItemTable
 +import net.sf.l2j.gameserver.enums.items.CrystalType
@@ -1717,12 +2333,27 @@ index 0000000..999c677
 +        EconomyLog.log(bot, Deal.Equip, "equipped ${item.itemName}${if (item.enchantLevel > 0) " +${item.enchantLevel}" else ""}")
 +    }
 +
++    /** The crystals the bot's summon skill consumes (summoners, necromancers, dark avengers, warsmiths), if any. */
++    fun summonCrystal(bot: Player): Int? {
++        val owner = bot.getCombatBehavior() as? PetOwner ?: return null
++        val skill = bot.getSkill(owner.summonInfo.first.skillId) ?: return null
++        return skill.itemConsumeId.takeIf { it > 0 }
++    }
++
++    /** Beast shots for the servitor, when the class's preferences use them. */
++    fun petShot(bot: Player): Int? {
++        val prefs = bot.getCombatBehavior().combatPreferences as? PetOwnerPreferences ?: return null
++        return prefs.petShotId.takeIf { prefs.petUsesShots && it > 0 }
++    }
++
 +    /** Everything the bot does not need and could turn into adena (worthless items like the Tutorial Guide stay). */
 +    fun surplus(bot: Player): List<ItemInstance> {
 +        val keep = mutableSetOf(57, SCROLL_OF_ESCAPE, shotId(bot))
 +        keep += POTIONS
 +        keep += BEGINNER_SHOTS
 +        if (isArcher(bot)) keep += arrowId(bot)
++        summonCrystal(bot)?.let { keep += it }
++        petShot(bot)?.let { keep += it }
 +        keep += wishes(bot).map { it.itemId }
 +        // Enchant scrolls for the gear the bot wears are kept for itself; others are for sale.
 +        val worn = bot.inventory.paperdollItems
@@ -1735,12 +2366,13 @@ index 0000000..999c677
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
 new file mode 100644
-index 0000000..f92f05c
+index 0000000..a361444
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,194 @@
 +package dev.l2j.autobots.population.economy
 +
++import dev.l2j.autobots.population.group.Role
 +import dev.l2j.autobots.Autobot
 +import dev.l2j.autobots.AutobotData
 +import dev.l2j.autobots.extensions.location
@@ -1899,7 +2531,7 @@ index 0000000..f92f05c
 +}
 +
 +/** Kinds of economy events, counted for the periodic summary. */
-+internal enum class Deal { NpcBuy, NpcSell, StoreBuy, StoreSell, Equip, EnchantSuccess, EnchantReset, EnchantBreak, SellStore, BuyStore, ModeChange }
++internal enum class Deal { NpcBuy, NpcSell, StoreBuy, StoreSell, Equip, EnchantSuccess, EnchantReset, EnchantBreak, SellStore, BuyStore, ModeChange, Crystallize }
 +
 +internal object EconomyLog {
 +    private val counts = ConcurrentHashMap<Deal, AtomicInteger>()
@@ -1925,16 +2557,19 @@ index 0000000..f92f05c
 +        val needGroup = bots.count { it.needsGroup }
 +        val avgLevel = bots.sumOf { it.level } / bots.size
 +        val maxLevel = bots.maxOf { it.level }
++        // Bots below 20 have no role yet; the mix of the others shows whether healers and buffers keep up.
++        val roles = bots.filter { it.level >= 20 }.groupingBy { if (Role.isSummoner(it.classId)) "Summoner" else Role.of(it.classId).name }.eachCount()
++                .entries.sortedBy { it.key }.joinToString(",") { "${it.key}:${it.value}" }
 +        println("Autobots economy summary: $deals online=${bots.size} avgLevel=$avgLevel maxLevel=$maxLevel " +
-+                "adena=$adena adenaPerBot=${adena / bots.size} stores=$stores farming=$farming needsGroup=$needGroup")
++                "adena=$adena adenaPerBot=${adena / bots.size} stores=$stores farming=$farming needsGroup=$needGroup roles=${roles.ifEmpty { "-" }}")
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
 new file mode 100644
-index 0000000..a47de5d
+index 0000000..eabb9c1
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,141 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -1980,7 +2615,9 @@ index 0000000..a47de5d
 +        val scrolls = AbstractEnchantPacket._scrolls
 +                .filter { (_, scroll) -> !scroll.isBlessed && !scroll.isCrystal && bot.inventory.paperdollItems.any { scroll.isValid(it) } }
 +                .keys
-+        return (gear + scrolls).distinct()
++        // Summoners buy crystals from dwarves' stores: no town shop sells them.
++        val crystals = listOfNotNull(Gear.summonCrystal(bot)?.takeIf { Gear.count(bot, it) < Crystals.WANTED })
++        return (gear + crystals + scrolls).distinct()
 +    }
 +
 +    fun hasBusiness(bot: Autobot): Boolean = storeGoods(bot).isNotEmpty() || (bot.adena > 0 && wanted(bot).any { bidPrice(bot, it) in 1..bot.adena })
@@ -2076,10 +2713,10 @@ index 0000000..a47de5d
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 new file mode 100644
-index 0000000..f580457
+index 0000000..5e4a893
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,215 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -2176,6 +2813,7 @@ index 0000000..f580457
 +        if (bot.isSitting) bot.standUp()
 +
 +        Gear.equipUpgradesFromInventory(bot)
++        Crystals.crystallizeJunk(bot)
 +        tradeWithStores()
 +        sellToNpc(junk())
 +        buySupplies()
@@ -2211,6 +2849,7 @@ index 0000000..f580457
 +        // Buy what the bot needs from sell stores cheaper than the shops (or at a fair price if shops don't have it).
 +        val needs = Gear.wishes(bot).map { it.itemId to 1 }.toMutableList()
 +        needs += Gear.shotId(bot) to SHOTS_PER_TRIP
++        Gear.summonCrystal(bot)?.let { crystal -> (Crystals.WANTED - Gear.count(bot, crystal)).takeIf { it > 0 }?.let { needs += crystal to it } }
 +        if (Gear.wishes(bot).isEmpty()) needs += StoreKeeper.wanted(bot).map { it to 1 }
 +        for ((itemId, wantedCount) in needs) {
 +            if (visits >= MAX_STORE_VISITS) return
@@ -2293,6 +2932,54 @@ index 0000000..f580457
 +        }
 +    }
 +}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Role.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Role.kt
+new file mode 100644
+index 0000000..07e8f6d
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Role.kt
+@@ -0,0 +1,42 @@
++package dev.l2j.autobots.population.group
++
++import dev.l2j.autobots.AutobotData
++import net.sf.l2j.gameserver.enums.actors.ClassId
++import net.sf.l2j.gameserver.enums.actors.ClassId.*
++
++/** What a profession does in a party, as players of Interlude see it. Below 20 everybody is a damage dealer. */
++internal enum class Role {
++    Tank, Healer, Buffer, Spoiler, Damage;
++
++    companion object {
++        private val TANKS = setOf(KNIGHT, ELVEN_KNIGHT, PALUS_KNIGHT, PALADIN, DARK_AVENGER, TEMPLE_KNIGHT, SHILLIEN_KNIGHT,
++                PHOENIX_KNIGHT, HELL_KNIGHT, EVAS_TEMPLAR, SHILLIEN_TEMPLAR)
++        private val HEALERS = setOf(CLERIC, BISHOP, CARDINAL, ELVEN_ORACLE, ELVEN_ELDER, EVAS_SAINT, SHILLIEN_ORACLE, SHILLIEN_ELDER, SHILLIEN_SAINT)
++        private val BUFFERS = setOf(PROPHET, HIEROPHANT, ORC_SHAMAN, WARCRYER, DOOMCRYER, OVERLORD, DOMINATOR,
++                SWORD_SINGER, SWORD_MUSE, BLADEDANCER, SPECTRAL_DANCER)
++        private val SPOILERS = setOf(SCAVENGER, BOUNTY_HUNTER, FORTUNE_SEEKER)
++        private val SUMMONERS = setOf(WARLOCK, ARCANA_LORD, ELEMENTAL_SUMMONER, ELEMENTAL_MASTER, PHANTOM_SUMMONER, SPECTRAL_MASTER)
++
++        fun of(classId: ClassId): Role = when (classId) {
++            in TANKS -> Tank
++            in HEALERS -> Healer
++            in BUFFERS -> Buffer
++            in SPOILERS -> Spoiler
++            else -> Damage
++        }
++
++        fun isSummoner(classId: ClassId) = classId in SUMMONERS
++
++        /** Relative chance of picking [classId] at a profession change; `config.xml` tunes the population's mix. */
++        fun professionWeight(classId: ClassId): Int {
++            val settings = AutobotData.settings
++            return when {
++                isSummoner(classId) -> settings.professionWeightSummoner
++                of(classId) == Healer -> settings.professionWeightHealer
++                of(classId) == Buffer -> settings.professionWeightBuffer
++                of(classId) == Tank -> settings.professionWeightTank
++                else -> 100
++            }.coerceAtLeast(0)
++        }
++    }
++}
 diff --git a/src/main/kotlin/dev/l2j/autobots/ui/states/ViewStates.kt b/src/main/kotlin/dev/l2j/autobots/ui/states/ViewStates.kt
 index bf8668c..84d84e0 100644
 --- a/src/main/kotlin/dev/l2j/autobots/ui/states/ViewStates.kt
@@ -2306,17 +2993,22 @@ index bf8668c..84d84e0 100644
          deactivateStates(player, "BotDetailsViewState")
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
-index 8c88e5c..313d8f9 100644
+index 8c88e5c..66226ed 100644
 --- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
-@@ -1,5 +1,6 @@
+@@ -1,9 +1,11 @@
  package dev.l2j.autobots.utils
  
 +import dev.l2j.autobots.population.economy.Gear
  import dev.l2j.autobots.AutobotData
  import dev.l2j.autobots.behaviors.CombatBehavior
  import dev.l2j.autobots.behaviors.classes.*
-@@ -19,6 +20,7 @@ import net.sf.l2j.gameserver.enums.actors.ClassRace
+ import dev.l2j.autobots.behaviors.classes.pre.*
++import dev.l2j.autobots.behaviors.classes.support.*
+ import dev.l2j.autobots.behaviors.preferences.*
+ import dev.l2j.autobots.extensions.getCombatBehavior
+ import kotlinx.coroutines.delay
+@@ -19,6 +21,7 @@ import net.sf.l2j.gameserver.enums.actors.ClassRace
  import net.sf.l2j.gameserver.enums.actors.Sex
  import net.sf.l2j.gameserver.enums.items.ShotType
  import net.sf.l2j.gameserver.enums.skills.L2EffectType
@@ -2324,7 +3016,65 @@ index 8c88e5c..313d8f9 100644
  import net.sf.l2j.gameserver.model.WorldObject
  import net.sf.l2j.gameserver.model.WorldRegion
  import net.sf.l2j.gameserver.model.actor.Creature
-@@ -331,26 +333,11 @@ internal fun createCirclePacket(name: String?, x: Int, y: Int, z: Int, radius: I
+@@ -129,9 +132,28 @@ internal fun getBehaviorByClassId(classId: ClassId, autobot: Player, combatPrefe
+ 
+ internal val allBehaviors = mapOf<ClassId, (Player, CombatPreferences) -> CombatBehavior>(
+ 
+-        //Pair(ClassId.CLERIC, { bot, prefs -> ClericBehavior(bot, prefs)}),
+-        //Pair(ClassId.SHILLIEN_ORACLE, { bot, prefs -> ShillienOracleBehavior(bot, prefs)}),
+-        //Pair(ClassId.ELVEN_ORACLE, { bot, prefs -> ElvenOracleBehavior(bot, prefs)}),
++        // Healers and buffers (behaviors/classes/support).
++        Pair(ClassId.CLERIC, { bot, prefs -> ClericBehavior(bot, prefs)}),
++        Pair(ClassId.BISHOP, { bot, prefs -> ClericBehavior(bot, prefs)}),
++        Pair(ClassId.CARDINAL, { bot, prefs -> ClericBehavior(bot, prefs)}),
++        Pair(ClassId.PROPHET, { bot, prefs -> ProphetBehavior(bot, prefs)}),
++        Pair(ClassId.HIEROPHANT, { bot, prefs -> ProphetBehavior(bot, prefs)}),
++        Pair(ClassId.ELVEN_ORACLE, { bot, prefs -> ElvenOracleBehavior(bot, prefs)}),
++        Pair(ClassId.ELVEN_ELDER, { bot, prefs -> ElvenOracleBehavior(bot, prefs)}),
++        Pair(ClassId.EVAS_SAINT, { bot, prefs -> ElvenOracleBehavior(bot, prefs)}),
++        Pair(ClassId.SHILLIEN_ORACLE, { bot, prefs -> ShillienOracleBehavior(bot, prefs)}),
++        Pair(ClassId.SHILLIEN_ELDER, { bot, prefs -> ShillienOracleBehavior(bot, prefs)}),
++        Pair(ClassId.SHILLIEN_SAINT, { bot, prefs -> ShillienOracleBehavior(bot, prefs)}),
++        Pair(ClassId.WARCRYER, { bot, prefs -> WarcryerBehavior(bot, prefs)}),
++        Pair(ClassId.DOOMCRYER, { bot, prefs -> WarcryerBehavior(bot, prefs)}),
++        // Summoners.
++        Pair(ClassId.WARLOCK, { bot, prefs -> SummonerBehavior(bot, prefs, SummonerBehavior.WARLOCK_SUMMONS, SummonerBehavior.WARLOCK_NUKES)}),
++        Pair(ClassId.ARCANA_LORD, { bot, prefs -> SummonerBehavior(bot, prefs, SummonerBehavior.WARLOCK_SUMMONS, SummonerBehavior.WARLOCK_NUKES)}),
++        Pair(ClassId.ELEMENTAL_SUMMONER, { bot, prefs -> SummonerBehavior(bot, prefs, SummonerBehavior.ELEMENTAL_SUMMONS, SummonerBehavior.ELEMENTAL_NUKES)}),
++        Pair(ClassId.ELEMENTAL_MASTER, { bot, prefs -> SummonerBehavior(bot, prefs, SummonerBehavior.ELEMENTAL_SUMMONS, SummonerBehavior.ELEMENTAL_NUKES)}),
++        Pair(ClassId.PHANTOM_SUMMONER, { bot, prefs -> SummonerBehavior(bot, prefs, SummonerBehavior.PHANTOM_SUMMONS, SummonerBehavior.PHANTOM_NUKES)}),
++        Pair(ClassId.SPECTRAL_MASTER, { bot, prefs -> SummonerBehavior(bot, prefs, SummonerBehavior.PHANTOM_SUMMONS, SummonerBehavior.PHANTOM_NUKES)}),
++        
+         
+         Pair(ClassId.HUMAN_FIGHTER, { bot, prefs -> FighterBehavior(bot, prefs) }),
+         Pair(ClassId.WARRIOR, { bot, prefs -> WarriorBehavior(bot, prefs) }),
+@@ -153,7 +175,7 @@ internal val allBehaviors = mapOf<ClassId, (Player, CombatPreferences) -> Combat
+         Pair(ClassId.ORC_RAIDER, { bot, prefs -> OrcRaiderBehavior(bot, prefs)}),
+         Pair(ClassId.MONK, { bot, prefs -> MonkBehavior(bot, prefs)}),
+         Pair(ClassId.ORC_MYSTIC, { bot, prefs -> OrcMysticBehavior(bot, prefs)}),
+-        Pair(ClassId.ORC_SHAMAN, { bot, prefs -> OrcMysticBehavior(bot, prefs)}),
++        Pair(ClassId.ORC_SHAMAN, { bot, prefs -> WarcryerBehavior(bot, prefs)}),
+         Pair(ClassId.DWARVEN_FIGHTER, { bot, prefs -> MaestroBehavior(bot, prefs)}),
+         Pair(ClassId.ARTISAN, { bot, prefs -> FortuneSeekerBehavior(bot, prefs)}),
+         Pair(ClassId.SCAVENGER, { bot, prefs -> FortuneSeekerBehavior(bot, prefs)}),
+@@ -177,8 +199,6 @@ internal val allBehaviors = mapOf<ClassId, (Player, CombatPreferences) -> Combat
+         Pair(ClassId.WIND_RIDER, { bot, prefs -> WindRiderBehavior(bot, prefs)}),
+         Pair(ClassId.ABYSS_WALKER, { bot, prefs -> GhostHunterBehavior(bot, prefs)}),
+         Pair(ClassId.GHOST_HUNTER, { bot, prefs -> GhostHunterBehavior(bot, prefs)}),
+-        Pair(ClassId.BISHOP, { bot, prefs -> CardinalBehavior(bot, prefs)}),
+-        Pair(ClassId.CARDINAL, { bot, prefs -> CardinalBehavior(bot, prefs)}),
+         Pair(ClassId.OVERLORD, { bot, prefs -> DominatorBehavior(bot, prefs)}),
+         Pair(ClassId.DOMINATOR, { bot, prefs -> DominatorBehavior(bot, prefs)}),
+         Pair(ClassId.DESTROYER, { bot, prefs -> TitanBehavior(bot, prefs)}),
+@@ -252,6 +272,7 @@ internal val supportedCombatPrefs = mapOf<ClassId, () -> CombatPreferences>(
+         Pair(ClassId.DARK_WIZARD, { DefaultCombatPreferences(AutobotData.settings.targetingRange, AutobotData.settings.attackPlayerType, AutobotData.buffs.getOrElse(ClassId.STORM_SCREAMER) { getDefaultMageBuffs() }, AutobotData.settings.targetingPreference, AutobotData.settings.useManaPots, false, AutobotData.settings.useGreaterHealingPots, false) }),
+         Pair(ClassId.SPELLHOWLER, { DefaultCombatPreferences(AutobotData.settings.targetingRange, AutobotData.settings.attackPlayerType, AutobotData.buffs.getOrElse(ClassId.STORM_SCREAMER) { getDefaultMageBuffs() }, AutobotData.settings.targetingPreference, AutobotData.settings.useManaPots, AutobotData.settings.useQuickHealingPots, AutobotData.settings.useGreaterHealingPots, AutobotData.settings.useGreaterCpPots) }),
+         Pair(ClassId.PHANTOM_SUMMONER, { PetOwnerCombatPreferences(true, true, true, beastSoulShotId, true, AutobotData.settings.targetingRange, AutobotData.settings.attackPlayerType, AutobotData.buffs.getOrElse(ClassId.SPECTRAL_MASTER) { getDefaultMageBuffs() }, AutobotData.settings.targetingPreference, AutobotData.settings.useManaPots, AutobotData.settings.useQuickHealingPots, AutobotData.settings.useGreaterHealingPots, AutobotData.settings.useGreaterCpPots) }),
++        Pair(ClassId.SPECTRAL_MASTER, { PetOwnerCombatPreferences(true, true, true, beastSoulShotId, true, AutobotData.settings.targetingRange, AutobotData.settings.attackPlayerType, AutobotData.buffs.getOrElse(ClassId.SPECTRAL_MASTER) { getDefaultMageBuffs() }, AutobotData.settings.targetingPreference, AutobotData.settings.useManaPots, AutobotData.settings.useQuickHealingPots, AutobotData.settings.useGreaterHealingPots, AutobotData.settings.useGreaterCpPots) }),
+         Pair(ClassId.SHILLIEN_ORACLE, { DefaultCombatPreferences(AutobotData.settings.targetingRange, AutobotData.settings.attackPlayerType, AutobotData.buffs.getOrElse(ClassId.SHILLIEN_SAINT) { getDefaultMageBuffs() }, AutobotData.settings.targetingPreference, AutobotData.settings.useManaPots, false, AutobotData.settings.useGreaterHealingPots, false) }),
+         Pair(ClassId.SHILLIEN_ELDER, { DefaultCombatPreferences(AutobotData.settings.targetingRange, AutobotData.settings.attackPlayerType, AutobotData.buffs.getOrElse(ClassId.SHILLIEN_SAINT) { getDefaultMageBuffs() }, AutobotData.settings.targetingPreference, AutobotData.settings.useManaPots, AutobotData.settings.useQuickHealingPots, AutobotData.settings.useGreaterHealingPots, AutobotData.settings.useGreaterCpPots) }),
+         Pair(ClassId.ORC_FIGHTER, { DefaultCombatPreferences(AutobotData.settings.targetingRange, AutobotData.settings.attackPlayerType, AutobotData.buffs.getOrElse(ClassId.TITAN) { getDefaultFighterBuffs() }, AutobotData.settings.targetingPreference, false, false, false, false) }),
+@@ -331,26 +352,11 @@ internal fun createCirclePacket(name: String?, x: Int, y: Int, z: Int, radius: I
  }
  
  
@@ -2355,7 +3105,7 @@ index 8c88e5c..313d8f9 100644
  
  internal fun clearCircle(player: Player, circleName: String){
      val packet = ExServerPrimitive(circleName)
-@@ -445,11 +432,21 @@ internal fun Creature.getKnownTargatablesInRadius(radius: Int, attackPlayerType:
+@@ -445,11 +451,21 @@ internal fun Creature.getKnownTargatablesInRadius(radius: Int, attackPlayerType:
      fun shouldTarget(it: WorldObject, attackPlayerType: AttackPlayerType) : Boolean {
          return when(attackPlayerType){
              AttackPlayerType.None -> it is Monster
