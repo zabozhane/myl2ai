@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index ef03838..5d16c3f 100644
+index ef03838..386cbb6 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -2,11 +2,28 @@
+@@ -2,11 +2,30 @@
  <settings>
    <thinkIteration>350</thinkIteration>
    <defaultTitle>Welcome to L2</defaultTitle>
@@ -27,6 +27,8 @@ index ef03838..5d16c3f 100644
 +  <populationMaxSessions>4</populationMaxSessions>
 +  <populationMinSessionMinutes>60</populationMinSessionMinutes>
 +  <populationMaxSessionMinutes>180</populationMaxSessionMinutes>
++  <!-- Load testing: every active member stays online, ignoring sleep and sessions. Keep false for a living world. -->
++  <populationAlwaysOnline>false</populationAlwaysOnline>
 +  <!-- Living economy for population bots: they sell loot, buy supplies and gear in town shops, enchant, and trade
 +       in private stores. economyLog writes every deal to the game server log, economyChat lets bots comment in chat. -->
 +  <economyEnabled>true</economyEnabled>
@@ -655,10 +657,10 @@ index 0000000..afc1459
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index 323190c..b6e6415 100644
+index 323190c..95c3c8f 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -24,7 +24,19 @@ internal data class AutobotSettings(
+@@ -24,7 +24,20 @@ internal data class AutobotSettings(
          @JsonProperty("useManaPots") var useManaPots: Boolean = true,
          @JsonProperty("useQuickHealingPots") var useQuickHealingPots: Boolean = false,
          @JsonProperty("useGreaterHealingPots") var useGreaterHealingPots: Boolean = true,
@@ -673,6 +675,7 @@ index 323190c..b6e6415 100644
 +        @JsonProperty("populationMaxSessions") var populationMaxSessions: Int = 4,
 +        @JsonProperty("populationMinSessionMinutes") var populationMinSessionMinutes: Int = 60,
 +        @JsonProperty("populationMaxSessionMinutes") var populationMaxSessionMinutes: Int = 180,
++        @JsonProperty("populationAlwaysOnline") var populationAlwaysOnline: Boolean = false,
 +        @JsonProperty("economyEnabled") var economyEnabled: Boolean = true,
 +        @JsonProperty("economyLog") var economyLog: Boolean = true,
 +        @JsonProperty("economyChat") var economyChat: Boolean = true
@@ -1207,7 +1210,7 @@ index 0000000..49fc482
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 new file mode 100644
-index 0000000..b7aff36
+index 0000000..e34ff17
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 @@ -0,0 +1,141 @@
@@ -1275,7 +1278,7 @@ index 0000000..b7aff36
 +            welcomeNewbies(now)
 +
 +            val today = now.toLocalDate()
-+            val (playing, offline) = members.values.partition { it.career.isActiveOn(today) && it.schedule.isPlaying(now) }
++            val (playing, offline) = members.values.partition { it.career.isActiveOn(today) && (settings.populationAlwaysOnline || it.schedule.isPlaying(now)) }
 +
 +            offline.mapNotNull { AutobotsManager.activeBots[it.name] }
 +                    .filter { it.controller == null && !it.isInCombat && it.life?.keepsOnline() != true }

@@ -28,6 +28,7 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - `PopulationManager` creates level 1 bots like the client does (starter class, race village, starter kit)
     and logs them in and out every 15 s. Bots are marked `Population` in `activity_prefs`; bots made from
     the dashboard are left alone.
+  - `populationAlwaysOnline` (load testing): every active member stays online regardless of the schedule.
   - `DailySchedule`: per bot chronotype (wake time around 08:00 +- 2.5 h, Moscow time), 8 h sleep and 2-4
     sessions of 1-3 h a day, more likely in the evening. `Career`: play periods of 2-60 days, breaks of
     2-30 days, 30% chance to quit after each period. Both are derived from the object id, nothing is stored.
