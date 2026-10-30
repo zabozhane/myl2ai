@@ -50,7 +50,7 @@ index ec93c09..11b5bf0 100644
  ){
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index 0319d03..b25597d 100644
+index f9231e3..6401653 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 @@ -12,6 +12,7 @@ import dev.l2j.autobots.population.economy.StoreKeeper
@@ -91,7 +91,7 @@ index 0319d03..b25597d 100644
          if (target == null) {
              if (!inTown) bot.combatBehavior.onUpdate()
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-index 3385929..3ca5878 100644
+index 37ee210..dea7ec6 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 @@ -12,6 +12,7 @@ import dev.l2j.autobots.dao.AutobotsDao
@@ -111,8 +111,8 @@ index 3385929..3ca5878 100644
 +                EconomyLog.summary(bots)
 +                QuestLog.summary(bots)
              }
-             val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
-             if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
+             if ((ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
+                 GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/PathQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/PathQuests.kt
 new file mode 100644
 index 0000000..85c0faa
@@ -416,10 +416,10 @@ index 0000000..85c0faa
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
 new file mode 100644
-index 0000000..36e4971
+index 0000000..caf9104
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,367 @@
 +package dev.l2j.autobots.population.quests
 +
 +import dev.l2j.autobots.AutobotData
@@ -463,6 +463,10 @@ index 0000000..36e4971
 +    private var lastProgressAt = System.currentTimeMillis()
 +    private var pausedUntil = 0L
 +    private var travelFailures = 0
++    private var lastFailure = ""
++    // After a failed teleport (no adena, no gatekeeper) or escape (no scroll) the bot walks for a while, like a
++    // player who can't pay.
++    private var walkOnlyUntil = 0L
 +
 +    // Hunting for the quest.
 +    private var huntSpot: Location? = null
@@ -650,16 +654,24 @@ index 0000000..36e4971
 +            bot.standUp()
 +            return
 +        }
-+        val far = distance(bot.location(), destination) > MIN_WALK_SAVED_BY_TELEPORT
++        val far = distance(bot.location(), destination) > MIN_WALK_SAVED_BY_TELEPORT && System.currentTimeMillis() >= walkOnlyUntil
 +        val inTown = bot.isInsideZone(ZoneId.TOWN)
 +        val exit = if (far && inTown) gatekeeperExitFor(destination) else null
 +        when {
-+            exit != null -> TravelByGatekeeperSequence(bot, exit) { travelFailures++ }.execute()
++            exit != null -> TravelByGatekeeperSequence(bot, exit) { failed("no teleport to ${exit.x},${exit.y} (adena ${bot.adena})", walk = true) }.execute()
 +            // Far from town and from the target: back to town first, then the gatekeeper.
 +            far && !inTown && gatekeeperExitFor(destination) != null && distance(bot.location(), destination) > FAR_FROM_TOWN ->
-+                GoToTownSequence(bot) { travelFailures++ }.execute()
-+            else -> WalkToSequence(bot, destination, radius) { travelFailures++ }.execute()
++                GoToTownSequence(bot) { failed("couldn't get back to town", walk = true) }.execute()
++            else -> WalkToSequence(bot, destination, radius) {
++                failed("stuck walking to ${destination.x},${destination.y} from ${bot.x},${bot.y}", walk = false)
++            }.execute()
 +        }
++    }
++
++    private fun failed(reason: String, walk: Boolean) {
++        travelFailures++
++        lastFailure = reason
++        if (walk) walkOnlyUntil = System.currentTimeMillis() + WALK_ONLY_MS
 +    }
 +
 +    private fun gatekeeperExitFor(destination: Location): TeleportLocation? {
@@ -711,7 +723,7 @@ index 0000000..36e4971
 +            return
 +        }
 +        if (now - lastProgressAt > STUCK_MS || travelFailures > MAX_TRAVEL_FAILURES) {
-+            giveUp(path, if (travelFailures > MAX_TRAVEL_FAILURES) "can't get where the quest leads" else "no progress for ${STUCK_MS / 60_000} minutes")
++            giveUp(path, if (travelFailures > MAX_TRAVEL_FAILURES) "can't get where the quest leads ($lastFailure)" else "no progress for ${STUCK_MS / 60_000} minutes")
 +        }
 +    }
 +
@@ -748,6 +760,7 @@ index 0000000..36e4971
 +        private const val STUCK_MS = 60 * 60 * 1000L
 +        private const val PAUSE_MS = 3 * 60 * 60 * 1000L
 +        private const val MAX_TRAVEL_FAILURES = 8
++        private const val WALK_ONLY_MS = 10 * 60 * 1000L
 +    }
 +}
 +

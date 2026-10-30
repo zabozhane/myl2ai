@@ -25,6 +25,7 @@ COPY autobots/*.patch /patches/
 RUN grep '^+++ b/' /patches/acis-382-autobots.patch | cut -c7- | xargs sed -i 's/\r$//' \
  && git apply /patches/acis-382-autobots.patch \
  && git -C /autobots apply /patches/l2autobots-fixes.patch \
+ && git -C /autobots apply /patches/l2autobots-autofarm.patch \
  && git -C /autobots apply /patches/l2autobots-quests.patch \
  && git -C /autobots apply /patches/l2autobots-skills.patch
 

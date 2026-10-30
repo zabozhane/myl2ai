@@ -256,10 +256,10 @@ index d304168..44ce79f 100644
  
      override fun onTradeFinish(successfull: Boolean) {
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-index 5235b11..4bd943b 100644
+index 5235b11..6937602 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-@@ -11,6 +11,9 @@ import dev.l2j.autobots.extensions.useMagicSkill
+@@ -11,8 +11,12 @@ import dev.l2j.autobots.extensions.useMagicSkill
  import dev.l2j.autobots.models.AutobotInfo
  import dev.l2j.autobots.models.BotChat
  import dev.l2j.autobots.models.ChatType
@@ -268,8 +268,11 @@ index 5235b11..4bd943b 100644
 +import dev.l2j.autobots.population.group.PartyInvites
  import dev.l2j.autobots.ui.AutobotsUi
  import dev.l2j.autobots.utils.*
++import kotlinx.coroutines.CancellationException
  import kotlinx.coroutines.launch
-@@ -46,6 +49,7 @@ object AutobotsManager {
+ import net.sf.l2j.Config
+ import net.sf.l2j.commons.math.MathUtil
+@@ -46,15 +50,20 @@ object AutobotsManager {
          AutobotsDao.updateAllBotOnlineStatus(false)
          AutobotScheduler
          AutofarmManager
@@ -277,16 +280,21 @@ index 5235b11..4bd943b 100644
  
          Klock.start("onUpdate", 1000, AutobotData.settings.iterationDelay, CoScopes.onUpdateScope, action = {
              activeBots.values.forEach {
-@@ -54,7 +58,7 @@ object AutobotsManager {
+                 CoScopes.onUpdateScope.launch {
+                     try {
                          it.onUpdate()
++                    } catch (e: CancellationException) {
++                        // A sequence cancelled on logout or a change of plans: expected, nothing to report.
++                        it.isBusyThinking.set(false)
                      } catch (e: Exception){
                          it.isBusyThinking.set(false)
 -                        println(e)
-+                        e.printStackTrace()
++                        // A cancelled sequence (the bot changed its plans) is not an error.
++                        if (e !is kotlinx.coroutines.CancellationException) e.printStackTrace()
                      }
                  }
              }
-@@ -73,6 +77,9 @@ object AutobotsManager {
+@@ -73,6 +82,9 @@ object AutobotsManager {
              }
          }
          
@@ -296,7 +304,7 @@ index 5235b11..4bd943b 100644
          when(type){
              0 -> { // chat all
                  activeBots.forEach {
-@@ -92,12 +99,16 @@ object AutobotsManager {
+@@ -92,12 +104,16 @@ object AutobotsManager {
              2 -> { // pm "
                  if(target == null) return false
                  val bot = activeBots.getOrElse(target) {null} ?: return false
@@ -313,7 +321,7 @@ index 5235b11..4bd943b 100644
              17 -> { // hero chat %
                  if(!chatter.isHero) return false
                  activeBots.forEach {
-@@ -109,6 +120,11 @@ object AutobotsManager {
+@@ -109,6 +125,11 @@ object AutobotsManager {
          return false
      }
  
@@ -325,7 +333,7 @@ index 5235b11..4bd943b 100644
      fun loadAutobotDashboard(player: Player, autobot: Autobot) {
          AutobotsUi.loadBotDetails(player, autobot)
      }
-@@ -206,8 +222,6 @@ object AutobotsManager {
+@@ -206,8 +227,6 @@ object AutobotsManager {
          PlayerInfoTable.getInstance().addPlayer(autobot.objectId, "Autobot", autobot.name, 0)
          autobot.rewardSkills()
  
@@ -366,7 +374,7 @@ index d6c9c8f..06fa0da 100644
                                      AdminActions.despawnAutobot(autobot)
                                  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-index ce85df0..365c591 100644
+index ce85df0..c606b93 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 @@ -34,14 +34,24 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
@@ -483,19 +491,20 @@ index ce85df0..365c591 100644
              player.rechargeShots(true, true)
          }
      }
-@@ -355,7 +379,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -355,7 +379,11 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
              Consumable(1540) { autobot -> autobot.getCombatBehavior().combatPreferences.useQuickHealingPots &&  autobot.getHealthPercentage() < 30 },
              Consumable(728) { autobot -> autobot.getCombatBehavior().combatPreferences.useManaPots && autobot !is SecretManaRegen &&  autobot.getManaPercentage() < 60 },
              Consumable(1539) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterHealingPots &&  autobot.getHealthPercentage() < 80 && !autobot.hasEffect(2037) },
 -            Consumable(5592) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterCpPots &&  autobot.getCpPercentage() < 80 }
 +            Consumable(5592) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterCpPots &&  autobot.getCpPercentage() < 80 },
-+            // Shop potions population bots buy: a heal over time and a mana regen, not stacked with a running one.
-+            Consumable(1061) { autobot -> autobot.getHealthPercentage() < 40 && !autobot.hasEffect(2032) },
++            // Shop potions population bots buy (heals over time) and a mana drug from drops, not stacked with a running one.
++            Consumable(1061) { autobot -> autobot.getHealthPercentage() < 40 && !autobot.hasEffect(2032) && !autobot.hasEffect(2031) },
++            Consumable(1060) { autobot -> autobot.getHealthPercentage() < 40 && !autobot.hasEffect(2031) && !autobot.hasEffect(2032) },
 +            Consumable(726) { autobot -> autobot.getManaPercentage() < 30 && !autobot.hasEffect(2279) }
      )
  
      internal fun validateConditionalSkill(skill: L2Skill) =
-@@ -374,4 +401,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -374,4 +402,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
      init {
          player.setIsRunning(true)
      }
@@ -833,7 +842,7 @@ index 0000000..a7fc563
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt
 new file mode 100644
-index 0000000..d3ba0c8
+index 0000000..64d5932
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt
 @@ -0,0 +1,186 @@
@@ -880,7 +889,7 @@ index 0000000..d3ba0c8
 +    protected open val buffs: List<Buff> = emptyList()
 +
 +    /** True for classes whose job in a party is healing: they keep their mana for it. */
-+    protected open val isHealer: Boolean = heals.isNotEmpty()
++    protected open val isHealer: Boolean get() = heals.isNotEmpty()
 +
 +    // Set when this tick went to supporting someone, so the regular attack does not override the cast.
 +    private var supported = false
@@ -1640,10 +1649,10 @@ index 0000000..d64fe1a
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 new file mode 100644
-index 0000000..0319d03
+index 0000000..f9231e3
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,311 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.AutobotData
@@ -1904,10 +1913,20 @@ index 0000000..0319d03
 +        val exit = if (inTown && !gatekeeperFailed) gatekeeperExitFor(target) else null
 +        val sequence = if (exit != null) {
 +            TravelByGatekeeperSequence(bot, exit) { gatekeeperFailed = true }
++        } else if (bot.isInParty && bot.party.leader === bot) {
++            // A party walks together: one short leg at a time, the leader waits for the others in between.
++            WalkToSequence(bot, legToward(target.location), PARTY_LEG_ARRIVAL) { abandon(target) }
 +        } else {
 +            WalkToSequence(bot, target.location, SPOT_RADIUS) { abandon(target) }
 +        }
 +        sequence.execute()
++    }
++
++    private fun legToward(destination: Location): Location {
++        val remaining = distance(bot.location(), destination)
++        if (remaining <= PARTY_LEG) return destination
++        val ratio = PARTY_LEG / remaining
++        return Location(bot.x + ((destination.x - bot.x) * ratio).toInt(), bot.y + ((destination.y - bot.y) * ratio).toInt(), destination.z)
 +    }
 +
 +    /** The teleport destination worth paying for: one that saves a long walk to [target]. */
@@ -1931,6 +1950,8 @@ index 0000000..0319d03
 +    companion object {
 +        private const val AFK_SESSION_PERCENT = 10
 +        private const val SPOT_RADIUS = 1500
++        private const val PARTY_LEG = 2000.0
++        private const val PARTY_LEG_ARRIVAL = 150
 +        private const val MAX_PLAYERS_AT_SPOT = 6
 +        private const val MIN_WALK_SAVED_BY_TELEPORT = 12000
 +        // About 20 seconds at the default think interval.
@@ -1945,10 +1966,10 @@ index 0000000..0319d03
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 new file mode 100644
-index 0000000..3385929
+index 0000000..37ee210
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-@@ -0,0 +1,163 @@
+@@ -0,0 +1,167 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.Autobot
@@ -2033,6 +2054,9 @@ index 0000000..3385929
 +            if (settings.economyEnabled && (ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
 +                EconomyLog.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
 +            }
++            if ((ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
++                GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
++            }
 +            val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
 +            if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
 +            if (++ticks % SAVE_EVERY_TICKS == 0) {
@@ -2082,6 +2106,7 @@ index 0000000..3385929
 +        if (testLevel > 1) {
 +            bot.level = testLevel
 +            giveItemsByClassAndLevel(bot)
++            bot.addAdena("Test", testLevel * testLevel * 100, null, false)
 +        }
 +        bot.heal()
 +        bot.combatBehavior.activityPreferences.activityType = ActivityType.Population
@@ -2371,10 +2396,10 @@ index 0000000..03db812
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
 new file mode 100644
-index 0000000..1cc160f
+index 0000000..698845b
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,197 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.AutobotData
@@ -2382,6 +2407,7 @@ index 0000000..1cc160f
 +import dev.l2j.autobots.behaviors.preferences.PetOwnerPreferences
 +import dev.l2j.autobots.extensions.getCombatBehavior
 +import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.enums.items.ArmorType
 +import net.sf.l2j.gameserver.enums.items.CrystalType
 +import net.sf.l2j.gameserver.enums.items.ShotType
 +import net.sf.l2j.gameserver.enums.items.WeaponType
@@ -2402,8 +2428,8 @@ index 0000000..1cc160f
 + */
 +internal object Gear {
 +    const val SCROLL_OF_ESCAPE = 736
-+    const val HEALING_POTION = 1061
-+    const val MANA_DRUG = 726
++    /** Healing potions town shops sell, best first: starting villages only have the lesser one. */
++    val HEALING_POTIONS = listOf(1061, 1060)
 +
 +    private val POTIONS = setOf(725, 726, 727, 728, 1060, 1061, 1539, 1540, 5592)
 +    private val BEGINNER_SHOTS = setOf(5789, 5790)
@@ -2483,7 +2509,7 @@ index 0000000..1cc160f
 +        val candidates = bot.inventory.items.filter { it.isEquipable && !it.isEquipped && (it.isWeapon || it.isArmor) && it.item.crystalType.id <= allowedGrade }
 +        for (item in candidates) {
 +            if (wished.remove(item.itemId) || isUpgrade(bot, item)) {
-+                val previous = bot.inventory.getPaperdollItem(slotOf(item))
++                val previous = bot.inventory.getPaperdollItem(slotOf(bot, item))
 +                equip(bot, item)
 +                if (previous != null && !previous.isEquipped) replaced += previous
 +            }
@@ -2492,14 +2518,30 @@ index 0000000..1cc160f
 +    }
 +
 +    private fun isUpgrade(bot: Player, item: ItemInstance): Boolean {
-+        // An empty slot is filled only with the kit's own piece, so a mage never puts on heavy armor it found.
-+        val current = bot.inventory.getPaperdollItem(slotOf(item)) ?: return false
++        val current = bot.inventory.getPaperdollItem(slotOf(bot, item)) ?: return fitsEmptySlot(bot, item)
 +        if (current.item.bodyPart != item.item.bodyPart || current.itemType != item.itemType) return false
 +        if (item.isWeapon && item.weaponItem.isMagical != current.weaponItem.isMagical) return false
 +        return item.referencePrice > current.referencePrice * 1.2
 +    }
 +
-+    private fun slotOf(item: ItemInstance): Int = when (item.item.bodyPart) {
++    /**
++     * Any jewel fills an empty slot; armor only of the kind the class wears (a mage never puts on heavy armor), and
++     * never a piece that would take off something else: a shield next to a two-handed weapon, legs under a full body.
++     */
++    private fun fitsEmptySlot(bot: Player, item: ItemInstance): Boolean {
++        if (item.item.type2 == Item.TYPE2_ACCESSORY) return true
++        if (!item.isArmor || item.itemType == (if (bot.isMageClass) ArmorType.HEAVY else ArmorType.MAGIC)) return false
++        val inventory = bot.inventory
++        return when (item.item.bodyPart) {
++            Item.SLOT_L_HAND -> inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND)?.item?.bodyPart != Item.SLOT_LR_HAND
++            Item.SLOT_LEGS -> inventory.getPaperdollItem(Inventory.PAPERDOLL_CHEST)?.item?.bodyPart != Item.SLOT_FULL_ARMOR
++            Item.SLOT_FULL_ARMOR -> inventory.getPaperdollItem(Inventory.PAPERDOLL_LEGS) == null
++            else -> true
++        }
++    }
++
++    /** The paperdoll slot an item goes to; for earrings and rings, the free one of the pair if there is one. */
++    private fun slotOf(bot: Player, item: ItemInstance): Int = when (item.item.bodyPart) {
 +        Item.SLOT_R_HAND, Item.SLOT_LR_HAND -> Inventory.PAPERDOLL_RHAND
 +        Item.SLOT_L_HAND -> Inventory.PAPERDOLL_LHAND
 +        Item.SLOT_HEAD -> Inventory.PAPERDOLL_HEAD
@@ -2508,9 +2550,14 @@ index 0000000..1cc160f
 +        Item.SLOT_GLOVES -> Inventory.PAPERDOLL_GLOVES
 +        Item.SLOT_FEET -> Inventory.PAPERDOLL_FEET
 +        Item.SLOT_NECK -> Inventory.PAPERDOLL_NECK
-+        Item.SLOT_L_EAR, Item.SLOT_R_EAR, Item.SLOT_LR_EAR -> Inventory.PAPERDOLL_LEAR
-+        Item.SLOT_L_FINGER, Item.SLOT_R_FINGER, Item.SLOT_LR_FINGER -> Inventory.PAPERDOLL_LFINGER
++        Item.SLOT_L_EAR, Item.SLOT_R_EAR, Item.SLOT_LR_EAR -> freeOf(bot, Inventory.PAPERDOLL_LEAR, Inventory.PAPERDOLL_REAR)
++        Item.SLOT_L_FINGER, Item.SLOT_R_FINGER, Item.SLOT_LR_FINGER -> freeOf(bot, Inventory.PAPERDOLL_LFINGER, Inventory.PAPERDOLL_RFINGER)
 +        else -> -1
++    }
++
++    private fun freeOf(bot: Player, left: Int, right: Int): Int {
++        val inventory = bot.inventory
++        return if (inventory.getPaperdollItem(left) != null && inventory.getPaperdollItem(right) == null) right else left
 +    }
 +
 +    fun equip(bot: Player, item: ItemInstance) {
@@ -2532,7 +2579,7 @@ index 0000000..1cc160f
 +        return prefs.petShotId.takeIf { prefs.petUsesShots && it > 0 }
 +    }
 +
-+    /** Everything the bot does not need and could turn into adena (worthless items like the Tutorial Guide stay). */
++    /** Everything the bot does not need and could turn into adena (worthless items like the Tutorial Guide, worth 1 adena, stay). */
 +    fun surplus(bot: Player): List<ItemInstance> {
 +        val keep = mutableSetOf(57, SCROLL_OF_ESCAPE, shotId(bot))
 +        keep += POTIONS
@@ -2546,16 +2593,16 @@ index 0000000..1cc160f
 +        keep += AbstractEnchantPacket._scrolls.filter { (_, scroll) -> worn.any { scroll.isValid(it) } }.keys
 +        return bot.inventory.items.filter {
 +            !it.isEquipped && it.itemId !in keep && !it.isQuestItem && !it.isHeroItem && !it.isShadowItem &&
-+                    it.referencePrice > 0 && (it.isSellable || it.isTradable)
++                    it.referencePrice >= 2 && (it.isSellable || it.isTradable)
 +        }
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
 new file mode 100644
-index 0000000..a361444
+index 0000000..5da5fd1
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,199 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.population.group.Role
@@ -2642,7 +2689,7 @@ index 0000000..a361444
 +        var total = 0L
 +        val sold = mutableListOf<String>()
 +        for (item in items) {
-+            if (!item.isSellable || item.isEquipped || item.ownerId != bot.objectId) continue
++            if (!item.isSellable || item.isEquipped || item.ownerId != bot.objectId || item.referencePrice < 2) continue
 +            val count = item.count
 +            val price = item.referencePrice / 2L * count
 +            if (bot.inventory.destroyItem("Sell", item.objectId, count, bot, shop.merchant) == null) continue
@@ -2725,6 +2772,11 @@ index 0000000..a361444
 +    fun log(bot: Player, deal: Deal, message: String) {
 +        counts.computeIfAbsent(deal) { AtomicInteger() }.incrementAndGet()
 +        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): $message")
++    }
++
++    /** A planned deal that didn't happen, and why: shows what holds the economy back. */
++    fun skip(bot: Player, reason: String) {
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): skipped: $reason")
 +    }
 +
 +    /**
@@ -2899,10 +2951,10 @@ index 0000000..eabb9c1
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 new file mode 100644
-index 0000000..5e4a893
+index 0000000..af4974f
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,240 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -2914,12 +2966,14 @@ index 0000000..5e4a893
 +import dev.l2j.autobots.utils.distance
 +import kotlinx.coroutines.delay
 +import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.ItemTable
 +import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.enums.IntentionType
 +import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.actor.Creature
 +import net.sf.l2j.gameserver.model.actor.Npc
 +import net.sf.l2j.gameserver.model.actor.Player
 +import net.sf.l2j.gameserver.model.item.instance.ItemInstance
-+import net.sf.l2j.gameserver.model.location.Location
 +
 +/** When a bot should leave its hunting spot for town, and what it can afford there. */
 +internal object Errands {
@@ -3025,7 +3079,7 @@ index 0000000..5e4a893
 +        for (item in Gear.surplus(bot)) {
 +            if (visits >= MAX_STORE_VISITS) return
 +            val offer = Market.buyOffers(bot, item.itemId).firstOrNull { it.tradeItem.price > Market.npcSellPrice(item.itemId) } ?: continue
-+            if (!walkTo(offer.owner)) continue
++            if (!walkTo(offer.owner, "to sell ${item.itemName}")) continue
 +            visits++
 +            val live = bot.inventory.getItemByObjectId(item.objectId) ?: continue
 +            Market.sellToStore(bot, offer, live, minOf(live.count, offer.tradeItem.count))
@@ -3042,7 +3096,7 @@ index 0000000..5e4a893
 +            val limit = Market.npcPrice(itemId) ?: (Market.fairValue(itemId) * 1.3).toInt()
 +            val offer = Market.sellOffers(bot, itemId).firstOrNull { it.tradeItem.price < limit } ?: continue
 +            val count = minOf(offer.tradeItem.count, wantedCount, Errands.spendable(bot) / offer.tradeItem.price.coerceAtLeast(1))
-+            if (count <= 0 || !walkTo(offer.owner)) continue
++            if (count <= 0 || !walkTo(offer.owner, "to buy ${offer.tradeItem.item.name}")) continue
 +            visits++
 +            if (Market.buyFromStore(bot, offer, count)) {
 +                bot.inventory.getItemByItemId(itemId)?.takeIf { it.isEquipable && !it.isEquipped }?.let {
@@ -3055,61 +3109,84 @@ index 0000000..5e4a893
 +
 +    private suspend fun sellToNpc(items: List<ItemInstance>) {
 +        if (items.isEmpty()) return
-+        val shop = Market.closestShop(bot) ?: return
-+        if (!walkTo(shop.merchant)) return
++        val shop = Market.closestShop(bot) ?: return EconomyLog.skip(bot, "no shop in town to sell to")
++        if (!walkTo(shop.merchant, "to sell")) return
 +        Market.sellToNpc(bot, shop, items)
 +    }
 +
 +    private suspend fun buySupplies() {
-+        buy(Gear.SCROLL_OF_ESCAPE, target = 2, budgetShare = 0.1, onlyBelow = 1)
++        // Shares of what the bot can spend now: a scroll home comes first, potions are cheap insurance,
++        // and the rest stays for gear. The reserve is travel money, and a scroll or a potion is exactly what it is
++        // kept for, so essentials may use all of the adena.
++        buy(Gear.SCROLL_OF_ESCAPE, target = 2, budgetShare = 1.0, onlyBelow = 1, essential = true)
 +        if (bot.level >= 20 || Errands.spendable(bot) >= 5000) {
 +            buy(Gear.shotId(bot), target = shotsFor(bot.level), budgetShare = 0.4, onlyBelow = shotsFor(bot.level) / 3)
 +        }
-+        if (Gear.isArcher(bot)) buy(Gear.arrowId(bot), target = 1500, budgetShare = 0.3, onlyBelow = 500)
-+        buy(Gear.HEALING_POTION, target = 10, budgetShare = 0.15, onlyBelow = 3)
-+        if (bot.isMageClass) buy(Gear.MANA_DRUG, target = 10, budgetShare = 0.1, onlyBelow = 3)
++        // A bow without arrows can't hunt at all.
++        if (Gear.isArcher(bot)) buy(Gear.arrowId(bot), target = 1500, budgetShare = 0.6, onlyBelow = 500, essential = true)
++        // No town shop sells mana potions in Interlude: mages rest, as players did.
++        val potions = Gear.HEALING_POTIONS.sumOf { Gear.count(bot, it) }
++        val potion = Gear.HEALING_POTIONS.firstOrNull { Market.findProduct(bot, it) != null }
++        if (potion != null) buy(potion, target = 10, budgetShare = 0.5, onlyBelow = 3, have = potions, essential = true)
 +    }
 +
 +    /** Buys up to [target] pieces when the bot has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */
-+    private suspend fun buy(itemId: Int, target: Int, budgetShare: Double, onlyBelow: Int) {
-+        val have = Gear.count(bot, itemId)
++    private suspend fun buy(itemId: Int, target: Int, budgetShare: Double, onlyBelow: Int, have: Int = Gear.count(bot, itemId),
++                            essential: Boolean = false) {
 +        if (have >= onlyBelow) return
-+        val (shop, product) = Market.findProduct(bot, itemId) ?: return
++        val name = ItemTable.getInstance().getTemplate(itemId)?.name ?: "$itemId"
++        val (shop, product) = Market.findProduct(bot, itemId) ?: return EconomyLog.skip(bot, "no shop in town sells $name")
 +        val price = Market.priceWithTax(shop, product).coerceAtLeast(1)
-+        val count = minOf(target - have, (Errands.spendable(bot) * budgetShare / price).toInt())
-+        if (count <= 0 || !walkTo(shop.merchant)) return
++        val budget = if (essential) bot.adena else Errands.spendable(bot)
++        val count = minOf(target - have, (budget * budgetShare / price).toInt())
++        if (count <= 0) return EconomyLog.skip(bot, "can't afford $name at $price (adena ${bot.adena}, reserve ${if (essential) 0 else Errands.reserve(bot)})")
++        if (!walkTo(shop.merchant, "for $name")) return
 +        Market.buyFromNpc(bot, shop, product, count)
 +    }
 +
 +    private suspend fun buyGear() {
 +        val wish = Errands.affordableUpgrade(bot) ?: return
 +        val (shop, product) = Market.findProduct(bot, wish.itemId) ?: return
-+        if (Market.priceWithTax(shop, product) > Errands.spendable(bot) || !walkTo(shop.merchant)) return
++        if (Market.priceWithTax(shop, product) > Errands.spendable(bot)) return
++        if (!walkTo(shop.merchant, "for ${product.item.name}")) return
 +        if (!Market.buyFromNpc(bot, shop, product, 1)) return
 +        val item = bot.inventory.getItemsByItemId(wish.itemId).firstOrNull { !it.isEquipped } ?: return
 +        Gear.equip(bot, item)
 +        Chatter.maybeSay(bot, Chatter.BOUGHT_UPGRADE, item.itemName)
 +    }
 +
-+    /** Walks up to an NPC or a store and pauses like a player reading the window. */
-+    private suspend fun walkTo(target: Npc): Boolean = walkTo(target.location(), target)
-+
-+    private suspend fun walkTo(target: Player): Boolean = walkTo(target.location(), target)
-+
-+    private suspend fun walkTo(location: Location, target: net.sf.l2j.gameserver.model.actor.Creature): Boolean {
++    /**
++     * Walks up to an NPC or a store and pauses like a player reading the window. The last steps are a click on the
++     * target, as a player would do: the server's own approach with pathfinding gets around counters, stairs and doors
++     * that straight walking legs bump into.
++     */
++    private suspend fun walkTo(target: Creature, purpose: String = ""): Boolean {
 +        if (bot.isDead) return false
-+        if (distance(bot, target) > Npc.INTERACTION_DISTANCE) {
-+            WalkToSequence(bot, location, Npc.INTERACTION_DISTANCE - 50) {}.definition()
++        if (!inReach(target)) WalkToSequence(bot, target.location(), APPROACH_RADIUS) {}.definition()
++        if (!inReach(target) && !bot.isDead) {
++            bot.ai.setIntention(IntentionType.INTERACT, target)
++            for (second in 1..FINAL_APPROACH_SECONDS) {
++                delay(1000)
++                if (inReach(target) || bot.isDead) break
++            }
 +        }
-+        if (distance(bot, target) > Npc.INTERACTION_DISTANCE * 1.5) return false
++        if (!inReach(target)) {
++            EconomyLog.skip(bot, "couldn't reach ${target.name} $purpose (${distance(bot, target).toInt()} away, " +
++                    "dz ${target.z - bot.z}, bot at ${bot.x},${bot.y},${bot.z})")
++            return false
++        }
 +        bot.target = target
 +        delay(Rnd.get(2000, 5000).toLong())
 +        return !bot.isDead
 +    }
 +
++    private fun inReach(target: Creature) = target.isInsideRadius(bot, Npc.INTERACTION_DISTANCE, true, false)
++
 +    companion object {
 +        private const val MAX_STORE_VISITS = 4
 +        private const val SHOTS_PER_TRIP = 1000
++        private const val APPROACH_RADIUS = 300
++        private const val FINAL_APPROACH_SECONDS = 15
 +
 +        private fun shotsFor(level: Int) = when {
 +            level < 20 -> 300
@@ -3120,10 +3197,10 @@ index 0000000..5e4a893
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
 new file mode 100644
-index 0000000..7cc53ab
+index 0000000..b519018
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,199 @@
 +package dev.l2j.autobots.population.group
 +
 +import dev.l2j.autobots.Autobot
@@ -3320,13 +3397,15 @@ index 0000000..7cc53ab
 +    var restUntilFull = false
 +    /** Someone asked to move on: the leading bot picks another spot. */
 +    var newSpotRequested = false
++    /** Since when the leader waits for the others to come; null while the party is together. */
++    var gatheringSince: Long? = null
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
 new file mode 100644
-index 0000000..27cba9d
+index 0000000..3747691
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,278 @@
 +package dev.l2j.autobots.population.group
 +
 +import dev.l2j.autobots.Autobot
@@ -3434,6 +3513,34 @@ index 0000000..27cba9d
 +        remember(online)
 +    }
 +
++    /**
++     * One line every 10 minutes: parties, how many members are with their leader, dead, in combat or sitting,
++     * how many bots are looking, and the levels gained by party members since the last line.
++     */
++    fun summary(online: Collection<Autobot>) {
++        if (!settings.groupLog) return
++        val parties = online.filter { it.isInParty }.map { it.party }.distinct()
++        val members = parties.flatMap { it.members }
++        val near = parties.sumOf { p -> p.members.count { it !== p.leader && distance(p.leader, it) < PartyPlan.RANGE } }
++        val levels = members.associate { it.objectId to it.level }
++        val gained = levels.entries.sumOf { (id, level) -> lastLevels[id]?.let { level - it } ?: 0 }
++        lastLevels.clear()
++        lastLevels.putAll(levels)
++        println("Autobots groups summary: parties=${parties.size} members=${members.size} nearLeader=$near/${members.size - parties.size} " +
++                "dead=${members.count { it.isDead }} fighting=${members.count { it.isInCombat }} sitting=${members.count { it.isSitting }} " +
++                "looking=${looking.size} levelsGained=$gained wipes=$wipes")
++        wipes = 0
++        for (party in parties) {
++            val leader = party.leader
++            println("  party ${leader.name} lv ${leader.level}: " + party.members.filter { it !== leader }.joinToString {
++                "${it.name} ${Role.of(it.classId)} ${distance(leader, it).toInt()}${if (it.isDead) " dead" else ""} ${(it as? Autobot)?.activeSequence?.javaClass?.simpleName ?: it.ai.desire.intention}"
++            } + " | leader ${(leader as? Autobot)?.activeSequence?.javaClass?.simpleName ?: leader.ai.desire.intention}" + if (leader.isDead) " (leader dead)" else "")
++        }
++    }
++
++    private val lastLevels = HashMap<Int, Int>()
++    private var wipes = 0
++
 +    private val wiped: MutableSet<Party> = java.util.Collections.newSetFromMap(java.util.WeakHashMap())
 +
 +    /** Half a minute more spent together by every party with bots in it; a wipe spoils the mood once. */
@@ -3442,7 +3549,10 @@ index 0000000..27cba9d
 +            val leader = party.leader
 +            Relations.playedTogether(party.members.filter { it === leader || distance(leader, it) < PartyPlan.RANGE }, 0.5)
 +            if (party.members.all { it.isDead }) {
-+                if (wiped.add(party)) Relations.badTime(party.members, 5)
++                if (wiped.add(party)) {
++                    Relations.badTime(party.members, 5)
++                    wipes++
++                }
 +            } else wiped.remove(party)
 +        }
 +    }
@@ -3470,6 +3580,8 @@ index 0000000..27cba9d
 +    private fun form(leader: Autobot, members: List<Autobot>) {
 +        val lootRule = if (members.any { Role.of(it.classId) == Role.Spoiler } || Role.of(leader.classId) == Role.Spoiler) LootRule.ITEM_RANDOM_SPOIL else LootRule.ITEM_RANDOM
 +        leader.lootRule = lootRule
++        // Whatever each was on its way to, the party goes together now.
++        (members + leader).forEach { it.cancelSequence() }
 +        for (member in members) {
 +            val party: Party? = leader.party
 +            if (party == null) Party(leader, member, lootRule) else party.addPartyMember(member)
@@ -3574,10 +3686,10 @@ index 0000000..27cba9d
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
 new file mode 100644
-index 0000000..256b994
+index 0000000..971ae60
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,228 @@
 +package dev.l2j.autobots.population.group
 +
 +import dev.l2j.autobots.Autobot
@@ -3661,6 +3773,7 @@ index 0000000..256b994
 +    /** The leader hunts on its own terms; it only holds the party back while the healer drinks mana or someone heals up. */
 +    private suspend fun lead(party: Party): Boolean {
 +        if (bot.isUnderAttack()) return false
++        if (gather(party)) return true
 +        val tired = party.members.filter { it !== bot && distance(bot, it) < PartyPlan.RANGE }.any { member ->
 +            (Role.of(member.classId) == Role.Healer && member.getManaPercentage() < REST_HEALER_MP) || member.getHealthPercentage() < REST_MEMBER_HP
 +        }
@@ -3682,6 +3795,30 @@ index 0000000..256b994
 +            return true
 +        }
 +        return false
++    }
++
++    /**
++     * A party gathers before it hunts: while most living members are out of reach, the leader waits where it is,
++     * for a few minutes at most, then goes on and lets the others catch up.
++     */
++    private fun gather(party: Party): Boolean {
++        val state = PartyPlan.state(party)
++        val others = party.members.filter { it !== bot && !it.isDead }
++        val away = others.count { distance(bot, it) > PartyPlan.RANGE }
++        if (away * 2 <= others.size || bot.isInCombat) {
++            state.gatheringSince = null
++            return false
++        }
++        val now = System.currentTimeMillis()
++        val since = state.gatheringSince ?: now.also {
++            state.gatheringSince = it
++            bot.partySay(listOf("waiting for everyone", "come to me", "ждём всех", "подтягивайтесь").random())
++        }
++        // After a wait the leader goes on for a while and lets the late ones catch up, then waits again.
++        if (now - since > GATHER_MAX_MS + GATHER_MOVE_MS) state.gatheringSince = now
++        else if (now - since > GATHER_MAX_MS) return false
++        if (bot.isMoving) bot.stopMove(null)
++        return true
 +    }
 +
 +    /** What the party is fighting: the tank's target, else the leader's, else a monster busy with any member. */
@@ -3749,6 +3886,8 @@ index 0000000..256b994
 +        private const val RESTED_PERCENT = 80.0
 +        private const val FULL_PERCENT = 95.0
 +        private const val GREET_PERCENT = 70
++        private const val GATHER_MAX_MS = 2 * 60_000L
++        private const val GATHER_MOVE_MS = 60_000L
 +        private const val REST_SAY_PERCENT = 30
 +    }
 +}
@@ -3781,10 +3920,10 @@ index 0000000..256b994
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
 new file mode 100644
-index 0000000..affb587
+index 0000000..437a9cb
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,81 @@
 +package dev.l2j.autobots.population.group
 +
 +import dev.l2j.autobots.Autobot
@@ -3856,6 +3995,7 @@ index 0000000..affb587
 +        requestor.sendPacket(JoinParty(if (accept) 1 else 0))
 +        var party: Party? = requestor.party
 +        if (accept && !bot.isInParty) {
++            if (bot is Autobot) bot.cancelSequence()
 +            if (party == null) party = Party(requestor, bot, requestor.lootRule) else party.addPartyMember(bot)
 +        }
 +        party?.setPendingInvitation(false)

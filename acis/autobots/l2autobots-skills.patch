@@ -46,7 +46,7 @@ index 6431c57..2c9e7b2 100644
                      val currentHp = rs.getDouble("curHp")
                      player.currentCp = rs.getDouble("curCp")
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-index 3ca5878..d8adc89 100644
+index dea7ec6..8d64c1f 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 @@ -13,6 +13,7 @@ import dev.l2j.autobots.models.RespawnAction
@@ -63,10 +63,10 @@ index 3ca5878..d8adc89 100644
                  QuestLog.summary(bots)
 +                SkillLog.summary(bots)
              }
-             val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
-             if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
+             if ((ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
+                 GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
-index 1cc160f..8c4701c 100644
+index 698845b..4ae8fc1 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
 @@ -1,5 +1,6 @@
@@ -76,7 +76,7 @@ index 1cc160f..8c4701c 100644
  import dev.l2j.autobots.AutobotData
  import dev.l2j.autobots.behaviors.attributes.PetOwner
  import dev.l2j.autobots.behaviors.preferences.PetOwnerPreferences
-@@ -164,6 +165,7 @@ internal object Gear {
+@@ -186,6 +187,7 @@ internal object Gear {
          summonCrystal(bot)?.let { keep += it }
          petShot(bot)?.let { keep += it }
          keep += wishes(bot).map { it.itemId }
@@ -107,7 +107,7 @@ index eabb9c1..9847078 100644
  
      fun hasBusiness(bot: Autobot): Boolean = storeGoods(bot).isNotEmpty() || (bot.adena > 0 && wanted(bot).any { bidPrice(bot, it) in 1..bot.adena })
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-index 5e4a893..5df3210 100644
+index af4974f..0ffe4a5 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 @@ -5,6 +5,7 @@ import dev.l2j.autobots.behaviors.sequences.Sequence
@@ -118,7 +118,7 @@ index 5e4a893..5df3210 100644
  import dev.l2j.autobots.utils.CancellationToken
  import dev.l2j.autobots.utils.distance
  import kotlinx.coroutines.delay
-@@ -33,6 +34,7 @@ internal object Errands {
+@@ -35,6 +36,7 @@ internal object Errands {
      fun shouldLeaveSpot(bot: Autobot, lastTripAt: Long): Boolean {
          val minutesSinceTrip = (System.currentTimeMillis() - lastTripAt) / 60_000
          if (minutesSinceTrip < MIN_MINUTES_BETWEEN_TRIPS) return false
@@ -126,7 +126,7 @@ index 5e4a893..5df3210 100644
          if (loadPercent(bot) >= HEAVY_LOAD_PERCENT) return true
          if (outOfShots(bot)) return true
          if (Gear.isArcher(bot) && Gear.count(bot, Gear.arrowId(bot)) < 50) return true
-@@ -97,6 +99,8 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+@@ -99,6 +101,8 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
          Crystals.crystallizeJunk(bot)
          tradeWithStores()
          sellToNpc(junk())
@@ -137,10 +137,10 @@ index 5e4a893..5df3210 100644
          // What the new gear replaced is junk now, and so are store goods if the bag is still heavy.
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt b/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt
 new file mode 100644
-index 0000000..d531e01
+index 0000000..0b67a9a
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt
-@@ -0,0 +1,176 @@
+@@ -0,0 +1,196 @@
 +package dev.l2j.autobots.population.skills
 +
 +import dev.l2j.autobots.AutobotData
@@ -175,6 +175,11 @@ index 0000000..d531e01
 +    // A book is kept from the moment it drops until the skill is this many levels away.
 +    private const val KEEP_BOOKS_LEVELS_AHEAD = 10
 +
++    // A visit that taught nothing (no trainer in this town, no way to the trainer) is not repeated for a while,
++    // or the bot would shuttle between its spot and town.
++    private const val RETRY_MS = 2 * 60 * 60 * 1000L
++    private val retryAt = ConcurrentHashMap<Int, Long>()
++
 +    private val trainers: List<Folk> by lazy {
 +        World.getInstance().objects.filterIsInstance<Folk>().also { println("Autobots skills: ${it.size} folk NPCs indexed.") }
 +    }
@@ -195,7 +200,7 @@ index 0000000..d531e01
 +    fun missingBooks(bot: Player): List<Int> = lessons(bot).map { bookFor(it) }.filter { it > 0 && Gear.count(bot, it) == 0 }.distinct()
 +
 +    /** A lesson the bot can take on its next town visit: enough SP, and the book in the bag or on a shop shelf. */
-+    fun hasLessons(bot: Autobot): Boolean = bot.learnsSkills && lessons(bot).any { node ->
++    fun hasLessons(bot: Autobot): Boolean = bot.learnsSkills && System.currentTimeMillis() >= (retryAt[bot.objectId] ?: 0L) && lessons(bot).any { node ->
 +        val book = bookFor(node)
 +        bot.sp >= node.correctedCost && (book == 0 || Gear.count(bot, book) > 0 || (Market.npcPrice(book) ?: Int.MAX_VALUE) <= Errands.spendable(bot))
 +    }
@@ -203,16 +208,26 @@ index 0000000..d531e01
 +    /** One visit: buy the missing books the bot can afford, walk to a trainer of its class, learn all it can pay for. */
 +    suspend fun learn(bot: Autobot) {
 +        if (!bot.learnsSkills || bot.isDead) return
++        if (lessons(bot).none { bot.sp >= it.correctedCost }) return
++        val learned = visitTrainer(bot)
++        if (learned == 0) retryAt[bot.objectId] = System.currentTimeMillis() + RETRY_MS else retryAt.remove(bot.objectId)
++    }
++
++    /** @return how many skill levels the bot learned. */
++    private suspend fun visitTrainer(bot: Autobot): Int {
 +        val affordable = lessons(bot).filter { bot.sp >= it.correctedCost }
-+        if (affordable.isEmpty()) return
 +
 +        for (book in affordable.map { bookFor(it) }.filter { it > 0 && Gear.count(bot, it) == 0 }.distinct()) buyBook(bot, book)
 +
 +        val learnable = affordable.filter { bookFor(it).let { book -> book == 0 || Gear.count(bot, book) > 0 } }
-+        if (learnable.isEmpty()) return
++        if (learnable.isEmpty()) return 0
 +        val trainer = trainers.filter { it.isVisible && it.template.canTeach(bot.classId) && distance(bot, it) <= TRAINER_RADIUS }
-+                .minByOrNull { distance(bot, it) } ?: return
-+        if (!walkTo(bot, trainer)) return
++                .minByOrNull { distance(bot, it) }
++        if (trainer == null) {
++            SkillLog.note(bot, "no trainer for ${bot.classId} in this town")
++            return 0
++        }
++        if (!walkTo(bot, trainer)) return 0
 +
 +        // Learning a level can open the next one (Power Strike 1, then 2...): go on while SP lasts.
 +        var learned = 0
@@ -225,6 +240,7 @@ index 0000000..d531e01
 +            learned++
 +            delay(Rnd.get(600, 1500).toLong())
 +        } while (learned < MAX_LESSONS_PER_VISIT)
++        return learned
 +    }
 +
 +    /** Mirrors RequestAcquireSkill for general skills: level order, template, SP, spellbook, then the skill is stored. */
@@ -306,6 +322,10 @@ index 0000000..d531e01
 +
 +    fun log(bot: Player, message: String) {
 +        count(LEARNED)
++        note(bot, message)
++    }
++
++    fun note(bot: Player, message: String) {
 +        if (AutobotData.settings.questLog) println("Autobots skills: ${bot.name} (lv ${bot.level} ${bot.classId}): $message")
 +    }
 +
