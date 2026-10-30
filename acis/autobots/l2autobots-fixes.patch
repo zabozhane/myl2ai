@@ -86,7 +86,7 @@ index b824d98..a8b6830 100644
  
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
-index d304168..44ce79f 100644
+index d304168..01c78c3 100644
 --- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
 @@ -6,7 +6,6 @@ import dev.l2j.autobots.behaviors.SocialBehavior
@@ -203,7 +203,7 @@ index d304168..44ce79f 100644
      override fun doDie(killer: Creature?): Boolean {
 -        return super.doDie(killer)
 +        val died = super.doDie(killer)
-+        if (died) life?.onDeath()
++        if (died) life?.onDeath(killer)
 +        return died
      }
      
@@ -1681,10 +1681,10 @@ index 0000000..d64fe1a
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 new file mode 100644
-index 0000000..f9231e3
+index 0000000..98b1721
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,329 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.AutobotData
@@ -1792,7 +1792,25 @@ index 0000000..f9231e3
 +    /** True while the bot hunts easier monsters because it dies too often or is undergeared. */
 +    val isFallingBack get() = fitness.isSaving
 +
-+    fun onDeath() {
++    /**
++     * One line per death for `economyLog`, to tell what kills bots: the killer and whether it attacks on sight or the bot
++     * pulled it, how many monsters were on the bot, potions left, the spot and the mode it hunted in.
++     */
++    fun onDeath(killer: net.sf.l2j.gameserver.model.actor.Creature?) {
++        if (AutobotData.settings.economyLog) {
++            val attackers = bot.getKnownTypeInRadius(Monster::class.java, ATTACKER_RADIUS).filter { !it.isDead && it.target === bot }
++            val by = when (killer) {
++                is Monster -> "${killer.name} (${killer.npcId}) lv ${killer.level}${if (killer.isAggressive) " aggressive" else ""}"
++                is Player -> "player ${killer.name} lv ${killer.level}"
++                null -> "unknown"
++                else -> "${killer.name} lv ${killer.level}"
++            }
++            val potions = dev.l2j.autobots.population.economy.Gear.HEALING_POTIONS.sumOf { dev.l2j.autobots.population.economy.Gear.count(bot, it) }
++            println("Autobots death: ${bot.name} (lv ${bot.level} ${bot.classId}) killed by $by, attackers ${attackers.size}" +
++                    " [${attackers.joinToString(" ") { "${it.name}/${it.level}" }}], potions $potions, mode ${fitness.mode}," +
++                    " hunt lv $spotLevel, spot ${spot?.key ?: "-"}, party ${bot.party?.membersCount ?: 0}," +
++                    " weapon ${bot.activeWeaponItem?.crystalType ?: "none"}, at ${bot.x},${bot.y},${bot.z}")
++        }
 +        fitness.onDeath()
 +    }
 +

@@ -36,7 +36,7 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     2-30 days, 30% chance to quit after each period. Both are derived from the object id, nothing is stored.
   - Newbies replace inactive players, up to `populationNewbiesPerDay` spread over the day; a fresh server
     opens with `populationSize` of them at once.
-  - `LifeBehavior`: a session is hunting (90%) or AFK. Hunting spots come from monster spawns (2500 cells
+  - `LifeBehavior`: a session is a chain of segments (see `l2autobots-sessions.patch`). Hunting spots come from monster spawns (2500 cells
     with 4+ monsters of level -4..+2), weighted towards close and less crowded ones. Far spots are reached by
     a paid gatekeeper teleport, near ones on foot; empty, crowded (6+ players) or unreachable spots are
     dropped and another one is picked.
@@ -75,6 +75,8 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - Every 10 minutes one `Autobots economy summary:` line counts the deals by kind and shows the bots online
     (average and max level, adena, stores, farming, needsGroup). `scripts/economy-report.sh [since]` prints those
     summaries, deal counts with samples, bot errors and the game container's load.
+  - Every bot death prints an `Autobots death:` line (with `economyLog`): the killer, its level and whether it is
+    aggressive, the monsters on the bot, potions left, mode, hunt level, spot, party size, weapon grade, coordinates.
   Professions (`behaviors/classes/`): every Interlude class plays now. Healers (Cleric line, Elven and Shillien
   Oracle line) heal by priority (tank first, group heal when 2+ members are hurt, battle heals below 35%), raise
   the dead, recharge and buff; buffers (Prophet, Warcryer line) keep party buffs and chants up; summoners
@@ -165,8 +167,18 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     even if someone spawns it.
   - The summary line gets `Craft CraftFail CraftOrder RecipeLearn Workshop` counts and
     `crafters workshops recipes adenaPerCrafter adenaPerOtherSameLevel`.
-- `l2autobots-raids.patch` - raid bosses (stage 4v, spec in `docs/raids.md`), applied last.
+- `l2autobots-raids.patch` - raid bosses (stage 4v, spec in `docs/raids.md`).
   - A bot never picks a raid boss or its minion as prey (`isWorthTargeting`); it only fights one that attacks it.
+- `l2autobots-partysize.patch` - adaptive party size (`PartySize`), applied after sessions. A bot-led party wants from its
+  kind's minimum (full 5, casual 3) up to 9 people. It starts at the size it was formed with and measures what a member
+  earns, exp and adena per minute, over 10-minute windows with the same people at the same spot (another spot, more
+  than 3000 away, starts over). It tries one more (50% per window) when nobody died and the last step up didn't cost
+  it; one member leaves when a member earns under 85% of the size below, or under 70% of the last window at the same
+  size (the spot runs out of monsters). The party's only tank or healer may leave on its own (20%) but is never sent
+  away; otherwise the leader sends away the one it likes least, damage dealers first, a player as well as a bot. Whoever
+  goes isn't taken back (or offered that party) for 30 minutes. A party
+  below its size takes one fitting looker of its region a tick (lacking roles first, full parties no second tank or
+  healer), besides the shouts. The groups summary shows `size N/target` and the last exp/min and adena/min.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 
@@ -180,3 +192,18 @@ Review of upstream code: no process execution or hidden network calls; the only 
 GM character (access level 7+), type `//a b` in game: the dashboard creates, spawns and controls bots.
 Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) toggles auto hunt, `AutoHuntSet`
 (`.autofarm menu`) opens its settings.
+- `l2autobots-sessions.patch` - a play session made of segments (`population/SessionPlan.kt`), applied after raids; it
+  replaces the one-activity-per-session choice (90% hunting, otherwise AFK or a store for the whole session).
+  - Segments: hunting (quests and town trips included), trading in a store, AFK, and going home. Each bot has a
+    stable style from its object id: grinder 30% (hunts 60-120 min, rare breaks, rarely trades), casual 50%
+    (30-75 min, more breaks), trader 20% (20-50 min of hunting, stores of 30-90 min); crafters are always traders.
+  - Segments end on time or for a player's reasons: after a death (a break or a store), a new level (a short break),
+    a town trip that leaves goods to sell (a trader stays behind a store). The longer a bot hunts without a break,
+    the likelier the next segment is AFK; at night (01-06 Moscow) breaks are twice as likely and 1.5x longer.
+  - Never AFK the whole session: AFK lasts 3-25 min, never follows AFK, is 2-8 min right after login, and a bot with
+    a pending profession quest (`QuestRunner.hasBusiness`) only takes 2-8 min breaks after hunting and opens no stores.
+  - A fight is finished before switching. AFK outside town steps away from aggressive monsters first (up to 3 times).
+    10-20 min before the scheduled end (`DailySchedule.minutesLeft`) a bot walks or escapes to town, visits the shops
+    and waits for the logout there (or keeps a store, as before). AFK and going-home bots do not join parties.
+  - `populationSessionLog` prints every switch with its reason (`Autobots session: <name> lv N Hunt -> Afk for 12 min
+    (died)`); `Autobots session summary:` every 10 minutes counts hunting, trading, AFK, going home and party bots.
