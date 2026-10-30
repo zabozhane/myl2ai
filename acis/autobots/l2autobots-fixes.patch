@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index ef03838..7b342bb 100644
+index ef03838..0d7d68d 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -2,11 +2,46 @@
+@@ -2,11 +2,48 @@
  <settings>
    <thinkIteration>350</thinkIteration>
    <defaultTitle>Welcome to L2</defaultTitle>
@@ -46,6 +46,8 @@ index ef03838..7b342bb 100644
 +       shout for missing members and answer players who look for a group in chat. At most this percent of the
 +       online population plays in parties; the rest hunt alone. groupLog prints every formed party. -->
 +  <groupFinderEnabled>true</groupFinderEnabled>
++  <!-- Lowest level at which bots look for a party on their own (players group up from about 10-15 in Interlude). -->
++  <groupFinderMinLevel>10</groupFinderMinLevel>
 +  <groupMaxPopulationPercent>40</groupMaxPopulationPercent>
 +  <groupLog>true</groupLog>
 +  <!-- Test only: a newly created population bot starts at this level (0 = level 1, like a real newbie). -->
@@ -1319,10 +1321,10 @@ index 0000000..11d29af
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index 323190c..ec93c09 100644
+index 323190c..a2f93b7 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -24,7 +24,29 @@ internal data class AutobotSettings(
+@@ -24,7 +24,30 @@ internal data class AutobotSettings(
          @JsonProperty("useManaPots") var useManaPots: Boolean = true,
          @JsonProperty("useQuickHealingPots") var useQuickHealingPots: Boolean = false,
          @JsonProperty("useGreaterHealingPots") var useGreaterHealingPots: Boolean = true,
@@ -1347,6 +1349,7 @@ index 323190c..ec93c09 100644
 +        @JsonProperty("professionWeightSummoner") var professionWeightSummoner: Int = 100,
 +        @JsonProperty("groupsEnabled") var groupsEnabled: Boolean = true,
 +        @JsonProperty("groupFinderEnabled") var groupFinderEnabled: Boolean = true,
++        @JsonProperty("groupFinderMinLevel") var groupFinderMinLevel: Int = 10,
 +        @JsonProperty("groupMaxPopulationPercent") var groupMaxPopulationPercent: Int = 40,
 +        @JsonProperty("groupLog") var groupLog: Boolean = true,
 +        @JsonProperty("populationTestLevel") var populationTestLevel: Int = 0
@@ -3452,10 +3455,10 @@ index 0000000..b519018
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
 new file mode 100644
-index 0000000..3747691
+index 0000000..dbc8ea6
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,277 @@
 +package dev.l2j.autobots.population.group
 +
 +import dev.l2j.autobots.Autobot
@@ -3475,13 +3478,12 @@ index 0000000..3747691
 +
 +/**
 + * Bots gathering parties on their own, every 30 seconds. A bot looks for a group when it keeps dying (needsGroup),
-+ * or because it likes company: team players in most sessions from level 18, regular ones now and then, loners only
++ * or because it likes company: team players in most sessions from `groupFinderMinLevel`, regular ones now and then, loners only
 + * when they must. Lookers of one map region and close levels team up behind the most sociable of them; the party
 + * wants a healer from level 25 and settles for damage dealers after a few minutes without one. A bot-led party
 + * with free places shouts for members and answers players looking for a group, inviting the ones it can use.
 + */
 +internal object GroupFinder {
-+    private const val MIN_LEVEL = 18
 +    private const val HEALER_FROM_LEVEL = 25
 +    private const val MAX_LEVEL_SPREAD = 5
 +    private const val MIN_SIZE = 3
@@ -3507,7 +3509,7 @@ index 0000000..3747691
 +
 +    /** Decided once per session, when the bot logs in. */
 +    fun onSessionStart(bot: Autobot) {
-+        if (!enabled || bot.level < MIN_LEVEL) return
++        if (!enabled || bot.level < settings.groupFinderMinLevel) return
 +        val percent = when (Sociability.of(bot)) {
 +            Sociability.TeamPlayer -> 60
 +            Sociability.Regular -> 25
@@ -3518,7 +3520,7 @@ index 0000000..3747691
 +
 +    /** A bot that keeps dying, or whose spot is too hard, wants a group before it falls back to farming. */
 +    fun wantGroup(bot: Autobot) {
-+        if (enabled && bot.level >= MIN_LEVEL && !bot.isInParty) looking.putIfAbsent(bot.objectId, System.currentTimeMillis())
++        if (enabled && bot.level >= settings.groupFinderMinLevel && !bot.isInParty) looking.putIfAbsent(bot.objectId, System.currentTimeMillis())
 +    }
 +
 +    fun isLooking(bot: Autobot) = looking.containsKey(bot.objectId)
