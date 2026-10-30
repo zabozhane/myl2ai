@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index 321ba03..dc0dd1c 100644
+index e32be24..ee0728c 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -54,4 +54,10 @@
+@@ -58,4 +58,10 @@
         compare shop, store and workshop prices. crafterArtisanPercent of dwarves take the Artisan line at level 20. -->
    <craftEnabled>true</craftEnabled>
    <crafterArtisanPercent>60</crafterArtisanPercent>
@@ -14,10 +14,10 @@ index 321ba03..dc0dd1c 100644
 +  <raidLog>true</raidLog>
  </settings>
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index da987de..58eefb6 100644
+index 7e7095c..d272712 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -51,7 +51,10 @@ internal data class AutobotSettings(
+@@ -52,7 +52,10 @@ internal data class AutobotSettings(
          @JsonProperty("craftEnabled") var craftEnabled: Boolean = true,
          @JsonProperty("crafterArtisanPercent") var crafterArtisanPercent: Int = 60,
          @JsonProperty("questsEnabled") var questsEnabled: Boolean = true,
@@ -30,7 +30,7 @@ index da987de..58eefb6 100644
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
          setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index 051a7f4..32a30eb 100644
+index 838af7e..71e2266 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 @@ -18,6 +18,8 @@ import dev.l2j.autobots.population.economy.craft.CraftBook
@@ -42,17 +42,21 @@ index 051a7f4..32a30eb 100644
  import dev.l2j.autobots.utils.distance
  import net.sf.l2j.commons.random.Rnd
  import net.sf.l2j.gameserver.data.xml.TeleportLocationData
-@@ -117,7 +119,8 @@ internal class LifeBehavior(private val bot: Autobot) {
-     val isFallingBack get() = fitness.isSaving
- 
-     fun onDeath() {
+@@ -211,9 +213,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+             println("Autobots death: ${bot.name} (lv ${bot.level} ${bot.classId}) killed by $by, attackers ${attackers.size}" +
+                     " [${attackers.joinToString(" ") { "${it.name}/${it.level}" }}], potions $potions, mode ${fitness.mode}," +
+                     " hunt lv $spotLevel, spot ${spot?.key ?: "-"}, party ${bot.party?.membersCount ?: 0}," +
+-                    " weapon ${bot.activeWeaponItem?.crystalType ?: "none"}, at ${bot.x},${bot.y},${bot.z}")
++                    " weapon ${bot.activeWeaponItem?.crystalType ?: "none"}, at ${bot.x},${bot.y},${bot.z}" +
++                    (RaidPlanner.raidOf(bot.party)?.let { ", raid ${it.boss.name} ${it.phase}" } ?: ""))
+         }
 -        fitness.onDeath()
 +        // A raid is a risk the bot took on purpose: it does not make the bot fall back to easier monsters.
 +        if (RaidPlanner.isRaiding(bot)) RaidLog.count(RaidLog.Event.Deaths) else fitness.onDeath()
+         if (!bot.isInParty) session.onDeath(context())
      }
  
-     fun onLogout() {
-@@ -203,6 +206,16 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -295,6 +299,16 @@ internal class LifeBehavior(private val bot: Autobot) {
              return
          }
  
@@ -69,7 +73,7 @@ index 051a7f4..32a30eb 100644
          val target = currentSpot()
          if (target == null) {
              if (!inTown) bot.combatBehavior.onUpdate()
-@@ -280,7 +293,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -373,7 +387,7 @@ internal class LifeBehavior(private val bot: Autobot) {
              return
          }
  
@@ -78,7 +82,7 @@ index 051a7f4..32a30eb 100644
          val sequence = if (exit != null) {
              TravelByGatekeeperSequence(bot, exit) { gatekeeperFailed = true }
          } else if (bot.isInParty && bot.party.leader === bot) {
-@@ -292,6 +305,18 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -385,6 +399,18 @@ internal class LifeBehavior(private val bot: Autobot) {
          sequence.execute()
      }
  
@@ -97,7 +101,7 @@ index 051a7f4..32a30eb 100644
      private fun legToward(destination: Location): Location {
          val remaining = distance(bot.location(), destination)
          if (remaining <= PARTY_LEG) return destination
-@@ -300,11 +325,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -393,11 +419,11 @@ internal class LifeBehavior(private val bot: Autobot) {
      }
  
      /** The teleport destination worth paying for: one that saves a long walk to [target]. */
@@ -113,7 +117,7 @@ index 051a7f4..32a30eb 100644
      }
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-index 8d64c1f..291afd9 100644
+index cdcac74..d28efbb 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 @@ -1,5 +1,6 @@
@@ -123,16 +127,16 @@ index 8d64c1f..291afd9 100644
  import dev.l2j.autobots.Autobot
  import dev.l2j.autobots.AutobotData
  import dev.l2j.autobots.AutobotsManager
-@@ -89,6 +90,7 @@ internal object PopulationManager {
-             }
+@@ -97,6 +98,7 @@ internal object PopulationManager {
              if ((ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
                  GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
+                 SessionPlan.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
 +                RaidLog.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
              }
              val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
              if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
-index b519018..c479913 100644
+index f0b19de..a902e7f 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
 @@ -21,6 +21,8 @@ internal object GroupChat {
@@ -167,29 +171,38 @@ index b519018..c479913 100644
          Intent.Brb -> Line.Wait to null
          Intent.Leaving -> Line.Thanks to null
      }
-@@ -196,4 +205,6 @@ internal class PartyState {
-     var newSpotRequested = false
-     /** Since when the leader waits for the others to come; null while the party is together. */
-     var gatheringSince: Long? = null
+@@ -202,4 +211,6 @@ internal class PartyState {
+     var targetSize = 0
+     /** When a casual party bots formed goes separate ways; null for the others. */
+     var breakUpAt: Long? = null
 +    /** The raid boss the party is going for, see [dev.l2j.autobots.population.raid.RaidPlanner]. */
 +    var raid: dev.l2j.autobots.population.raid.Raid? = null
  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-index dbc8ea6..3fab887 100644
+index 7d78ab7..9fcba35 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-@@ -4,6 +4,7 @@ import dev.l2j.autobots.Autobot
- import dev.l2j.autobots.AutobotData
+@@ -5,6 +5,8 @@ import dev.l2j.autobots.AutobotData
  import dev.l2j.autobots.CoScopes
+ import dev.l2j.autobots.population.SessionPlan
  import dev.l2j.autobots.population.economy.Gear
 +import dev.l2j.autobots.population.economy.Temper
++import dev.l2j.autobots.population.raid.RaidPlanner
  import dev.l2j.autobots.utils.distance
  import kotlinx.coroutines.delay
  import kotlinx.coroutines.launch
-@@ -169,7 +170,12 @@ internal object GroupFinder {
+@@ -153,6 +155,7 @@ internal object GroupFinder {
+             if (fill(leader, leftover, now)) grouped++
+         }
+         leaders.forEach { recruit(it, now) }
++        leaders.forEach { RaidPlanner.fill(it, online.filter { b -> isFree(b) }) }
+         remember(online)
      }
  
-     private fun form(leader: Autobot, members: List<Autobot>) {
+@@ -236,7 +239,12 @@ internal object GroupFinder {
+     }
+ 
+     private fun form(leader: Autobot, members: List<Autobot>, kind: PartyKind) {
 -        val lootRule = if (members.any { Role.of(it.classId) == Role.Spoiler } || Role.of(leader.classId) == Role.Spoiler) LootRule.ITEM_RANDOM_SPOIL else LootRule.ITEM_RANDOM
 +        // The leader sets the loot rule: a gambler keeps what it picks up (raid drops too), the others share at random.
 +        val lootRule = when {
@@ -200,8 +213,36 @@ index dbc8ea6..3fab887 100644
          leader.lootRule = lootRule
          // Whatever each was on its way to, the party goes together now.
          (members + leader).forEach { it.cancelSequence() }
+@@ -267,7 +275,9 @@ internal object GroupFinder {
+         val party = leader.party ?: return
+         val state = PartyPlan.state(party)
+         val breakUpAt = state.breakUpAt
+-        if (breakUpAt != null && now > breakUpAt && party.members.none { it.isInCombat }) {
++        // A party on a raid finishes it before anyone goes their way; it fills itself up for the boss (RaidPlanner.fill).
++        val raiding = RaidPlanner.raidOf(party) != null
++        if (breakUpAt != null && now > breakUpAt && !raiding && party.members.none { it.isInCombat }) {
+             leader.partySay(listOf("ok guys, thx for party", "gtg, ty all", "спасибо за пати, разбегаемся", "всем спасибо, я дальше сам").random())
+             party.disband()
+             smallSince.remove(leader.objectId)
+@@ -283,6 +293,8 @@ internal object GroupFinder {
+                 return
+             }
+         } else smallSince.remove(leader.objectId)
++        // The adaptive size waits until the raid is over: exp and adena on the way to a boss say nothing about a spot.
++        if (raiding) return
+ 
+         when (PartySize.update(party, now)) {
+             PartySize.Change.Shrink -> letGo(party)
+@@ -301,6 +313,7 @@ internal object GroupFinder {
+      */
+     private fun fill(leader: Autobot, lookers: MutableList<Autobot>, now: Long): Boolean {
+         val party = leader.party ?: return false
++        if (RaidPlanner.raidOf(party) != null) return false
+         if (party.membersCount >= PartySize.target(party).coerceAtMost(PartySize.MAX)) return false
+         val state = PartyPlan.state(party)
+         val region = MapRegionData.getInstance().getMapRegion(leader.x, leader.y)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
-index 971ae60..ed00b18 100644
+index 5a501b0..1eb92e9 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
 @@ -6,6 +6,7 @@ import dev.l2j.autobots.behaviors.sequences.WalkToSequence
@@ -222,10 +263,10 @@ index 971ae60..ed00b18 100644
          if (followFar(leader)) return true
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidBehavior.kt
 new file mode 100644
-index 0000000..fddb734
+index 0000000..5a59948
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidBehavior.kt
-@@ -0,0 +1,278 @@
+@@ -0,0 +1,297 @@
 +package dev.l2j.autobots.population.raid
 +
 +import dev.l2j.autobots.Autobot
@@ -259,6 +300,7 @@ index 0000000..fddb734
 +    private const val WAIT_POLITELY_MS = 5 * 60_000L
 +    private const val WAIT_FOR_HELP_MS = 10 * 60_000L
 +    private const val PULL_DELAY_MS = 4000L
++    private const val GATHER_MS = 3 * 60_000L
 +    private const val LOOT_MS = 40_000L
 +    private const val RETREAT_MS = 40_000L
 +    private const val RETREAT_DISTANCE = 2500
@@ -313,6 +355,9 @@ index 0000000..fddb734
 +            return endRaid(party, "not at its place")
 +        }
 +
++        // The boss came for us before we were ready: fight now.
++        if ((boss.target as? Player)?.party in RaidPlanner.allies(party)) return pull(leader, party, raid)
++
 +        val rivals = rivals(boss, party)
 +        if (rivals.isNotEmpty() && !raid.intercept) {
 +            if (Manners.of(leader) == Manners.Rude) {
@@ -339,6 +384,10 @@ index 0000000..fddb734
 +            }
 +        }
 +
++        // Everybody (but one straggler) comes to the boss first; after a few minutes the party goes with who is there.
++        val here = party.members.count { !it.isDead && distance(it, boss) < NEAR_BOSS }
++        // Recruits still on the way get a few minutes too.
++        if (here < party.membersCount - 1 && raid.elapsed() < GATHER_MS) return rest(leader, party) || true
 +        if (rest(leader, party)) return true
 +        return pull(leader, party, raid)
 +    }
@@ -366,16 +415,27 @@ index 0000000..fddb734
 +
 +    private suspend fun fight(bot: Autobot, party: Party, raid: Raid): Boolean {
 +        val boss = RaidBosses.visible(bot, raid.boss)
++        val now = System.currentTimeMillis()
++        if (boss != null) raid.lastSeen = now
 +        if (boss == null) {
 +            if (party.leader !== bot) return false
-+            val dead = bot.getKnownTypeInRadius(RaidBoss::class.java, NEAR_BOSS * 2).any { it.npcId == raid.boss.npcId && it.isDead }
-+            if (dead || raid.elapsed() > LOOK_FOR_BOSS_MS) {
++            // The leader may be away (dead and back in town): the fight goes on while a member still sees the boss.
++            if (party.members.any { !it.isDead && RaidBosses.visible(it, raid.boss) != null }) {
++                raid.lastSeen = now
++                return false
++            }
++            // A kill counts only when the boss really died, not when the party lost sight of it.
++            if (RaidBosses.isDead(raid.boss)) {
 +                RaidBosses.sawKilled(raid.boss)
 +                RaidLog.count(RaidLog.Event.Killed)
 +                bot.partySay(listOf("gg", "гг", "изи", "gg wp").random())
 +                raid.phase = Raid.Phase.Loot
 +                RaidPlanner.allies(party).filter { it !== party }.forEach { RaidPlanner.raidOf(it)?.phase = Raid.Phase.Loot }
 +                RaidLog.note(bot, "${raid.boss.name} is dead")
++            } else if (now - raid.lastSeen > LOOK_FOR_BOSS_MS) {
++                RaidLog.count(RaidLog.Event.Lost)
++                bot.partySay(listOf("lost the rb", "рб ушёл, потеряли", "упустили рб").random())
++                return endRaid(party, "lost it")
 +            }
 +            return true
 +        }
@@ -506,14 +566,15 @@ index 0000000..fddb734
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidBosses.kt b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidBosses.kt
 new file mode 100644
-index 0000000..995f98b
+index 0000000..d0159f5
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidBosses.kt
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,72 @@
 +package dev.l2j.autobots.population.raid
 +
 +import net.sf.l2j.gameserver.data.manager.RaidBossManager
 +import net.sf.l2j.gameserver.data.xml.NpcData
++import net.sf.l2j.gameserver.enums.BossStatus
 +import net.sf.l2j.gameserver.model.actor.Creature
 +import net.sf.l2j.gameserver.model.actor.Player
 +import net.sf.l2j.gameserver.model.actor.instance.Monster
@@ -527,7 +588,7 @@ index 0000000..995f98b
 +    val needsTwoParties get() = hp >= TWO_PARTIES_HP
 +
 +    companion object {
-+        const val TWO_PARTIES_HP = 70_000
++        const val TWO_PARTIES_HP = 150_000
 +    }
 +}
 +
@@ -545,11 +606,16 @@ index 0000000..995f98b
 +
 +    val all: List<BossInfo> by lazy {
 +        NpcData.getInstance().getTemplates { it.isType("RaidBoss") }.mapNotNull { template ->
-+            val spawn = RaidBossManager.getInstance().getBossSpawn(template.npcId)?.spawn ?: return@mapNotNull null
-+            BossInfo(template.npcId, template.name, template.level.toInt(), template.getBaseHpMax(template.level.toInt()).toInt(),
-+                    Location(spawn.locX, spawn.locY, spawn.locZ))
++            val bossSpawn = RaidBossManager.getInstance().getBossSpawn(template.npcId) ?: return@mapNotNull null
++            val spawn = bossSpawn.spawn ?: return@mapNotNull null
++            // Raid bosses get more health than the template says (raid stat multipliers): a live boss tells the real one.
++            val hp = bossSpawn.boss?.maxHp ?: template.getBaseHpMax(template.level.toInt()).toInt()
++            BossInfo(template.npcId, template.name, template.level.toInt(), hp, Location(spawn.locX, spawn.locY, spawn.locZ))
 +        }
 +    }
++
++    /** The core's word that the boss died: checked only by a party that was fighting it and lost sight of it. */
++    fun isDead(boss: BossInfo) = RaidBossManager.getInstance().getStatus(boss.npcId) == BossStatus.DEAD
 +
 +    private val killedAt = ConcurrentHashMap<Int, Long>()
 +    private val emptyAt = ConcurrentHashMap<Int, Long>()
@@ -578,7 +644,7 @@ index 0000000..995f98b
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidLog.kt b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidLog.kt
 new file mode 100644
-index 0000000..698b904
+index 0000000..2f440df
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidLog.kt
 @@ -0,0 +1,29 @@
@@ -592,7 +658,7 @@ index 0000000..698b904
 +
 +/** Raid events in the server log: one line per decision or outcome, and a summary every 10 minutes. */
 +internal object RaidLog {
-+    enum class Event { Planned, Helped, Arrived, Empty, GaveWay, Intercepted, Pvp, Killed, Retreated, Deaths }
++    enum class Event { Planned, Helped, Arrived, Empty, GaveWay, Intercepted, Pvp, Killed, Lost, Retreated, Deaths }
 +
 +    private val counts = ConcurrentHashMap<Event, AtomicInteger>()
 +
@@ -613,10 +679,10 @@ index 0000000..698b904
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidPlanner.kt b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidPlanner.kt
 new file mode 100644
-index 0000000..56ec70c
+index 0000000..93dc1e2
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidPlanner.kt
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,238 @@
 +package dev.l2j.autobots.population.raid
 +
 +import dev.l2j.autobots.Autobot
@@ -665,6 +731,9 @@ index 0000000..56ec70c
 +    var calledBy: Party? = null
 +    var helper: Party? = null
 +    var calledForHelp = false
++    var shouted = false
++    /** When a member last saw the boss during the fight. */
++    var lastSeen = System.currentTimeMillis()
 +
 +    fun elapsed() = System.currentTimeMillis() - phaseSince
 +}
@@ -677,6 +746,7 @@ index 0000000..56ec70c
 + */
 +internal object RaidPlanner {
 +    private const val THINK_EVERY_MS = 5 * 60_000L
++    private const val RETRY_MS = 30_000L
 +    private const val MIN_MEMBERS = 5
 +    private const val FULL_PARTY = 9
 +    private const val MAX_TRIP = 60_000.0
@@ -689,6 +759,8 @@ index 0000000..56ec70c
 +    val enabled get() = settings.groupsEnabled && settings.raidsEnabled
 +
 +    private val nextThink = ConcurrentHashMap<Party, Long>()
++    private val nextFill = ConcurrentHashMap<Party, Long>()
++    private const val FILL_EVERY_MS = 60_000L
 +    /** Open calls for a second party: the calling party's raid and until when the call holds. */
 +    private val calls = ConcurrentHashMap<Party, Pair<Raid, Long>>()
 +
@@ -697,7 +769,10 @@ index 0000000..56ec70c
 +    fun isRaiding(bot: Player): Boolean = raidOf(bot.party)?.let { it.phase != Raid.Phase.Travel } ?: false
 +
 +    /** Where the leader should walk instead of a hunting spot, or null. */
-+    fun destination(bot: Autobot) = raidOf(bot.party)?.takeIf { bot.party.leader === bot && it.phase == Raid.Phase.Travel }?.boss?.location
++    fun destination(bot: Autobot) = raidOf(bot.party)?.takeIf { raid ->
++        bot.party.leader === bot && (raid.phase == Raid.Phase.Travel ||
++                (raid.phase == Raid.Phase.Fight && distance(bot.location(), raid.boss.location) > RaidBehavior.ARRIVE * 2))
++    }?.boss?.location
 +
 +    /** The leader's regular thought; does nothing most of the time. */
 +    fun consider(leader: Autobot) {
@@ -705,8 +780,10 @@ index 0000000..56ec70c
 +        if (!enabled || party.leader !== leader || raidOf(party) != null) return
 +        val now = System.currentTimeMillis()
 +        if (now < (nextThink[party] ?: 0L)) return
-+        nextThink[party] = now + THINK_EVERY_MS
++        // A party not ready yet (still gathering, someone dead) is looked at again soon.
++        nextThink[party] = now + RETRY_MS
 +        if (!ready(party, leader)) return
++        nextThink[party] = now + THINK_EVERY_MS
 +
 +        answerCall(leader, party)?.let { return }
 +
@@ -736,7 +813,6 @@ index 0000000..56ec70c
 +            party.membersCount >= MIN_MEMBERS &&
 +            party.members.any { Role.of(it.classId) == Role.Healer } &&
 +            party.members.none { it.isDead } &&
-+            party.members.all { distance(leader, it) < PartyPlan.RANGE } &&
 +            !leader.isInCombat
 +
 +    /** Bosses this party can take, as far as it knows alive; the closest one, with a bit of chance between the few closest. */
@@ -777,6 +853,37 @@ index 0000000..56ec70c
 +        val high = party.members.maxOf { it.level }
 +        leader.shout(if (Rnd.get(100) < 50) "собираем на рб ${raid.boss.name} (${raid.boss.level}), нужна ещё пати $low-$high, пм"
 +                else "need one more party for rb ${raid.boss.name} lvl ${raid.boss.level}, $low-$high, pm")
++    }
++
++    /**
++     * A party on its way to a boss fills up to a full party: the leader shouts for the raid, and free bots of the
++     * region that fit the boss come along by their sociability (a raid draws more people than a hunt).
++     */
++    fun fill(leader: Autobot, free: List<Autobot>) {
++        val party = leader.party ?: return
++        val raid = raidOf(party) ?: return
++        if (raid.phase != Raid.Phase.Travel && raid.phase != Raid.Phase.Wait) return
++        val now = System.currentTimeMillis()
++        if (party.membersCount >= FULL_PARTY || now < (nextFill[party] ?: 0L)) return
++        nextFill[party] = now + FILL_EVERY_MS
++        if (!raid.shouted) {
++            raid.shouted = true
++            val roles = dev.l2j.autobots.population.group.GroupFinder.needs(party).joinToString(", ") { it.name.lowercase() }
++            leader.shout(if (Rnd.get(100) < 50) "собираем на рб ${raid.boss.name} (${raid.boss.level}), нужны $roles, пм"
++                    else "LF $roles for rb ${raid.boss.name} lvl ${raid.boss.level}, pm")
++        }
++        val region = net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance()
++        val here = region.getMapRegion(leader.x, leader.y)
++        val joining = free.asSequence()
++                .filter { region.getMapRegion(it.x, it.y) == here && it.level <= raid.boss.level + CURSE_GAP && it.level >= raid.boss.level - BELOW_AVERAGE }
++                .filter { Rnd.get(100) < dev.l2j.autobots.population.group.Sociability.of(it).acceptPercent / 2 }
++                .take(FULL_PARTY - party.membersCount).toList()
++        for (bot in joining) {
++            bot.cancelSequence()
++            party.addPartyMember(bot)
++            bot.partySay(listOf("+ on rb", "я с вами на рб", "иду", "+").random())
++        }
++        if (joining.isNotEmpty()) RaidLog.note(leader, "took ${joining.joinToString { it.name }} for ${raid.boss.name}, now ${party.membersCount}")
 +    }
 +
 +    /** Joins another party's call for help when the boss fits this party too. @return the boss, or null. */
