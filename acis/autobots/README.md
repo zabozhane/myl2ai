@@ -73,6 +73,22 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - Every 10 minutes one `Autobots economy summary:` line counts the deals by kind and shows the bots online
     (average and max level, adena, stores, farming, needsGroup). `scripts/economy-report.sh [since]` prints those
     summaries, deal counts with samples, bot errors and the game container's load.
+- `l2autobots-autofarm.patch` - auto hunt for live players (Essence style), applied after the fixes patch.
+  Built on the upstream `autofarm/` stub, which ran the bots' `CombatBehavior` for a `Player` but could not be
+  opened without the GM dashboard. Spec: `docs/autofarm.md`.
+  - `.autofarm` in chat toggles it, `.autofarm on|off|menu`; the line never reaches the chat. On first login
+    every character gets the `AutoHunt` and `AutoHuntSet` macros on the rightmost free slots of the shortcut
+    bar (a memo flag, so a deleted macro is not brought back).
+  - Hunts within the radius (600/1000/1500) around the spot where it was started, walks back when a fight pulls
+    it out; raid bosses off by default. Never attacks players (warns when one attacks), never revives: it stops
+    on death, in town/peace/siege zones, the Olympiad, store mode, on class change, teleport away and logout.
+    Any click, move, skill or attack by hand pauses it for 3 s.
+  - Potions only from the inventory with HP/MP/CP thresholds, sitting to regenerate and loot pick-up can be
+    turned off, any class skill can be disabled. Settings window in the tutorial window, stored per character
+    in `character_autofarm_settings` (JSON); class preferences stay in upstream `character_autofarm`.
+  - Upstream bugs fixed on the way: the busy check used `ConcurrentHashMap.contains` (a value lookup), so ticks
+    overlapped; preferences of every class were read with the active class types; `onEnterWorld` could throw
+    for a class without a behavior.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 
@@ -84,3 +100,5 @@ Review of upstream code: no process execution or hidden network calls; the only 
 
 ## Usage
 GM character (access level 7+), type `//a b` in game: the dashboard creates, spawns and controls bots.
+Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) toggles auto hunt, `AutoHuntSet`
+(`.autofarm menu`) opens its settings.

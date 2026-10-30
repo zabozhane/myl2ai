@@ -1,0 +1,816 @@
+diff --git a/sql/character_autofarm_settings.sql b/sql/character_autofarm_settings.sql
+new file mode 100644
+index 0000000..37f942c
+--- /dev/null
++++ b/sql/character_autofarm_settings.sql
+@@ -0,0 +1,5 @@
++CREATE TABLE IF NOT EXISTS character_autofarm_settings (
++  `obj_Id` INT UNSIGNED NOT NULL DEFAULT 0,
++  `settings` LONGTEXT NULL DEFAULT NULL CHECK (json_valid(`settings`)),
++  PRIMARY KEY (obj_Id)
++);
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 39b5507..c5663e2 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -68,6 +68,8 @@ object AutobotsManager {
+     }
+ 
+     fun onChat(type: Int, chatter: Player, target: String?, text: String, handler : IChatHandler) : Boolean{
++        if(AutofarmCommandHandler.onChat(chatter, text)) return true
++        
+         if(chatter.isGM) {
+             if(chatter.isControllingBot()) {
+                 handler.handleChat(type, chatter.getControllingBot(), target, text)
+@@ -116,6 +118,7 @@ object AutobotsManager {
+     }
+ 
+     fun onMove(player: Player, targetX: Int, targetY: Int, targetZ: Int): Boolean {
++        AutofarmManager.onManualInput(player)
+         if (!player.isGM) return false
+         
+         if(BotZoneService.player == player) {
+@@ -136,6 +139,7 @@ object AutobotsManager {
+     }
+ 
+     fun onUseMagic(player: Player, skillId: Int, ctrlPressed: Boolean) : Boolean {
++        AutofarmManager.onManualInput(player)
+         if (!player.isGM) return false
+         
+         if(player.isControllingBot()) {
+@@ -149,6 +153,7 @@ object AutobotsManager {
+     }
+ 
+     fun onAction(player: Player, target: WorldObject, isShiftPressed: Boolean) : Boolean {
++        AutofarmManager.onManualInput(player)
+         if (!player.isGM) return false
+         
+         if(isShiftPressed) {
+@@ -177,6 +182,7 @@ object AutobotsManager {
+     }
+     
+     fun onAttackRequest(player: Player, target: WorldObject, isShiftPressed: Boolean) : Boolean {
++        AutofarmManager.onManualInput(player)
+         if (!player.isGM) return false
+         
+         if(isShiftPressed) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmCommandHandler.kt b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmCommandHandler.kt
+index bc6c2a0..71540ad 100644
+--- a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmCommandHandler.kt
++++ b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmCommandHandler.kt
+@@ -4,6 +4,24 @@ import dev.l2j.autobots.ui.AutofarmUi
+ import net.sf.l2j.gameserver.model.actor.Player
+ 
+ internal object AutofarmCommandHandler {
++
++    const val TOGGLE_COMMAND = ".autofarm"
++    const val MENU_COMMAND = ".autofarm menu"
++
++    /** Chat commands; true when the line was a command and must not reach the chat. */
++    fun onChat(player: Player, text: String): Boolean {
++        val command = text.trim().lowercase()
++        if (command != TOGGLE_COMMAND && !command.startsWith("$TOGGLE_COMMAND ")) return false
++
++        when (command.removePrefix(TOGGLE_COMMAND).trim()) {
++            "" -> AutofarmManager.toggleFarm(player)
++            "on" -> AutofarmManager.startFarm(player)
++            "off" -> AutofarmManager.stopFarm(player)
++            "menu" -> AutofarmUi.index(player)
++            else -> player.sendMessage("Auto hunt: $TOGGLE_COMMAND toggles, $TOGGLE_COMMAND on|off|menu.")
++        }
++        return true
++    }
+     
+     fun onBypass(player: Player, command: String) {
+         if(!command.startsWith("autofarm")) {
+@@ -16,23 +34,41 @@ internal object AutofarmCommandHandler {
+         }
+         
+         val splitCommand = command.removePrefix("autofarm ").split(" ")
++        val settings = AutofarmManager.getSettings(player)
+         
+         when(splitCommand[0]){
+-            "start" -> {
+-                AutofarmManager.startFarm(player)
+-                AutofarmUi.index(player)
+-            }
+-            "stop" -> {
+-                AutofarmManager.stopFarm(player)
+-                AutofarmUi.index(player)
+-            }
++            "start" -> AutofarmManager.startFarm(player)
++            "stop" -> AutofarmManager.stopFarm(player)
+             "close" -> {
+                 AutofarmUi.closeWindow(player)
++                return
++            }
++            "radius" -> {
++                val radius = splitCommand.getOrNull(1)?.toIntOrNull() ?: return
++                if (radius !in AutofarmSettings.RADIUS_OPTIONS) return
++                settings.radius = radius
++                AutofarmManager.onSettingsChanged(player)
++            }
++            "hp", "mp", "cp" -> {
++                val delta = when (splitCommand.getOrNull(1)) { "up" -> AutofarmSettings.PERCENT_STEP; "down" -> -AutofarmSettings.PERCENT_STEP; else -> return }
++                when (splitCommand[0]) {
++                    "hp" -> settings.hpPotionPercent = (settings.hpPotionPercent + delta).coerceIn(0, 90)
++                    "mp" -> settings.mpPotionPercent = (settings.mpPotionPercent + delta).coerceIn(0, 90)
++                    "cp" -> settings.cpPotionPercent = (settings.cpPotionPercent + delta).coerceIn(0, 90)
++                }
++                AutofarmManager.onSettingsChanged(player)
+             }
+-            "todo" -> {
+-                player.sendMessage("Not implemented yet")
++            "rest" -> { settings.rest = !settings.rest; AutofarmManager.onSettingsChanged(player) }
++            "loot" -> { settings.loot = !settings.loot; AutofarmManager.onSettingsChanged(player) }
++            "raids" -> { settings.attackRaids = !settings.attackRaids; AutofarmManager.onSettingsChanged(player) }
++            "skill" -> {
++                val skillId = splitCommand.getOrNull(1)?.toIntOrNull() ?: return
++                if (!settings.disabledSkills.remove(skillId)) settings.disabledSkills.add(skillId)
++                AutofarmManager.onSettingsChanged(player)
+             }
++            else -> return
+         }
++        AutofarmUi.index(player)
+     }
+     
+-}
+\ No newline at end of file
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmMacros.kt b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmMacros.kt
+new file mode 100644
+index 0000000..d44abf8
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmMacros.kt
+@@ -0,0 +1,58 @@
++package dev.l2j.autobots.autofarm
++
++import net.sf.l2j.gameserver.enums.ShortcutType
++import net.sf.l2j.gameserver.model.Macro
++import net.sf.l2j.gameserver.model.Shortcut
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.network.serverpackets.ShortCutRegister
++
++/**
++ * The Interlude client has no auto hunt button, so every character gets two macros on its shortcut bar once:
++ * one toggles auto hunt, the other opens its settings. A macro the player deletes is not brought back.
++ */
++internal object AutofarmMacros {
++
++    private const val MEMO_KEY = "autofarm_macros"
++    /** Macro command type for a chat line (the client calls it an action: "/attack", text, ".command"). */
++    private const val CMD_TYPE_TEXT = 3
++    private const val MAX_MACROS = 24
++    private const val SHORTCUTS_PER_PAGE = 12
++    private const val SHORTCUT_PAGES = 10
++    private const val CHARACTER_TYPE_PLAYER = 1
++
++    private data class MacroSpec(val name: String, val description: String, val acronym: String, val icon: Int, val command: String)
++
++    private val MACROS = listOf(
++            MacroSpec("AutoHunt", "Auto hunt on/off", "Auto", 1, AutofarmCommandHandler.TOGGLE_COMMAND),
++            MacroSpec("AutoHuntSet", "Auto hunt settings", "Set", 2, AutofarmCommandHandler.MENU_COMMAND)
++    )
++
++    fun ensureOnShortcutBar(player: Player) {
++        if (player.memos.getBool(MEMO_KEY, false)) return
++
++        val macroList = player.macroList
++        if (macroList.macros.size + MACROS.size > MAX_MACROS) {
++            player.sendMessage("Auto hunt: no room for its macros. Type ${AutofarmCommandHandler.TOGGLE_COMMAND} in chat to toggle it.")
++            return
++        }
++
++        // Rightmost free slots of the first bar (F12, F11...), then the next bars.
++        val taken = player.shortcutList.shortcuts.map { it.page * SHORTCUTS_PER_PAGE + it.slot }.toSet()
++        val freeSlots = (0 until SHORTCUT_PAGES).flatMap { page -> (SHORTCUTS_PER_PAGE - 1 downTo 0).map { page * SHORTCUTS_PER_PAGE + it } }
++                .filter { it !in taken }
++
++        MACROS.forEachIndexed { index, spec ->
++            val macro = Macro(0, spec.icon, spec.name, spec.description, spec.acronym,
++                    arrayOf(Macro.MacroCmd(0, CMD_TYPE_TEXT, 0, 0, spec.command)))
++            macroList.registerMacro(macro)
++
++            val slot = freeSlots.getOrNull(index) ?: return@forEachIndexed
++            val shortcut = Shortcut(slot % SHORTCUTS_PER_PAGE, slot / SHORTCUTS_PER_PAGE, ShortcutType.MACRO, macro.id, -1, CHARACTER_TYPE_PLAYER)
++            player.shortcutList.addShortcut(shortcut)
++            player.sendPacket(ShortCutRegister(shortcut))
++        }
++
++        player.memos.set(MEMO_KEY, true)
++        player.sendMessage("Auto hunt: the AutoHunt and AutoHuntSet macros are on your shortcut bar (${AutofarmCommandHandler.TOGGLE_COMMAND} in chat does the same).")
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt
+index 37ce006..341be5f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt
+@@ -2,6 +2,8 @@ package dev.l2j.autobots.autofarm
+ 
+ import com.fasterxml.jackson.databind.DeserializationFeature
+ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
++import com.fasterxml.jackson.module.kotlin.readValue
++import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.CoScopes
+ import dev.l2j.autobots.behaviors.CombatBehavior
+ import dev.l2j.autobots.behaviors.SocialBehavior
+@@ -9,47 +11,64 @@ import dev.l2j.autobots.behaviors.preferences.*
+ import dev.l2j.autobots.behaviors.sequences.Sequence
+ import dev.l2j.autobots.extensions.getCombatBehavior
+ import dev.l2j.autobots.extensions.getCombatBehaviorForClass
+-import dev.l2j.autobots.extensions.getSocialBehavior
+ import dev.l2j.autobots.extensions.isClassSupported
++import dev.l2j.autobots.extensions.useItem
++import dev.l2j.autobots.population.isUnderAttack
+ import dev.l2j.autobots.utils.Klock
++import dev.l2j.autobots.utils.getCpPercentage
++import dev.l2j.autobots.utils.getHealthPercentage
++import dev.l2j.autobots.utils.getManaPercentage
+ import dev.l2j.autobots.utils.supportedCombatPrefs
+ import kotlinx.coroutines.launch
+ import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.enums.IntentionType
+ import net.sf.l2j.gameserver.enums.ZoneId
+ import net.sf.l2j.gameserver.enums.actors.ClassId
++import net.sf.l2j.gameserver.model.WorldObject
++import net.sf.l2j.gameserver.model.actor.Creature
+ import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.location.Location
++import net.sf.l2j.gameserver.network.serverpackets.ExShowScreenMessage
+ import java.util.concurrent.ConcurrentHashMap
++import kotlin.math.hypot
+ 
++/**
++ * Essence-style auto hunt for live players: the bots' combat loop drives the player's own character
++ * inside a circle around the spot where auto hunt was started. Never attacks players, never revives,
++ * pauses while the player acts by hand and stops on death, in peaceful zones and on logout.
++ */
+ object AutofarmManager {
+ 
+     private val mapper = jacksonObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+     
+     private val activePlayers = ConcurrentHashMap<Int, Player>()
+-    internal val combatBehaviors = HashMap<Int, CombatBehavior>()
+-    internal val socialBehaviors = HashMap<Int, SocialBehavior>()
++    internal val combatBehaviors = ConcurrentHashMap<Int, CombatBehavior>()
++    internal val socialBehaviors = ConcurrentHashMap<Int, SocialBehavior>()
+     internal val sequences = HashMap<Int, Sequence?>()
+     private val busyStates = ConcurrentHashMap<Int, Boolean>()
+-    private val combatPreferences = HashMap<Int, HashMap<Int, CombatPreferences>>()
+-    private val skillPreferences = HashMap<Int, HashMap<Int, SkillPreferences?>>()
++    private val combatPreferences = ConcurrentHashMap<Int, HashMap<Int, CombatPreferences>>()
++    private val skillPreferences = ConcurrentHashMap<Int, HashMap<Int, SkillPreferences?>>()
++    private val settings = ConcurrentHashMap<Int, AutofarmSettings>()
++    private val sessions = ConcurrentHashMap<Int, Session>()
++
++    private class Session(val anchor: Location, val classId: Int) {
++        @Volatile var pausedUntil = 0L
++        @Volatile var lastPlayerAttackWarning = 0L
++        val lastPotionUse = ConcurrentHashMap<Int, Long>()
++    }
+ 
+     internal var onUpdateTask =
+             Klock.start("autofarmOnUpdate", 1000, 500, CoScopes.onUpdateScope, action = {
+                 activePlayers.values.forEach {
+                     CoScopes.onUpdateScope.launch {
++                        // putIfAbsent: one think at a time per player, a slow tick is skipped instead of piling up.
++                        if (busyStates.putIfAbsent(it.objectId, true) != null) return@launch
+                         try {
+-                            if(busyStates.contains(it.objectId)) return@launch
+-
+-                            busyStates[it.objectId] = true
+-
+-                            if(it.isInsideZone(ZoneId.TOWN)) {
+-                                it.getSocialBehavior().onUpdate()
+-                            } else {
+-                                it.getCombatBehavior().onUpdate()
+-                            }
+-                            busyStates.remove(it.objectId)
+-                        } catch (e: Exception){
++                            onUpdate(it)
++                        } catch (e: Exception) {
++                            e.printStackTrace()
++                        } finally {
+                             busyStates.remove(it.objectId)
+-                            println(e)
+                         }
+                     }
+                 }
+@@ -58,43 +77,207 @@ object AutofarmManager {
+     fun isAutoFarming(player: Player) : Boolean{
+         return activePlayers.containsKey(player.objectId)
+     }
++
++    fun toggleFarm(player: Player) {
++        if (isAutoFarming(player)) stopFarm(player) else startFarm(player)
++    }
+     
+     @Synchronized
+     fun startFarm(player: Player){
+-        if(!isClassSupported(ClassId.values().first { it.id == player.activeClass})) {
+-            player.sendMessage("Autofarm doesn't support your class")
++        if (player is Autobot) return
++        
++        val classId = ClassId.values().firstOrNull { it.id == player.activeClass }
++        if(classId == null || !isClassSupported(classId)) {
++            player.sendMessage("Auto hunt doesn't support your class.")
+             return
+         }
+         
+         if(activePlayers.containsKey(player.objectId)) {
+-            player.sendMessage("Autofarm is already enabled")
++            player.sendMessage("Auto hunt is already on.")
++            return
++        }
++
++        val forbidden = forbiddenReason(player)
++        if (forbidden != null) {
++            player.sendMessage("Auto hunt can't start: $forbidden.")
+             return
+         }
+ 
+         val behavior = getBehaviorForActiveClass(player)
++        val playerSettings = getSettings(player)
++        // A live player's character never starts PvP, whatever was saved for the class.
++        behavior.combatPreferences.attackPlayerType = AttackPlayerType.None
++        behavior.combatPreferences.targetingPreference = TargetingPreference.Closest
++        behavior.combatPreferences.targetingRadius = playerSettings.radius
+ 
+-        activePlayers[player.objectId] = player
++        sessions[player.objectId] = Session(Location(player.x, player.y, player.z), player.activeClass)
+         combatBehaviors[player.objectId] = behavior
+         socialBehaviors[player.objectId] = SocialBehavior(player, SocialPreferences(TownAction.None))
++        activePlayers[player.objectId] = player
+         
+-        player.sendMessage("Autofarm activated")
++        player.sendMessage("Auto hunt is on: hunting within ${playerSettings.radius} of this spot.")
++        player.sendPacket(ExShowScreenMessage("Auto hunt: ON", 2000))
+     }
+     
+     @Synchronized
+-    fun stopFarm(player: Player){
++    fun stopFarm(player: Player, reason: String? = null){
+         if(!activePlayers.containsKey(player.objectId)) {
+-            player.sendMessage("Autofarm is not enabled")
++            if (reason == null) player.sendMessage("Auto hunt is not on.")
+             return
+         }
+ 
+         cleanUpStates(player)
+-        player.sendMessage("Autofarm deactivated")
++        if (!player.isDead && player.ai.desire.intention == IntentionType.ATTACK) {
++            player.ai.setIntention(IntentionType.ACTIVE)
++        }
++        player.sendMessage(if (reason != null) "Auto hunt is off: $reason." else "Auto hunt is off.")
++        player.sendPacket(ExShowScreenMessage("Auto hunt: OFF", 2000))
++    }
++
++    /** A click, move, skill or attack by the player's own hand: auto hunt waits instead of fighting the player for control. */
++    internal fun onManualInput(player: Player) {
++        val session = sessions[player.objectId] ?: return
++        session.pausedUntil = System.currentTimeMillis() + MANUAL_INPUT_PAUSE_MS
++    }
++
++    private suspend fun onUpdate(player: Player) {
++        val session = sessions[player.objectId] ?: return
++
++        if (player.isDead) {
++            stopFarm(player, "you died")
++            return
++        }
++        
++        val forbidden = forbiddenReason(player)
++        if (forbidden != null) {
++            stopFarm(player, forbidden)
++            return
++        }
++
++        if (player.activeClass != session.classId) {
++            stopFarm(player, "your class changed")
++            return
++        }
++        
++        if (distance2d(player, session.anchor) > LEFT_AREA_DISTANCE) {
++            stopFarm(player, "you left the hunting area")
++            return
++        }
++
++        if (player.isTeleporting || System.currentTimeMillis() < session.pausedUntil) return
++
++        warnAboutAttackingPlayers(player, session)
++        usePotions(player, session)
++
++        if (returnToHuntingArea(player, session)) return
++
++        player.getCombatBehavior().onUpdate()
++    }
++
++    /** Why auto hunt can't run where the player is now, or null when it can. */
++    private fun forbiddenReason(player: Player): String? = when {
++        player.isDead -> "you are dead"
++        player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE) -> "not in a peaceful zone"
++        player.isInsideZone(ZoneId.SIEGE) -> "not in a siege zone"
++        player.isInOlympiadMode -> "not in the Olympiad"
++        player.isInObserverMode -> "not in observer mode"
++        player.isInStoreMode || player.activeTradeList != null -> "not while trading"
++        player.isMounted -> "not while mounted"
++        else -> null
++    }
++
++    /** Walks back once the character got drawn out of the circle, unless something is still hitting it. */
++    private fun returnToHuntingArea(player: Player, session: Session): Boolean {
++        val radius = getSettings(player).radius
++        if (distance2d(player, session.anchor) <= radius + RETURN_MARGIN || player.isUnderAttack()) return false
++
++        val behavior = player.getCombatBehavior()
++        behavior.committedTarget = null
++        behavior.isMovingTowardsTarget = false
++        player.target = null
++        if (player.isSitting) player.standUp()
++        if (player.ai.desire.intention != IntentionType.MOVE_TO) {
++            player.ai.setIntention(IntentionType.MOVE_TO, session.anchor)
++        }
++        return true
++    }
++
++    private fun warnAboutAttackingPlayers(player: Player, session: Session) {
++        val now = System.currentTimeMillis()
++        if (now - session.lastPlayerAttackWarning < PLAYER_ATTACK_WARNING_INTERVAL_MS) return
++        
++        val attacker = player.getKnownTypeInRadius(Player::class.java, PLAYER_ATTACK_WARNING_RADIUS)
++                .firstOrNull { !it.isDead && it.target === player && (it.isAttackingNow || it.isCastingNow) } ?: return
++        session.lastPlayerAttackWarning = now
++        player.sendMessage("Player ${attacker.name} is attacking you. Auto hunt never fights players.")
++        player.sendPacket(ExShowScreenMessage("${attacker.name} is attacking you!", 3000))
+     }
++
++    /** Potions from the player's own inventory, the best owned one first; a heal over time is not stacked. */
++    private fun usePotions(player: Player, session: Session) {
++        val s = getSettings(player)
++        val now = System.currentTimeMillis()
++
++        fun tryUse(group: Int, itemIds: List<Int>, cooldownMs: Long = POTION_COOLDOWN_MS) {
++            if (now - session.lastPotionUse.getOrDefault(group, 0L) < cooldownMs) return
++            val itemId = itemIds.firstOrNull { player.inventory.getItemByItemId(it) != null } ?: return
++            session.lastPotionUse[group] = now
++            player.useItem(itemId)
++        }
++
++        if (player.getHealthPercentage() < s.hpPotionPercent) {
++            if (player.getHealthPercentage() < s.hpPotionPercent / 2.0) tryUse(GROUP_QUICK_HP, listOf(QUICK_HEALING_POTION))
++            if (HEAL_OVER_TIME_EFFECTS.none { player.getFirstEffect(it) != null }) tryUse(GROUP_HP, HEALING_POTIONS)
++        }
++        if (player.getManaPercentage() < s.mpPotionPercent) tryUse(GROUP_MP, MANA_POTIONS)
++        if (player.getCpPercentage() < s.cpPotionPercent) tryUse(GROUP_CP, CP_POTIONS)
++    }
++
++    // Hooks for CombatBehavior; a population bot is never in the maps, so they keep their bot defaults.
++    internal fun isInHuntingArea(player: Player, target: WorldObject): Boolean {
++        val session = sessions[player.objectId] ?: return true
++        val s = getSettings(player)
++        if (!s.attackRaids && target is Creature && target.isRaidRelated) return false
++        return distance2d(target, session.anchor) <= s.radius
++    }
++
++    internal fun allowsRest(player: Player) = !sessions.containsKey(player.objectId) || getSettings(player).rest
++
++    internal fun allowsLoot(player: Player) = !sessions.containsKey(player.objectId) || getSettings(player).loot
++
++    internal fun isSkillDisabled(player: Player, skillId: Int) =
++            sessions.containsKey(player.objectId) && getSettings(player).disabledSkills.contains(skillId)
++
++    internal fun usesOwnPotions(player: Player) = player !is Autobot && sessions.containsKey(player.objectId)
++
++    internal fun getSettings(player: Player): AutofarmSettings = settings.getOrPut(player.objectId) { AutofarmSettings() }
++
++    /** Applies a changed setting to a running session and saves it. */
++    internal fun onSettingsChanged(player: Player) {
++        combatBehaviors[player.objectId]?.combatPreferences?.targetingRadius = getSettings(player).radius
++        saveSettings(player)
++    }
++
++    /** Skills of the class behavior the player owns, for the settings window. */
++    internal fun getConfigurableSkillIds(player: Player): List<Int> =
++            (combatBehaviors[player.objectId] ?: runCatching { getBehaviorForActiveClass(player) }.getOrNull())
++                    ?.getUsableSkillIds() ?: emptyList()
+     
+     @Synchronized
+     internal fun onEnterWorld(player: Player) {
+-        val playerPreferencesDto = restorePreferences(player)
++        if (player is Autobot) return
++        
++        try {
++            restoreSettings(player)
++            restoreClassPreferences(player)
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++        AutofarmMacros.ensureOnShortcutBar(player)
++    }
+ 
++    private fun restoreClassPreferences(player: Player) {
++        val playerPreferencesDto = restorePreferences(player)
+         val isInit = playerPreferencesDto.isEmpty()
+         
+         combatPreferences[player.objectId] = hashMapOf()
+@@ -105,7 +288,8 @@ object AutofarmManager {
+             skillPreferences[it.playerId]!![it.classId] = it.skillPreferences
+         }
+         
+-        if(isInit) {
++        val classId = ClassId.values().firstOrNull { it.id == player.activeClass }
++        if(isInit && classId != null && isClassSupported(classId)) {
+             getBehaviorForActiveClass(player)
+             savePreferences(player)
+         }
+@@ -139,13 +323,42 @@ object AutofarmManager {
+         }
+     }
+ 
++    private fun saveSettings(player: Player) {
++        val json = mapper.writeValueAsString(getSettings(player))
++        L2DatabaseFactory.getInstance().connection.use { con ->
++            con.prepareStatement("INSERT INTO character_autofarm_settings(obj_Id, settings) VALUES (?,?) ON DUPLICATE KEY UPDATE settings=?").use { ps ->
++                ps.setInt(1, player.objectId)
++                ps.setString(2, json)
++                ps.setString(3, json)
++                ps.execute()
++            }
++        }
++    }
++
++    private fun restoreSettings(player: Player) {
++        L2DatabaseFactory.getInstance().connection.use { con ->
++            con.prepareStatement("SELECT settings FROM character_autofarm_settings WHERE obj_Id=?").use { ps ->
++                ps.setInt(1, player.objectId)
++                ps.executeQuery().use { rs ->
++                    val json = if (rs.next()) rs.getString("settings") else null
++                    settings[player.objectId] = if (json.isNullOrEmpty()) AutofarmSettings() else mapper.readValue(json)
++                }
++            }
++        }
++    }
++
+     internal fun onLogout(player: Player) {
+-        savePreferences(player)
+-        cleanUpStates(player, true)
++        if (player is Autobot) return
++        try {
++            if (combatPreferences.containsKey(player.objectId)) savePreferences(player)
++        } finally {
++            cleanUpStates(player, true)
++        }
+     }
+     
+     private fun cleanUpStates(player: Player, includeBehaviors: Boolean = false){
+         activePlayers.remove(player.objectId)
++        sessions.remove(player.objectId)
+         combatBehaviors.remove(player.objectId)
+         socialBehaviors.remove(player.objectId)
+         sequences.remove(player.objectId)
+@@ -153,6 +366,7 @@ object AutofarmManager {
+         if(includeBehaviors) {
+             combatPreferences.remove(player.objectId)
+             skillPreferences.remove(player.objectId)
++            settings.remove(player.objectId)
+         }
+     }
+     
+@@ -166,12 +380,16 @@ object AutofarmManager {
+                     while(rs.next()) {
+                         val playerId = rs.getInt("obj_Id")
+                         val classId = rs.getInt("classId")
++                        // Preferences are typed per class; only the active class can be read with its behavior's types.
++                        if (classId != player.activeClass) continue
++                        val activeClassId = ClassId.values().firstOrNull { it.id == classId } ?: continue
++                        if (!isClassSupported(activeClassId)) continue
+                         
+                         val jsonCombatPrefs = rs.getString("combat_prefs")
+                         val combatPrefs = if(jsonCombatPrefs.isNullOrEmpty()) {
+-                            supportedCombatPrefs[ClassId.values().first { it.id == player.activeClass}]!!.invoke()
++                            supportedCombatPrefs[activeClassId]!!.invoke()
+                         }else {
+-                            mapper.readValue(jsonCombatPrefs, supportedCombatPrefs.getOrDefault(ClassId.values().first { it.id == player.activeClass}) { DefaultCombatPreferences() }.invoke().javaClass)
++                            mapper.readValue(jsonCombatPrefs, supportedCombatPrefs.getOrDefault(activeClassId) { DefaultCombatPreferences() }.invoke().javaClass)
+                         }
+ 
+                         val jsonSkillPrefs = rs.getString("skill_prefs")
+@@ -210,5 +428,29 @@ object AutofarmManager {
+         return behavior
+     }
+ 
++    private fun distance2d(obj: WorldObject, loc: Location) = hypot((obj.x - loc.x).toDouble(), (obj.y - loc.y).toDouble())
++
+     private data class PlayerPreferencesDto(val playerId: Int, val classId: Int, val combatPreferences: CombatPreferences, val skillPreferences: SkillPreferences?)
+-}
+\ No newline at end of file
++
++    private const val MANUAL_INPUT_PAUSE_MS = 3000L
++    /** How far past the circle the character may be pulled by a fight before it walks back. */
++    private const val RETURN_MARGIN = 200
++    /** Farther than this from the start spot the player has gone elsewhere (teleport, scroll), so auto hunt ends. */
++    private const val LEFT_AREA_DISTANCE = 4000
++    private const val PLAYER_ATTACK_WARNING_INTERVAL_MS = 30_000L
++    private const val PLAYER_ATTACK_WARNING_RADIUS = 1200
++    private const val POTION_COOLDOWN_MS = 2000L
++
++    private const val GROUP_QUICK_HP = 0
++    private const val GROUP_HP = 1
++    private const val GROUP_MP = 2
++    private const val GROUP_CP = 3
++    private const val QUICK_HEALING_POTION = 1540
++    /** Greater Healing, Healing, Lesser Healing potions and their heal over time effects. */
++    private val HEALING_POTIONS = listOf(1539, 1061, 1060)
++    private val HEAL_OVER_TIME_EFFECTS = listOf(2037, 2032, 2031)
++    /** Mana Potion, Mana Drug. */
++    private val MANA_POTIONS = listOf(728, 726)
++    /** Greater CP, CP potions. */
++    private val CP_POTIONS = listOf(5592, 5591)
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmSettings.kt b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmSettings.kt
+new file mode 100644
+index 0000000..c9723ca
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmSettings.kt
+@@ -0,0 +1,22 @@
++package dev.l2j.autobots.autofarm
++
++import com.fasterxml.jackson.annotation.JsonProperty
++
++/** Per character auto hunt settings, shared by all classes of the character. */
++internal data class AutofarmSettings(
++        /** Hunting area radius around the spot where auto hunt was started; also the target search radius. */
++        @JsonProperty("radius") var radius: Int = 1000,
++        @JsonProperty("hpPotionPercent") var hpPotionPercent: Int = 50,
++        @JsonProperty("mpPotionPercent") var mpPotionPercent: Int = 30,
++        @JsonProperty("cpPotionPercent") var cpPotionPercent: Int = 70,
++        /** Sit down to regenerate between fights. */
++        @JsonProperty("rest") var rest: Boolean = true,
++        @JsonProperty("loot") var loot: Boolean = true,
++        @JsonProperty("attackRaids") var attackRaids: Boolean = false,
++        @JsonProperty("disabledSkills") var disabledSkills: MutableSet<Int> = mutableSetOf()
++) {
++    companion object {
++        val RADIUS_OPTIONS = listOf(600, 1000, 1500)
++        const val PERCENT_STEP = 10
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index c7ac93f..54893b9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -1,6 +1,7 @@
+ package dev.l2j.autobots.behaviors
+ 
+ import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.autofarm.AutofarmManager
+ import dev.l2j.autobots.behaviors.attributes.*
+ import dev.l2j.autobots.behaviors.preferences.*
+ import dev.l2j.autobots.extensions.*
+@@ -40,14 +41,15 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+     
+     internal suspend fun onUpdate() {
+         if(player.isDead) {
+-            handleDeath()
++            // A live player on auto hunt decides about the revive; AutofarmManager stops it.
++            if(player is Autobot) handleDeath()
+             return
+         }
+         
+         ensureSummonPet()        
+         handleShots()
+-        if(rester.onUpdate()) return
+-        if(lootPicker.onUpdate()) return
++        if(AutofarmManager.allowsRest(player) && rester.onUpdate()) return
++        if(AutofarmManager.allowsLoot(player) && lootPicker.onUpdate()) return
+         targetAppropriateTarget()
+         checkSelfSupportingSkills()
+         beforeAttack()
+@@ -111,7 +113,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+             handleMiscItems(player)
+         }
+         
+-        handleConsumables(player)
++        // A player on auto hunt drinks by its own thresholds in AutofarmManager.
++        if(!AutofarmManager.usesOwnPotions(player)) handleConsumables(player)
+         
+         if(this is Kiter) {
+             kite(this.player)
+@@ -157,6 +160,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+ 
+         var skillToUse: L2Skill? = null
+         for(botSkill in getOffensiveSkills) {
++            if(AutofarmManager.isSkillDisabled(player, botSkill.skillId)) continue
+             val skill = player.getSkill(botSkill.skillId) ?: continue
+ 
+             if(!player.checkDoCastConditions(skill))
+@@ -172,11 +176,16 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         
+         return skillToUse
+     }
++
++    /** Offensive and self support skills of this behavior that the player has. */
++    internal fun getUsableSkillIds(): List<Int> =
++            (getOffensiveSkills + getSelfSupportSkills).map { it.skillId }.distinct().filter { player.getSkill(it) != null }
+     
+     protected fun checkSelfSupportingSkills(){
+         if(getSelfSupportSkills.isEmpty()) return
+         
+         for (supportSkill in getSelfSupportSkills) {
++            if(AutofarmManager.isSkillDisabled(player, supportSkill.skillId)) continue
+             val skill = player.getSkill(supportSkill.skillId) ?: continue
+             
+             if(skill.isToggle && supportSkill.isTogglableSkill && 
+@@ -287,9 +296,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+     private fun targetAppropriateCreatureByTypeInRadius(radius: Int, targetingPreference: TargetingPreference) { // TODO alive only?
+         
+         val targets: MutableList<Creature> = when(targetingPreference) {
+-            TargetingPreference.Random -> player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) }.toMutableList()
++            TargetingPreference.Random -> player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) && AutofarmManager.isInHuntingArea(player, it) }.toMutableList()
+             TargetingPreference.Closest -> {
+-                val target = player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) }.minByOrNull { distance(player, it) }
++                val target = player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) && AutofarmManager.isInHuntingArea(player, it) }.minByOrNull { distance(player, it) }
+                 if(target != null) mutableListOf(target) else mutableListOf()
+             }
+         }
+diff --git a/src/main/kotlin/dev/l2j/autobots/ui/AutofarmUi.kt b/src/main/kotlin/dev/l2j/autobots/ui/AutofarmUi.kt
+index 72138c0..76d9cdb 100644
+--- a/src/main/kotlin/dev/l2j/autobots/ui/AutofarmUi.kt
++++ b/src/main/kotlin/dev/l2j/autobots/ui/AutofarmUi.kt
+@@ -1,28 +1,62 @@
+ package dev.l2j.autobots.ui
+ 
+-import dev.l2j.autobots.AutobotsNameService
+ import dev.l2j.autobots.autofarm.AutofarmManager
++import dev.l2j.autobots.autofarm.AutofarmSettings
+ import net.sf.l2j.gameserver.model.actor.Player
+ import net.sf.l2j.gameserver.network.serverpackets.TutorialCloseHtml
+ import net.sf.l2j.gameserver.network.serverpackets.TutorialShowHtml
+ 
++/** Auto hunt window: on/off and the settings, in the tutorial window so it stays open while the character fights. */
+ internal object AutofarmUi {
+ 
+-    private fun readFileText(fileName: String) = AutobotsNameService.javaClass.classLoader.getResource(fileName)!!.readText()
+-    
+     fun index(player: Player) {
+-        val html = readFileText("views/autofarm_main.htv")
+-                .replace("{{startstopcmd}}", if(AutofarmManager.isAutoFarming(player)) "stop" else "start")
+-                .replace("{{startstoptext}}", if(AutofarmManager.isAutoFarming(player)) "Stop" else "Start")
+-                .replace("{{closebtn}}", if(AutofarmManager.isAutoFarming(player)) "" else "<button action=\"bypass autofarm close\" value=\"Close\" width=74 height=21 back=\"L2UI_ch3.Btn1_normalOn\" fore=\"L2UI_ch3.Btn1_normal\"><br>")
+-        sendQuestWindow(player, html)
++        val s = AutofarmManager.getSettings(player)
++        val isOn = AutofarmManager.isAutoFarming(player)
++        val html = StringBuilder()
++        html.append("<html><body><center><font color=\"LEVEL\">Auto Hunt</font><br>")
++        html.append("Status: ").append(if (isOn) "<font color=\"00FF00\">ON</font>" else "<font color=\"FF0000\">OFF</font>").append("<br>")
++        html.append(button(if (isOn) "Stop" else "Start", if (isOn) "stop" else "start")).append("</center><br>")
++
++        html.append("<table width=260>")
++        html.append("<tr><td width=100>Radius: ${s.radius}</td>")
++        AutofarmSettings.RADIUS_OPTIONS.forEach { html.append("<td width=50>").append(link(it.toString(), "radius $it")).append("</td>") }
++        html.append("</tr></table><br>")
++
++        html.append("<table width=260>")
++        html.append(percentRow("HP potion below", s.hpPotionPercent, "hp"))
++        html.append(percentRow("MP potion below", s.mpPotionPercent, "mp"))
++        html.append(percentRow("CP potion below", s.cpPotionPercent, "cp"))
++        html.append(toggleRow("Sit to regenerate", s.rest, "rest"))
++        html.append(toggleRow("Pick up drop", s.loot, "loot"))
++        html.append(toggleRow("Attack raid bosses", s.attackRaids, "raids"))
++        html.append("</table><br>")
++
++        val skillIds = AutofarmManager.getConfigurableSkillIds(player)
++        if (skillIds.isNotEmpty()) {
++            html.append("<font color=\"LEVEL\">Skills</font><br><table width=260>")
++            skillIds.forEach { id ->
++                val skill = player.getSkill(id) ?: return@forEach
++                html.append(toggleRow(skill.name, id !in s.disabledSkills, "skill $id"))
++            }
++            html.append("</table><br>")
++        }
++
++        html.append("<center>").append(button("Close", "close")).append("</center></body></html>")
++        player.sendPacket(TutorialShowHtml(html.toString()))
+     }
+     
+     fun closeWindow(player: Player){
+         player.sendPacket(TutorialCloseHtml.STATIC_PACKET)
+     }
+-    
+-    private fun sendQuestWindow(player: Player, text: String){
+-        player.sendPacket(TutorialShowHtml(text))
+-    }
+-}
+\ No newline at end of file
++
++    private fun percentRow(label: String, value: Int, command: String) =
++            "<tr><td width=150>$label</td><td width=40>$value%</td><td width=35>${link("-", "$command down")}</td><td width=35>${link("+", "$command up")}</td></tr>"
++
++    private fun toggleRow(label: String, enabled: Boolean, command: String) =
++            "<tr><td width=150>$label</td><td width=40>${if (enabled) "<font color=\"00FF00\">ON</font>" else "<font color=\"808080\">OFF</font>"}</td><td width=70>${link(if (enabled) "turn off" else "turn on", command)}</td></tr>"
++
++    private fun link(text: String, command: String) = "<a action=\"bypass autofarm $command\">$text</a>"
++
++    private fun button(text: String, command: String) =
++            "<button action=\"bypass autofarm $command\" value=\"$text\" width=74 height=21 back=\"L2UI_ch3.Btn1_normalOn\" fore=\"L2UI_ch3.Btn1_normal\">"
++}
