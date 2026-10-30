@@ -3293,10 +3293,10 @@ index 0000000..95c8a2c
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
 new file mode 100644
-index 0000000..b519018
+index 0000000..95d3eac
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,203 @@
 +package dev.l2j.autobots.population.group
 +
 +import dev.l2j.autobots.Autobot
@@ -3495,13 +3495,17 @@ index 0000000..b519018
 +    var newSpotRequested = false
 +    /** Since when the leader waits for the others to come; null while the party is together. */
 +    var gatheringSince: Long? = null
++    /** Full or casual; a party a player put together counts as casual. */
++    var kind = PartyKind.Casual
++    /** When a casual party bots formed goes separate ways; null for the others. */
++    var breakUpAt: Long? = null
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
 new file mode 100644
-index 0000000..dbc8ea6
+index 0000000..df4b036
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-@@ -0,0 +1,277 @@
+@@ -0,0 +1,345 @@
 +package dev.l2j.autobots.population.group
 +
 +import dev.l2j.autobots.Autobot
@@ -3522,16 +3526,21 @@ index 0000000..dbc8ea6
 +/**
 + * Bots gathering parties on their own, every 30 seconds. A bot looks for a group when it keeps dying (needsGroup),
 + * or because it likes company: team players in most sessions from `groupFinderMinLevel`, regular ones now and then, loners only
-+ * when they must. Lookers of one map region and close levels team up behind the most sociable of them; the party
-+ * wants a healer from level 25 and settles for damage dealers after a few minutes without one. A bot-led party
-+ * with free places shouts for members and answers players looking for a group, inviting the ones it can use.
++ * when they must. Lookers of one map region and close levels team up behind the most sociable of them.
++ *
++ * Two kinds of parties come out of it. From level [FULL_FROM_LEVEL] some bots (mostly team players) gather a full party:
++ * a tank and a healer at least, a buffer and a spoiler when there are any, damage dealers up to [PartyKind.Full]'s size.
++ * Such a bot waits [WAIT_FOR_FULL_MS] for the roles to turn up and then settles for a casual party: whoever is around,
++ * any professions, which hunts for an hour or so and goes separate ways. A bot-led party with free places shouts for
++ * members and answers players looking for a group, inviting the ones it can use.
 + */
 +internal object GroupFinder {
-+    private const val HEALER_FROM_LEVEL = 25
++    const val FULL_FROM_LEVEL = 20
 +    private const val MAX_LEVEL_SPREAD = 5
 +    private const val MIN_SIZE = 3
-+    private const val WANTED_SIZE = 5
-+    private const val WAIT_FOR_HEALER_MS = 5 * 60_000L
++    private const val WAIT_FOR_FULL_MS = 10 * 60_000L
++    private const val CASUAL_MIN_MS = 30 * 60_000L
++    private const val CASUAL_MAX_MS = 90 * 60_000L
 +    private const val SHOUT_MIN_MS = 3 * 60_000L
 +    private const val SHOUT_MAX_MS = 5 * 60_000L
 +    private const val PLAYER_INVITE_EXPIRY_MS = 60_000L
@@ -3539,6 +3548,8 @@ index 0000000..dbc8ea6
 +
 +    /** Bots looking for a group: object id -> since when. */
 +    private val looking = ConcurrentHashMap<Int, Long>()
++    /** Lookers who would rather gather a full party, see [wantsFull]. */
++    private val fullSeekers: MutableSet<Int> = ConcurrentHashMap.newKeySet()
 +    /** Leaders' next shout and their pending invite to a player (the place is held for them meanwhile). */
 +    private val nextShout = ConcurrentHashMap<Int, Long>()
 +    private val pendingPlayer = ConcurrentHashMap<Int, Pair<Int, Long>>()
@@ -3558,18 +3569,35 @@ index 0000000..dbc8ea6
 +            Sociability.Regular -> 25
 +            Sociability.Loner -> 0
 +        }
-+        if (Rnd.get(100) < percent) looking[bot.objectId] = System.currentTimeMillis()
++        if (Rnd.get(100) < percent) startLooking(bot)
 +    }
 +
 +    /** A bot that keeps dying, or whose spot is too hard, wants a group before it falls back to farming. */
 +    fun wantGroup(bot: Autobot) {
-+        if (enabled && bot.level >= settings.groupFinderMinLevel && !bot.isInParty) looking.putIfAbsent(bot.objectId, System.currentTimeMillis())
++        if (enabled && bot.level >= settings.groupFinderMinLevel && !bot.isInParty && !looking.containsKey(bot.objectId)) startLooking(bot)
 +    }
++
++    /** From [FULL_FROM_LEVEL] a bot may set out to gather a full party: most team players, some regular ones. */
++    private fun startLooking(bot: Autobot) {
++        looking[bot.objectId] = System.currentTimeMillis()
++        val fullPercent = when (Sociability.of(bot)) {
++            Sociability.TeamPlayer -> 70
++            Sociability.Regular -> 30
++            Sociability.Loner -> 10
++        }
++        if (bot.level >= FULL_FROM_LEVEL && Rnd.get(100) < fullPercent) fullSeekers += bot.objectId else fullSeekers -= bot.objectId
++    }
++
++    private fun wantsFull(bot: Autobot) = bot.objectId in fullSeekers && bot.level >= FULL_FROM_LEVEL
++
++    /** Still holding out for a full party; a casual one won't do yet. */
++    private fun waitsForFull(bot: Autobot, now: Long) = wantsFull(bot) && now - (looking[bot.objectId] ?: now) < WAIT_FOR_FULL_MS
 +
 +    fun isLooking(bot: Autobot) = looking.containsKey(bot.objectId)
 +
 +    fun forget(bot: Player) {
 +        looking.remove(bot.objectId)
++        fullSeekers.remove(bot.objectId)
 +        nextShout.remove(bot.objectId)
 +        pendingPlayer.remove(bot.objectId)
 +        smallSince.remove(bot.objectId)
@@ -3591,15 +3619,28 @@ index 0000000..dbc8ea6
 +
 +        val lookers = online.filter { looking.containsKey(it.objectId) && isFree(it) }
 +        // Already in a party: nobody to look for any more.
-+        online.filter { it.isInParty }.forEach { looking.remove(it.objectId) }
++        online.filter { it.isInParty }.forEach {
++            looking.remove(it.objectId)
++            fullSeekers.remove(it.objectId)
++        }
 +
 +        for ((_, regionLookers) in lookers.groupBy { MapRegionData.getInstance().getMapRegion(it.x, it.y) }) {
 +            val pool = regionLookers.sortedWith(compareByDescending<Autobot> { Sociability.of(it).ordinal }.thenByDescending { it.level }).toMutableList()
-+            while (pool.size >= MIN_SIZE && grouped < cap) {
-+                val leader = pool.removeAt(0)
-+                val members = compose(leader, pool, now) ?: continue
++            // Full parties first: they need particular people, a casual party takes whoever is left.
++            for (leader in pool.filter { wantsFull(it) }) {
++                if (leader !in pool || grouped >= cap) continue
++                val members = composeFull(leader, pool.filter { it !== leader }) ?: continue
++                pool.remove(leader)
 +                pool.removeAll(members)
-+                form(leader, members)
++                form(leader, members, PartyKind.Full)
++                grouped += members.size + 1
++            }
++            val casual = pool.filter { !waitsForFull(it, now) }.toMutableList()
++            while (casual.size >= MIN_SIZE && grouped < cap) {
++                val leader = casual.removeAt(0)
++                val members = composeCasual(leader, casual) ?: continue
++                casual.removeAll(members)
++                form(leader, members, PartyKind.Casual)
 +                grouped += members.size + 1
 +            }
 +        }
@@ -3627,7 +3668,7 @@ index 0000000..dbc8ea6
 +        wipes = 0
 +        for (party in parties) {
 +            val leader = party.leader
-+            println("  party ${leader.name} lv ${leader.level}: " + party.members.filter { it !== leader }.joinToString {
++            println("  ${PartyPlan.state(party).kind.name.lowercase()} party ${leader.name} lv ${leader.level}: " + party.members.filter { it !== leader }.joinToString {
 +                "${it.name} ${Role.of(it.classId)} ${distance(leader, it).toInt()}${if (it.isDead) " dead" else ""} ${(it as? Autobot)?.activeSequence?.javaClass?.simpleName ?: it.ai.desire.intention}"
 +            } + " | leader ${(leader as? Autobot)?.activeSequence?.javaClass?.simpleName ?: leader.ai.desire.intention}" + if (leader.isDead) " (leader dead)" else "")
 +        }
@@ -3654,25 +3695,38 @@ index 0000000..dbc8ea6
 +
 +    private fun isFree(bot: Autobot) = !bot.isInParty && !bot.isDead && !bot.isInStoreMode && bot.life != null && bot.controller == null
 +
-+    /** Picks members around the leader's level: a healer first when the level asks for one, then the others. */
-+    private fun compose(leader: Autobot, pool: List<Autobot>, now: Long): List<Autobot>? {
-+        val fit = pool.filter { kotlin.math.abs(it.level - leader.level) <= MAX_LEVEL_SPREAD && Relations.affinity(leader, it) > Relations.AVOID }
-+                .sortedByDescending { Relations.affinity(leader, it) }
++    /** Lookers around the leader's level it doesn't avoid, the ones it likes best first. */
++    private fun fitting(leader: Autobot, pool: List<Autobot>) =
++            pool.filter { kotlin.math.abs(it.level - leader.level) <= MAX_LEVEL_SPREAD && Relations.affinity(leader, it) > Relations.AVOID }
++                    .sortedByDescending { Relations.affinity(leader, it) }
++
++    /**
++     * A full party: a tank and a healer or nothing, then a buffer and a spoiler if any are around (before the second
++     * profession only orc shamans buff), then damage dealers. The leader's own role counts.
++     */
++    private fun composeFull(leader: Autobot, pool: List<Autobot>): List<Autobot>? {
++        val fit = fitting(leader, pool)
 +        val chosen = mutableListOf<Autobot>()
-+        val hasHealer = Role.of(leader.classId) == Role.Healer
-+        if (!hasHealer && leader.level >= HEALER_FROM_LEVEL) {
-+            val healer = fit.firstOrNull { Role.of(it.classId) == Role.Healer }
-+            if (healer != null) chosen += healer
-+            else if (now - (looking[leader.objectId] ?: now) < WAIT_FOR_HEALER_MS) return null
++        val leaderRole = Role.of(leader.classId)
++        for (role in listOf(Role.Tank, Role.Healer)) {
++            if (role == leaderRole) continue
++            chosen += fit.firstOrNull { Role.of(it.classId) == role } ?: return null
 +        }
-+        for (role in listOf(Role.Tank, Role.Buffer, Role.Spoiler)) {
++        for (role in listOf(Role.Buffer, Role.Spoiler)) {
++            if (role == leaderRole) continue
 +            fit.firstOrNull { Role.of(it.classId) == role && it !in chosen }?.let { chosen += it }
 +        }
-+        fit.filter { it !in chosen && Role.of(it.classId) != Role.Spoiler }.take((WANTED_SIZE - 1 - chosen.size).coerceAtLeast(0)).forEach { chosen += it }
++        fit.filter { it !in chosen && Role.of(it.classId) == Role.Damage }.take((PartyKind.Full.wantedSize - 1 - chosen.size).coerceAtLeast(0)).forEach { chosen += it }
++        return if (chosen.size + 1 >= PartyKind.Full.minSize) chosen else null
++    }
++
++    /** A casual party: whoever is around, whatever they play. */
++    private fun composeCasual(leader: Autobot, pool: List<Autobot>): List<Autobot>? {
++        val chosen = fitting(leader, pool).take(PartyKind.Casual.wantedSize - 1)
 +        return if (chosen.size + 1 >= MIN_SIZE) chosen else null
 +    }
 +
-+    private fun form(leader: Autobot, members: List<Autobot>) {
++    private fun form(leader: Autobot, members: List<Autobot>, kind: PartyKind) {
 +        val lootRule = if (members.any { Role.of(it.classId) == Role.Spoiler } || Role.of(leader.classId) == Role.Spoiler) LootRule.ITEM_RANDOM_SPOIL else LootRule.ITEM_RANDOM
 +        leader.lootRule = lootRule
 +        // Whatever each was on its way to, the party goes together now.
@@ -3681,16 +3735,34 @@ index 0000000..dbc8ea6
 +            val party: Party? = leader.party
 +            if (party == null) Party(leader, member, lootRule) else party.addPartyMember(member)
 +            looking.remove(member.objectId)
++            fullSeekers.remove(member.objectId)
 +        }
 +        looking.remove(leader.objectId)
++        fullSeekers.remove(leader.objectId)
++        leader.party?.let { party ->
++            val state = PartyPlan.state(party)
++            state.kind = kind
++            state.breakUpAt = if (kind == PartyKind.Casual) System.currentTimeMillis() + Rnd.get(CASUAL_MIN_MS, CASUAL_MAX_MS) else null
++        }
 +        nextShout[leader.objectId] = System.currentTimeMillis() + Rnd.get(SHOUT_MIN_MS, SHOUT_MAX_MS)
-+        if (settings.groupLog) println("Autobots groups: ${leader.name} (lv ${leader.level}) formed a party: " +
++        if (settings.groupLog) println("Autobots groups: ${leader.name} (lv ${leader.level}) formed a ${kind.name.lowercase()} party: " +
 +                (listOf(leader) + members).joinToString { "${it.name} ${it.level} ${Role.of(it.classId)}" })
 +    }
 +
-+    /** A bot-led party short of people shouts for them now and then; a party that stays too small breaks up. */
++    /**
++     * A bot-led party short of people shouts for them now and then; a party that stays too small breaks up, and so does
++     * a casual one after its hour or so, once it is out of a fight.
++     */
 +    private fun recruit(leader: Autobot, now: Long) {
 +        val party = leader.party ?: return
++        val state = PartyPlan.state(party)
++        val breakUpAt = state.breakUpAt
++        if (breakUpAt != null && now > breakUpAt && party.members.none { it.isInCombat }) {
++            leader.partySay(listOf("ok guys, thx for party", "gtg, ty all", "спасибо за пати, разбегаемся", "всем спасибо, я дальше сам").random())
++            party.disband()
++            smallSince.remove(leader.objectId)
++            return
++        }
 +        val size = party.membersCount
 +        if (size < MIN_SIZE) {
 +            val since = smallSince.getOrPut(leader.objectId) { now }
@@ -3702,18 +3774,18 @@ index 0000000..dbc8ea6
 +            }
 +        } else smallSince.remove(leader.objectId)
 +
-+        if (size >= WANTED_SIZE || now < (nextShout[leader.objectId] ?: 0)) return
++        if (size >= state.kind.wantedSize || now < (nextShout[leader.objectId] ?: 0)) return
 +        nextShout[leader.objectId] = now + Rnd.get(SHOUT_MIN_MS, SHOUT_MAX_MS)
 +        looking[leader.objectId] = looking[leader.objectId] ?: now
 +        leader.shout(GroupChat.lookingForMembers(party, needs(party), placeName(leader)))
 +    }
 +
-+    /** What the party lacks most, as a player would put it in a shout. */
++    /** What the party lacks most, as a player would put it in a shout. A casual party takes anybody. */
 +    fun needs(party: Party): List<Role> {
++        if (PartyPlan.state(party).kind == PartyKind.Casual) return listOf(Role.Damage)
 +        val roles = party.members.map { Role.of(it.classId) }
-+        val level = party.members.maxOf { it.level }
 +        val wanted = mutableListOf<Role>()
-+        if (level >= HEALER_FROM_LEVEL && Role.Healer !in roles) wanted += Role.Healer
++        if (Role.Healer !in roles) wanted += Role.Healer
 +        if (Role.Tank !in roles) wanted += Role.Tank
 +        if (Role.Buffer !in roles) wanted += Role.Buffer
 +        wanted += Role.Damage
@@ -3724,7 +3796,7 @@ index 0000000..dbc8ea6
 +
 +    /** A party a looking player could join: led by a bot of this region, with room and levels that fit. */
 +    fun partiesFor(player: Player, online: Collection<Autobot>): List<Party> = online
-+            .filter { it.isInParty && it.party.leader === it && it.party.membersCount < WANTED_SIZE + 2 }
++            .filter { it.isInParty && it.party.leader === it && it.party.membersCount < (PartyPlan.state(it.party).kind.wantedSize + 2).coerceAtMost(9) }
 +            .filter { MapRegionData.getInstance().getMapRegion(it.x, it.y) == MapRegionData.getInstance().getMapRegion(player.x, player.y) }
 +            .map { it.party }
 +            .filter { p -> kotlin.math.abs(p.members.sumOf { it.level } / p.membersCount - player.level) <= MAX_LEVEL_SPREAD }
@@ -3742,7 +3814,7 @@ index 0000000..dbc8ea6
 +        if (player.karma > 0) return GroupChat.Line.NoPk
 +        val role = Role.of(player.classId)
 +        val roles = party.members.map { Role.of(it.classId) }
-+        if ((role == Role.Tank || role == Role.Healer) && role in roles && party.membersCount >= WANTED_SIZE) return GroupChat.Line.RoleTaken
++        if ((role == Role.Tank || role == Role.Healer) && role in roles && party.membersCount >= PartyPlan.state(party).kind.wantedSize) return GroupChat.Line.RoleTaken
 +        val expected = Gear.gradeFor(player.level).id
 +        val weapon = player.activeWeaponItem?.crystalType?.id ?: -1
 +        val friend = leader is Autobot && Relations.affinity(leader, player) >= Relations.FRIEND
@@ -3781,10 +3853,10 @@ index 0000000..dbc8ea6
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
 new file mode 100644
-index 0000000..971ae60
+index 0000000..5a501b0
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,240 @@
 +package dev.l2j.autobots.population.group
 +
 +import dev.l2j.autobots.Autobot
@@ -3987,6 +4059,15 @@ index 0000000..971ae60
 +    }
 +}
 +
++/**
++ * Two kinds of parties: a full one gathered on purpose (tank, healer, buffer, damage dealers) that stays together, and a
++ * casual one of whoever was around, smaller and for an hour or so.
++ */
++internal enum class PartyKind(val minSize: Int, val wantedSize: Int) {
++    Full(5, 7),
++    Casual(3, 5),
++}
++
 +/** What a party decides together. For now: the level of monsters it can take. */
 +internal object PartyPlan {
 +    /** Members further than this don't share experience (`PartyRange` in players.properties). */
@@ -3998,13 +4079,16 @@ index 0000000..971ae60
 +
 +    /**
 +     * The level a bot-led party hunts at: the average level, a bit higher when the party is big enough and has a
-+     * healer, a bit lower without one. A party should beat what its members can solo.
++     * healer, a bit lower without one; a full party with its tank and healer goes for the hardest. A party should beat
++     * what its members can solo.
 +     */
 +    fun huntLevel(party: Party): Int {
 +        val members = party.members
 +        val average = members.sumOf { it.level } / members.size
-+        val hasHealer = members.any { Role.of(it.classId) == Role.Healer }
++        val roles = members.map { Role.of(it.classId) }
++        val hasHealer = Role.Healer in roles
 +        val bonus = when {
++            state(party).kind == PartyKind.Full && hasHealer && Role.Tank in roles && members.size >= PartyKind.Full.minSize -> 4
 +            hasHealer && members.size >= 4 -> 3
 +            hasHealer && members.size >= 2 -> 2
 +            members.size >= 3 -> 1
