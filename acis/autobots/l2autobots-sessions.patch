@@ -57,7 +57,7 @@ index 4c7caff..8578f82 100644
          val rnd = Random(botId.toLong() * DAY_SEED_MULTIPLIER + day.toEpochDay())
          val awakeMinutes = (24 - sleepHours) * 60
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index 051a7f4..e2bc350 100644
+index 051a7f4..92cd4dd 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 @@ -26,6 +26,7 @@ import net.sf.l2j.gameserver.model.actor.Player
@@ -121,7 +121,7 @@ index 051a7f4..e2bc350 100644
          if (AutobotData.settings.groupsEnabled && bot.isInParty && updateInParty()) return
          if (bot.isDead || bot.isUnderAttack()) {
              bot.combatBehavior.onUpdate()
-@@ -83,11 +94,77 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -83,11 +94,78 @@ internal class LifeBehavior(private val bot: Autobot) {
  
          if (!bot.isInsideZone(ZoneId.TOWN)) tripDoneInTown = false
  
@@ -189,7 +189,8 @@ index 051a7f4..e2bc350 100644
 +            // The end of a session leaves time for a long walk, which a quick trip for loot would not take.
 +            if (bot.isSitting) {
 +                bot.standUp()
-+            } else if (!goToTown(HOME_MAX_WALK)) {
++            } else if (!goToTown(HOME_MAX_WALK) && !bot.isInsideZone(ZoneId.TOWN)) {
++                // A scroll can report a failure while the teleport into town is still settling.
 +                homeUnreachable = true
 +                if (AutobotData.settings.populationSessionLog) println("Autobots session: ${bot.name} lv ${bot.level} can't get to town, logs out at ${bot.x},${bot.y}")
 +            }
@@ -203,7 +204,7 @@ index 051a7f4..e2bc350 100644
      }
  
      /**
-@@ -118,6 +195,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -118,6 +196,11 @@ internal class LifeBehavior(private val bot: Autobot) {
  
      fun onDeath() {
          fitness.onDeath()
@@ -215,7 +216,7 @@ index 051a7f4..e2bc350 100644
      }
  
      fun onLogout() {
-@@ -138,25 +220,16 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -138,25 +221,16 @@ internal class LifeBehavior(private val bot: Autobot) {
              val crafter = CraftBook.isCrafter(bot)
              val hasGoods = if (crafter) StoreKeeper.hasBusiness(bot) else StoreKeeper.storeGoods(bot).isNotEmpty()
              if (economy && Rnd.get(100) < (if (crafter) CRAFTER_LINGER_PERCENT else LINGER_PERCENT) && hasGoods) {
@@ -245,7 +246,7 @@ index 051a7f4..e2bc350 100644
      private suspend fun trade() {
          if (!bot.isInsideZone(ZoneId.TOWN)) {
              if (!goToTown()) giveUpTrading()
-@@ -179,8 +252,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -179,8 +253,8 @@ internal class LifeBehavior(private val bot: Autobot) {
      }
  
      private fun giveUpTrading() {
@@ -255,7 +256,7 @@ index 051a7f4..e2bc350 100644
      }
  
      private suspend fun hunt() {
-@@ -230,12 +303,13 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -230,12 +304,13 @@ internal class LifeBehavior(private val bot: Autobot) {
          TownTrip(bot, cautious = fitness.isSaving).execute()
          tripDoneInTown = true
          lastTripAt = System.currentTimeMillis()
@@ -271,7 +272,7 @@ index 051a7f4..e2bc350 100644
          if (failed) townTravelFailedAt = System.currentTimeMillis()
          return !failed
      }
-@@ -318,7 +392,6 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -318,7 +393,6 @@ internal class LifeBehavior(private val bot: Autobot) {
      }
  
      companion object {
@@ -279,7 +280,7 @@ index 051a7f4..e2bc350 100644
          private const val SPOT_RADIUS = 1500
          private const val PARTY_LEG = 2000.0
          private const val PARTY_LEG_ARRIVAL = 150
-@@ -329,10 +402,17 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -329,10 +403,17 @@ internal class LifeBehavior(private val bot: Autobot) {
          private const val TOWN_RETRY_MS = 10 * 60 * 1000L
          private const val LINGER_PERCENT = 30
          private const val CRAFTER_LINGER_PERCENT = 60
