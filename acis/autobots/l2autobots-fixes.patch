@@ -937,10 +937,10 @@ index 0000000..d64fe1a
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 new file mode 100644
-index 0000000..39b0cfb
+index 0000000..49fc482
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,264 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.AutobotData
@@ -1015,6 +1015,9 @@ index 0000000..39b0cfb
 +            Activity.Trade -> trade()
 +        }
 +    }
++
++    /** True while the bot hunts easier monsters because it dies too often or is undergeared. */
++    val isFallingBack get() = fitness.isSaving
 +
 +    fun onDeath() {
 +        fitness.onDeath()
@@ -1204,10 +1207,10 @@ index 0000000..39b0cfb
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 new file mode 100644
-index 0000000..83cc2e3
+index 0000000..b7aff36
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,141 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.Autobot
@@ -1220,6 +1223,7 @@ index 0000000..83cc2e3
 +import dev.l2j.autobots.behaviors.preferences.SocialPreferences
 +import dev.l2j.autobots.dao.AutobotsDao
 +import dev.l2j.autobots.models.RespawnAction
++import dev.l2j.autobots.population.economy.EconomyLog
 +import dev.l2j.autobots.utils.Klock
 +import dev.l2j.autobots.utils.getRandomAppearance
 +import dev.l2j.autobots.utils.getSupportedClassesForLevel
@@ -1241,6 +1245,8 @@ index 0000000..83cc2e3
 +internal object PopulationManager {
 +    private const val TICK_MS = 15_000L
 +    private const val SAVE_EVERY_TICKS = 20
++    // Every 10 minutes.
++    private const val SUMMARY_EVERY_TICKS = 40
 +
 +    private class Member(val name: String, val firstDay: LocalDate, val career: Career, val schedule: DailySchedule)
 +
@@ -1280,6 +1286,9 @@ index 0000000..83cc2e3
 +                    .take(settings.populationLoginsPerTick)
 +                    .forEach { login(it) }
 +
++            if (settings.economyEnabled && (ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
++                EconomyLog.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
++            }
 +            if (++ticks % SAVE_EVERY_TICKS == 0) {
 +                members.values.mapNotNull { AutobotsManager.activeBots[it.name] }.forEach { AutobotsDao.saveAutobot(it) }
 +            }
@@ -1371,7 +1380,7 @@ index 0000000..ee3f10d
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt
 new file mode 100644
-index 0000000..cda0119
+index 0000000..1c39338
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt
 @@ -0,0 +1,107 @@
@@ -1456,13 +1465,13 @@ index 0000000..cda0119
 +            Rnd.nextDouble() < chance -> {
 +                item.enchantLevel = level + 1
 +                item.updateDatabase()
-+                EconomyLog.log(bot, "enchanted $name to +${level + 1} (chance ${(chance * 100).toInt()}%)")
++                EconomyLog.log(bot, Deal.EnchantSuccess, "enchanted $name to +${level + 1} (chance ${(chance * 100).toInt()}%)")
 +                if (level + 1 > 5) Chatter.maybeSay(bot, Chatter.ENCHANT_SUCCESS, "+${level + 1}")
 +            }
 +            scroll.isBlessed -> {
 +                item.enchantLevel = 0
 +                item.updateDatabase()
-+                EconomyLog.log(bot, "blessed enchant of $name +$level failed, reset to +0")
++                EconomyLog.log(bot, Deal.EnchantReset, "blessed enchant of $name +$level failed, reset to +0")
 +                Chatter.maybeSay(bot, Chatter.ENCHANT_RESET, "+$level")
 +            }
 +            else -> {
@@ -1471,7 +1480,7 @@ index 0000000..cda0119
 +                val destroyed = bot.inventory.destroyItem("Enchant", item, bot, null) ?: return
 +                World.getInstance().removeObject(destroyed)
 +                if (crystalId != 0) bot.inventory.addItem("Enchant", crystalId, crystals, bot, destroyed)
-+                EconomyLog.log(bot, "enchant of $name +$level failed, the item crystallized")
++                EconomyLog.log(bot, Deal.EnchantBreak, "enchant of $name +$level failed, the item crystallized")
 +                Chatter.maybeSay(bot, Chatter.ENCHANT_BREAK, "+$level")
 +            }
 +        }
@@ -1484,7 +1493,7 @@ index 0000000..cda0119
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
 new file mode 100644
-index 0000000..e90154f
+index 0000000..244f82c
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
 @@ -0,0 +1,69 @@
@@ -1545,7 +1554,7 @@ index 0000000..e90154f
 +
 +    private fun switchTo(next: Mode, reason: String): Boolean {
 +        if (next == mode) return false
-+        EconomyLog.log(bot, "mode $mode -> $next: $reason")
++        EconomyLog.log(bot, Deal.ModeChange, "mode $mode -> $next: $reason")
 +        mode = next
 +        modeSince = System.currentTimeMillis()
 +        return true
@@ -1559,7 +1568,7 @@ index 0000000..e90154f
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
 new file mode 100644
-index 0000000..40db905
+index 0000000..999c677
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
 @@ -0,0 +1,158 @@
@@ -1702,7 +1711,7 @@ index 0000000..40db905
 +    fun equip(bot: Player, item: ItemInstance) {
 +        bot.useEquippableItem(item, true)
 +        bot.broadcastUserInfo()
-+        EconomyLog.log(bot, "equipped ${item.itemName}${if (item.enchantLevel > 0) " +${item.enchantLevel}" else ""}")
++        EconomyLog.log(bot, Deal.Equip, "equipped ${item.itemName}${if (item.enchantLevel > 0) " +${item.enchantLevel}" else ""}")
 +    }
 +
 +    /** Everything the bot does not need and could turn into adena (worthless items like the Tutorial Guide stay). */
@@ -1723,12 +1732,13 @@ index 0000000..40db905
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
 new file mode 100644
-index 0000000..08839b3
+index 0000000..f92f05c
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
-@@ -0,0 +1,161 @@
+@@ -0,0 +1,190 @@
 +package dev.l2j.autobots.population.economy
 +
++import dev.l2j.autobots.Autobot
 +import dev.l2j.autobots.AutobotData
 +import dev.l2j.autobots.extensions.location
 +import dev.l2j.autobots.utils.distance
@@ -1742,6 +1752,8 @@ index 0000000..08839b3
 +import net.sf.l2j.gameserver.model.buylist.Product
 +import net.sf.l2j.gameserver.model.item.instance.ItemInstance
 +import net.sf.l2j.gameserver.model.tradelist.TradeItem
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
 +
 +/** A merchant NPC with what it sells. */
 +internal class Shop(val merchant: Merchant, val products: Map<Int, Product>)
@@ -1800,7 +1812,7 @@ index 0000000..08839b3
 +        if (product.hasLimitedStock() && !product.decreaseCount(count)) return false
 +        bot.inventory.addItem("Buy", product.itemId, count, bot, shop.merchant)
 +        shop.merchant.castle?.let { it.addToTreasury((total * it.taxRate).toInt()) }
-+        EconomyLog.log(bot, "bought ${count}x ${product.item.name} for $total from NPC ${shop.merchant.name}")
++        EconomyLog.log(bot, Deal.NpcBuy, "bought ${count}x ${product.item.name} for $total from NPC ${shop.merchant.name}")
 +        return true
 +    }
 +
@@ -1818,7 +1830,7 @@ index 0000000..08839b3
 +        }
 +        val earned = total.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 +        if (earned > 0) bot.addAdena("Sell", earned, shop.merchant, false)
-+        if (sold.isNotEmpty()) EconomyLog.log(bot, "sold to NPC for $earned: ${sold.joinToString()}")
++        if (sold.isNotEmpty()) EconomyLog.log(bot, Deal.NpcSell, "sold to NPC for $earned: ${sold.joinToString()}")
 +        return earned
 +    }
 +
@@ -1843,7 +1855,7 @@ index 0000000..08839b3
 +        val request = ItemRequest(offer.tradeItem.objectId, count, offer.tradeItem.price)
 +        if (!owner.sellList.privateStoreBuy(bot, mutableSetOf(request))) return false
 +        closeIfEmpty(owner)
-+        EconomyLog.log(bot, "bought ${count}x ${offer.tradeItem.item.name} for ${count.toLong() * offer.tradeItem.price} from store of ${owner.name}")
++        EconomyLog.log(bot, Deal.StoreBuy, "bought ${count}x ${offer.tradeItem.item.name} for ${count.toLong() * offer.tradeItem.price} from store of ${owner.name}")
 +        return true
 +    }
 +
@@ -1854,7 +1866,7 @@ index 0000000..08839b3
 +        val request = ItemRequest(item.objectId, item.itemId, count, offer.tradeItem.price)
 +        if (!owner.buyList.privateStoreSell(bot, arrayOf(request))) return false
 +        closeIfEmpty(owner)
-+        EconomyLog.log(bot, "sold ${count}x ${item.itemName} for ${count.toLong() * offer.tradeItem.price} to store of ${owner.name}")
++        EconomyLog.log(bot, Deal.StoreSell, "sold ${count}x ${item.itemName} for ${count.toLong() * offer.tradeItem.price} to store of ${owner.name}")
 +        return true
 +    }
 +
@@ -1883,14 +1895,40 @@ index 0000000..08839b3
 +    fun location(shop: Shop) = shop.merchant.location()
 +}
 +
++/** Kinds of economy events, counted for the periodic summary. */
++internal enum class Deal { NpcBuy, NpcSell, StoreBuy, StoreSell, Equip, EnchantSuccess, EnchantReset, EnchantBreak, SellStore, BuyStore, ModeChange }
++
 +internal object EconomyLog {
-+    fun log(bot: Player, message: String) {
++    private val counts = ConcurrentHashMap<Deal, AtomicInteger>()
++
++    fun log(bot: Player, deal: Deal, message: String) {
++        counts.computeIfAbsent(deal) { AtomicInteger() }.incrementAndGet()
 +        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): $message")
++    }
++
++    /**
++     * One line about the whole population since the last summary, so a run can be judged without reading every deal:
++     * deals by kind, then the state of the bots online.
++     */
++    fun summary(bots: Collection<Autobot>) {
++        val deals = Deal.values().joinToString(" ") { "${it.name}=${counts[it]?.getAndSet(0) ?: 0}" }
++        if (bots.isEmpty()) {
++            println("Autobots economy summary: $deals online=0")
++            return
++        }
++        val adena = bots.sumOf { it.adena.toLong() }
++        val stores = bots.count { it.isInStoreMode }
++        val farming = bots.count { it.life?.isFallingBack == true }
++        val needGroup = bots.count { it.needsGroup }
++        val avgLevel = bots.sumOf { it.level } / bots.size
++        val maxLevel = bots.maxOf { it.level }
++        println("Autobots economy summary: $deals online=${bots.size} avgLevel=$avgLevel maxLevel=$maxLevel " +
++                "adena=$adena adenaPerBot=${adena / bots.size} stores=$stores farming=$farming needsGroup=$needGroup")
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
 new file mode 100644
-index 0000000..6622ee4
+index 0000000..a47de5d
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
 @@ -0,0 +1,139 @@
@@ -1981,7 +2019,7 @@ index 0000000..6622ee4
 +        bot.storeType = StoreType.SELL
 +        bot.broadcastUserInfo()
 +        bot.broadcastPacket(PrivateStoreMsgSell(bot))
-+        EconomyLog.log(bot, "opened sell store: " + list.items.joinToString { "${it.count}x ${it.item.name} @${it.price}" })
++        EconomyLog.log(bot, Deal.SellStore, "opened sell store: " + list.items.joinToString { "${it.count}x ${it.item.name} @${it.price}" })
 +        return true
 +    }
 +
@@ -2006,7 +2044,7 @@ index 0000000..6622ee4
 +        bot.storeType = StoreType.BUY
 +        bot.broadcastUserInfo()
 +        bot.broadcastPacket(PrivateStoreMsgBuy(bot))
-+        EconomyLog.log(bot, "opened buy store: " + list.items.joinToString { "${it.count}x ${it.item.name} @${it.price}" })
++        EconomyLog.log(bot, Deal.BuyStore, "opened buy store: " + list.items.joinToString { "${it.count}x ${it.item.name} @${it.price}" })
 +        return true
 +    }
 +

@@ -69,6 +69,9 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - Population bots have a real weight limit and inventory size again; shots and arrows match the weapon grade;
     bots use shop Healing Potions and Mana Drugs. `economyLog` logs every deal, `economyChat` lets bots remark on
     enchants and upgrades in chat.
+  - Every 10 minutes one `Autobots economy summary:` line counts the deals by kind and shows the bots online
+    (average and max level, adena, stores, farming, needsGroup). `scripts/economy-report.sh [since]` prints those
+    summaries, deal counts with samples, bot errors and the game container's load.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 
