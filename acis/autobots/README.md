@@ -63,9 +63,22 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     gamblers (armor +6, weapon +10).
   - `StoreKeeper`: AFK sessions of bots with goods become store sessions, and 30% of bots with goods stay online
     30-90 minutes after their session in a store. Valuable surplus (materials, recipes, gear, scrolls: stacks worth
-    2000+) goes to a sell store at 0.65-0.9 of the shop price, or 0.8-1.5 of the reference price for items no shop
-    sells; unsold items get 10% cheaper per session. With no goods, a buy store bids on the next kit piece shops
-    don't sell and on scrolls for worn gear, paid with the bot's own adena.
+    2000+) goes to a sell store priced from the market value: below the shop price for what shops sell, around
+    and above the value for the rest, higher for greedy bots (`TradeTemper`), with a wider spread for novices below
+    20. Unsold items get cheaper per session (15% for impatient bots, 5% for patient ones); an easy-going seller
+    undercuts a cheaper store nearby by 3%. With no goods, a buy store bids on the next kit piece shops don't sell
+    and on scrolls for worn gear, paid with the bot's own adena.
+  - `MarketBook` (`autobot_market`): every minute the private stores of everyone online are read; listings give
+    supply and demand (plus every bot that looked for an item in the last 24 h), listings that shrank are sales,
+    kept for a week. `MarketBook.value(itemId)` is the book value (shop or reference price) moving to the median
+    of recent sales as they come (fully after 5 in 3 days), times scarcity: (demand+1)/(supply+1) to the power 0.2,
+    within 0.75-1.5; never above the shop price or below what an NPC pays. `Autobots market:` every 10 minutes
+    lists sales, haggles and the items whose price moved most.
+  - `MarketHaggle`: a bot finding a bot's store up to 35% over what it pays whispers a lower price; the seller
+    agrees, counters between its floor and the buyer's limit, or refuses. The floor depends on greed, on the
+    market (half the discount on an item priced at or below its value), on unsold sessions and on friendship. The
+    agreed price is set in the store and the deal goes through. `settle()` is the same decision without chat, for
+    trades outside stores; haggling with players is for later.
   - `Fitness`: 3 deaths in an hour or gear more than a grade below the level switch the bot to farming monsters
     5 levels lower, saving for gear and enchanting safely; dying again there sets `needsGroup` (for the group
     stage) and drops 3 more levels. An hour without deaths with decent gear brings it back.
