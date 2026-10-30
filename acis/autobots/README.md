@@ -165,6 +165,8 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     even if someone spawns it.
   - The summary line gets `Craft CraftFail CraftOrder RecipeLearn Workshop` counts and
     `crafters workshops recipes adenaPerCrafter adenaPerOtherSameLevel`.
+- `l2autobots-raids.patch` - raid bosses (stage 4v, spec in `docs/raids.md`), applied last.
+  - A bot never picks a raid boss or its minion as prey (`isWorthTargeting`); it only fights one that attacks it.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 
