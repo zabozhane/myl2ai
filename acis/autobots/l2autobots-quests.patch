@@ -51,6 +51,17 @@ index 0d3c68e..da987de 100644
  ){
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
          setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+diff --git a/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt b/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt
+index a4ac63a..16243de 100644
+--- a/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt
++++ b/src/main/kotlin/dev/l2j/autobots/extensions/AutobotExtensions.kt
+@@ -54,5 +54,5 @@ internal fun pickWeighted(choices: List<ClassId>): ClassId? {
+ }
+ 
+ /** Population dwarves split into crafters and spoilers by a trait of the object id, so the share is predictable. */
+-private fun Autobot.dwarfBranch(): ClassId =
++internal fun Autobot.dwarfBranch(): ClassId =
+         if (Math.floorMod(objectId * 977 + 3, 100) < AutobotData.settings.crafterArtisanPercent) ClassId.ARTISAN else ClassId.SCAVENGER
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 index 5b7d75c..051a7f4 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
@@ -126,10 +137,10 @@ index 37ee210..dea7ec6 100644
                  GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/PathQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/PathQuests.kt
 new file mode 100644
-index 0000000..85c0faa
+index 0000000..46309de
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/quests/PathQuests.kt
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,324 @@
 +package dev.l2j.autobots.population.quests
 +
 +import net.sf.l2j.gameserver.enums.actors.ClassId
@@ -138,8 +149,6 @@ index 0000000..85c0faa
 +/**
 + * The first profession quests of aCis 382 (scripting/quests/Q401-Q418) as steps a bot can play. Npc, monster, item
 + * ids and event names are the scripts' own; where a quest offers two routes, the one with spawned NPCs is taken.
-+ * Path to become a Scavenger (Q417) is left out: it needs Spoil on a quest monster and a random dialog game, so
-+ * dwarven fighters go the Artisan way.
 + */
 +internal object PathQuests {
 +
@@ -309,6 +318,7 @@ index 0000000..85c0faa
 +                cond(10, talk(30593))
 +                cond(11, talk(30502, "30502-07.htm"))
 +            },
++            scavenger(),
 +            path("Q418_PathToAnArtisan", DWARVEN_FIGHTER, ARTISAN, mark = 1635, masterEvent = "AR") {
 +                start(30527, "30527-05.htm", "30527-06.htm")
 +                cond(1, hunt(20389, 20390))
@@ -423,31 +433,65 @@ index 0000000..85c0faa
 +    private const val CANDLE = 1278
 +    private const val HUB_SCENT = 1279
 +
++    /**
++     * Q417: Mion sends the bot on deliveries to Shari, Bronk or Zimenf (five in all) rather than the guessing game, then
++     * Master Toma asks for honey from spoiled Honey Bears and beads from spoiled tarantulas, and the parcel goes to
++     * Yasheni in Schuttgart, the closer of the two ends.
++     */
++    private fun scavenger() = path("Q417_PathToBecomeAScavenger", DWARVEN_FIGHTER, SCAVENGER, mark = 1642, masterEvent = "SC") {
++        start(30524, "30524-05.htm")
++        cond(1, talk(MION, "30519_1"))
++        rule({ it.cond in 2..3 && it.has(SHARI_AXE) }, talk(30517))
++        rule({ it.cond in 2..3 && it.has(BRONK_INGOT) }, talk(30525))
++        rule({ it.cond in 2..3 && it.has(ZIMENF_POTION) }, talk(30538))
++        // After the fifth delivery Mion hands the letter on talk; the link for another errand is then gone.
++        rule({ it.cond in 2..3 }, talkUnlessAdvanced(MION, "30519_2"))
++        cond(4, talk(TOMA))
++        // A Honey Bear comes out after a score of Hunter Bears; only spoiled ones give honey.
++        cond(5, hunt(20777, HONEY_BEAR, spoil = setOf(HONEY_BEAR)))
++        cond(6, talk(TOMA))
++        cond(7, hunt(20403, 20508, spoil = setOf(20403, 20508)))
++        cond(8, talk(TOMA, "30556-06b.htm"))
++        cond(12, talk(31958, "31958-02.htm"))
++    }
++
++    // Q417 Path to become a Scavenger
++    private const val MION = 30519
++    private const val TOMA = 30556
++    private const val HONEY_BEAR = 27058
++    private const val SHARI_AXE = 1648
++    private const val BRONK_INGOT = 1647
++    private const val ZIMENF_POTION = 1649
++
 +    fun forBaseClass(classId: ClassId): List<PathQuest> = all.filter { it.from == classId }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
 new file mode 100644
-index 0000000..25ae84d
+index 0000000..715eea9
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
-@@ -0,0 +1,371 @@
+@@ -0,0 +1,391 @@
 +package dev.l2j.autobots.population.quests
 +
 +import dev.l2j.autobots.AutobotData
 +import dev.l2j.autobots.Autobot
 +import dev.l2j.autobots.behaviors.sequences.TravelByGatekeeperSequence
 +import dev.l2j.autobots.behaviors.sequences.WalkToSequence
++import dev.l2j.autobots.extensions.dwarfBranch
 +import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.extensions.useMagicSkill
 +import dev.l2j.autobots.extensions.pickWeighted
 +import dev.l2j.autobots.population.economy.GoToTownSequence
 +import dev.l2j.autobots.utils.distance
 +import dev.l2j.autobots.utils.getBehaviorByClassId
 +import dev.l2j.autobots.utils.getSupportedClasses
++import dev.l2j.autobots.utils.spoil as SPOIL_SKILL
 +import dev.l2j.autobots.utils.supportedCombatPrefs
 +import kotlinx.coroutines.delay
 +import net.sf.l2j.commons.random.Rnd
 +import net.sf.l2j.gameserver.data.xml.TeleportLocationData
 +import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.enums.actors.ClassId
 +import net.sf.l2j.gameserver.model.actor.Npc
 +import net.sf.l2j.gameserver.model.actor.Player
 +import net.sf.l2j.gameserver.model.actor.instance.Monster
@@ -547,7 +591,9 @@ index 0000000..25ae84d
 +        if (paths.isEmpty()) return null
 +        paths.firstOrNull { bot.getQuestState(it.questName)?.isStarted == true || QuestView(bot, null).has(it.mark) }?.let { return it }
 +        chosen?.takeIf { it in paths }?.let { return it }
-+        val target = pickWeighted(paths.map { it.to }) ?: return null
++        // Dwarves split into crafters and spoilers the way the craft economy expects.
++        val target = (if (bot.classId == ClassId.DWARVEN_FIGHTER) bot.dwarfBranch().takeIf { b -> paths.any { it.to == b } } else null)
++                ?: pickWeighted(paths.map { it.to }) ?: return null
 +        return paths.first { it.to == target }.also { chosen = it }
 +    }
 +
@@ -570,7 +616,9 @@ index 0000000..25ae84d
 +        bot.target = npc
 +        delay(Rnd.get(1500, 4000).toLong())
 +        npc.onBypassFeedback(bot, "Quest ${path.questName}")
++        val opened = describe(path)
 +        for (event in talk.events) {
++            if (talk.unlessAdvanced && opened != before) break
 +            delay(Rnd.get(1500, 4000).toLong())
 +            bot.processQuestEvent(path.questName, event)
 +        }
@@ -585,6 +633,8 @@ index 0000000..25ae84d
 +    private suspend fun hunt(path: PathQuest, hunt: Hunt) {
 +        holdWeapon(hunt.weapon)
 +        bot.questTargets = hunt.monsterIds
++        if (hunt.spoil.isNotEmpty() && bot.getSkill(SPOIL_SKILL) == null) return giveUp(path, "can't spoil yet")
++        if (spoilTarget(hunt)) return
 +
 +        val near = bot.getKnownTypeInRadius(Monster::class.java, NEAR_RADIUS).any { !it.isDead && it.npcId in hunt.monsterIds }
 +        if (near || bot.target != null) {
@@ -611,6 +661,16 @@ index 0000000..25ae84d
 +            huntSpot = null
 +            liveTarget = null
 +        }
++    }
++
++    /** Spoils the quest monster in the bot's sights before it dies. @return true while the cast takes the tick. */
++    private fun spoilTarget(hunt: Hunt): Boolean {
++        val target = bot.target as? Monster ?: return false
++        if (target.isDead || target.npcId !in hunt.spoil || target.spoilerId != 0) return false
++        val skill = bot.getSkill(SPOIL_SKILL) ?: return false
++        if (bot.isCastingNow || bot.isSkillDisabled(skill) || bot.currentMp < skill.mpConsume) return false
++        bot.useMagicSkill(skill)
++        return true
 +    }
 +
 +    private fun nextHuntSpot(hunt: Hunt): Location? {
@@ -804,10 +864,10 @@ index 0000000..25ae84d
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
 new file mode 100644
-index 0000000..8f73e4c
+index 0000000..ecc07b4
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,85 @@
 +package dev.l2j.autobots.population.quests
 +
 +import net.sf.l2j.gameserver.enums.actors.ClassId
@@ -820,14 +880,18 @@ index 0000000..8f73e4c
 + */
 +internal sealed class QuestAction
 +
-+/** Walk up to an NPC, open its quest dialog and click [events] in order, like a player reading the window. */
-+internal class Talk(val npcId: Int, val events: List<String>) : QuestAction()
++/**
++ * Walk up to an NPC, open its quest dialog and click [events] in order, like a player reading the window. With
++ * [unlessAdvanced], opening the dialog may already move the quest on (a window with no link): nothing is clicked then.
++ */
++internal class Talk(val npcId: Int, val events: List<String>, val unlessAdvanced: Boolean = false) : QuestAction()
 +
 +/**
 + * Hunt [monsterIds] until a rule further up applies. [weapon] is held while hunting (0 for bare hands) when the script
 + * only counts kills made with it; [orElse] runs when none of those monsters can be found (one the quest spawns).
++ * Monsters of [spoil] are spoiled before the kill: the script only counts those the bot spoiled itself.
 + */
-+internal class Hunt(val monsterIds: Set<Int>, val weapon: Int?, val orElse: QuestAction?) : QuestAction()
++internal class Hunt(val monsterIds: Set<Int>, val weapon: Int?, val orElse: QuestAction?, val spoil: Set<Int> = emptySet()) : QuestAction()
 +
 +/** What the bot knows about its quest when it decides the next step: the journal step and its own bag. */
 +internal class QuestView(val player: Player, val state: QuestState?) {
@@ -879,7 +943,10 @@ index 0000000..8f73e4c
 +
 +    fun talk(npcId: Int, vararg events: String) = Talk(npcId, events.toList())
 +
-+    fun hunt(vararg monsterIds: Int, weapon: Int? = null, orElse: QuestAction? = null) = Hunt(monsterIds.toSet(), weapon, orElse)
++    fun talkUnlessAdvanced(npcId: Int, vararg events: String) = Talk(npcId, events.toList(), unlessAdvanced = true)
++
++    fun hunt(vararg monsterIds: Int, weapon: Int? = null, orElse: QuestAction? = null, spoil: Set<Int> = emptySet()) =
++            Hunt(monsterIds.toSet(), weapon, orElse, spoil)
 +
 +    fun build() = PathQuest(questName, from, to, mark, masterEvent, startNpc, startEvents, rules.toList())
 +}
@@ -888,10 +955,10 @@ index 0000000..8f73e4c
 +        PathQuestBuilder(questName, from, to, mark, masterEvent).apply(body).build()
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
 new file mode 100644
-index 0000000..7731704
+index 0000000..4b732e4
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,87 @@
 +package dev.l2j.autobots.population.quests
 +
 +import dev.l2j.autobots.extensions.location
@@ -921,11 +988,22 @@ index 0000000..7731704
 +                .groupBy({ it.first }, { it.second })
 +    }
 +
-+    /** The closest spawned NPC of [npcIds] that is in the world. */
-+    fun closestNpc(bot: Player, npcIds: Collection<Int>): Npc? = npcIds.asSequence()
-+            .flatMap { spawnsByNpcId[it].orEmpty().asSequence() }
-+            .mapNotNull { it.spawn.npc?.takeIf { npc -> npc.isVisible && !npc.isDead } }
-+            .minByOrNull { distance(bot.location(), it.location()) }
++    /**
++     * The closest spawned NPC of [npcIds] that is in the world. An NPC in no spawn list (Master Toma wanders between
++     * places through random_spawn) is looked up in the world itself.
++     */
++    fun closestNpc(bot: Player, npcIds: Collection<Int>): Npc? {
++        val (listed, wandering) = npcIds.partition { spawnsByNpcId[it].orEmpty().isNotEmpty() }
++        val spawned = listed.asSequence()
++                .flatMap { spawnsByNpcId[it].orEmpty().asSequence() }
++                .mapNotNull { it.spawn.npc }
++        val found = if (wandering.isEmpty()) emptySequence() else World.getInstance().objects.asSequence()
++                .filterIsInstance<Npc>()
++                .filter { it.npcId in wandering }
++        return (spawned + found)
++                .filter { it.isVisible && !it.isDead }
++                .minByOrNull { distance(bot.location(), it.location()) }
++    }
 +
 +    /** Where [monsterIds] spawn, closest first. */
 +    fun spawnPoints(bot: Player, monsterIds: Set<Int>): List<Location> = monsterIds
