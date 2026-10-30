@@ -1,0 +1,21 @@
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/TradeRequest.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/TradeRequest.java
+index dc92c40..85c02d5 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/TradeRequest.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/TradeRequest.java
+@@ -1,5 +1,6 @@
+ package net.sf.l2j.gameserver.network.clientpackets;
+ 
++import dev.l2j.autobots.AutobotsManager;
+ import net.sf.l2j.commons.math.MathUtil;
+ 
+ import net.sf.l2j.Config;
+@@ -95,5 +96,8 @@ public final class TradeRequest extends L2GameClientPacket
+ 		player.onTransactionRequest(target);
+ 		target.sendPacket(new SendTradeRequest(player.getObjectId()));
+ 		player.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.REQUEST_S1_FOR_TRADE).addCharName(target));
++
++		// A bot has no client to show the request window: it answers in code.
++		AutobotsManager.INSTANCE.onTradeRequest(player, target);
+ 	}
+ }
+\ No newline at end of file

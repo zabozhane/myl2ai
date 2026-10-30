@@ -1,0 +1,1613 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 321ba03..2bc3c29 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -54,4 +54,13 @@
+        compare shop, store and workshop prices. crafterArtisanPercent of dwarves take the Artisan line at level 20. -->
+   <craftEnabled>true</craftEnabled>
+   <crafterArtisanPercent>60</crafterArtisanPercent>
++  <!-- Social trading (needs economyEnabled): bots swap and sell items to each other and to players through the trade
++       window, lend adena and spare gear to people they trust and get it back. scammerPercent of bots scam (keep loans,
++       sell lookalikes), opportunistPercent keep a valuable loan from someone they barely trust. A loan overdue by
++       loanMaxDays days counts as a scam for the lender. Trust is remembered in autobot_relations. -->
++  <socialTradeEnabled>true</socialTradeEnabled>
++  <scammerPercent>5</scammerPercent>
++  <opportunistPercent>10</opportunistPercent>
++  <loanMaxDays>3</loanMaxDays>
++  <tradeLog>true</tradeLog>
+ </settings>
+diff --git a/sql/autobot_loans.sql b/sql/autobot_loans.sql
+new file mode 100644
+index 0000000..5a986cd
+--- /dev/null
++++ b/sql/autobot_loans.sql
+@@ -0,0 +1,15 @@
++CREATE TABLE IF NOT EXISTS autobot_loans (
++  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
++  `lender_id` INT UNSIGNED NOT NULL,
++  `borrower_id` INT UNSIGNED NOT NULL,
++  `item_id` INT UNSIGNED NOT NULL,
++  `item_object_id` INT UNSIGNED NOT NULL DEFAULT 0,
++  `enchant` SMALLINT NOT NULL DEFAULT 0,
++  `count` INT UNSIGNED NOT NULL DEFAULT 1,
++  `created` BIGINT UNSIGNED NOT NULL DEFAULT 0,
++  `due` BIGINT UNSIGNED NOT NULL DEFAULT 0,
++  `state` TINYINT UNSIGNED NOT NULL DEFAULT 0,
++  PRIMARY KEY (`id`),
++  KEY `lender` (`lender_id`),
++  KEY `borrower` (`borrower_id`)
++) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+index f103e8a..3f33b29 100644
+--- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
++++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+@@ -627,7 +627,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+ 
+     override fun onTradeFinish(successfull: Boolean) {
+         super.onTradeFinish(successfull)
+-        if(successfull) {
++        if(successfull && life == null) {
+             val bot = this
+             GlobalScope.launch { 
+                 delay(2000) 
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 15b9a7d..cc77a3c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -1,5 +1,6 @@
+ package dev.l2j.autobots
+ 
++import dev.l2j.autobots.population.trade.PlayerTrade
+ import dev.l2j.autobots.autofarm.AutofarmCommandHandler
+ import dev.l2j.autobots.autofarm.AutofarmManager
+ import dev.l2j.autobots.behaviors.preferences.ActivityType
+@@ -106,7 +107,7 @@ object AutobotsManager {
+             2 -> { // pm "
+                 if(target == null) return false
+                 val bot = activeBots.getOrElse(target) {null} ?: return false
+-                GroupChat.onWhisper(chatter, bot, text)
++                if (!PlayerTrade.onWhisper(chatter, bot, text)) GroupChat.onWhisper(chatter, bot, text)
+ 
+                 World.getInstance().players.filter { it.isGM }.forEach {
+                     it.sendPacket(CreatureSay(0, 15, "${chatter.name} -> ${bot.name}", text))
+@@ -132,6 +133,11 @@ object AutobotsManager {
+         if (target is Autobot) PartyInvites.onInvite(requestor, target)
+     }
+ 
++    /** Called by TradeRequest once a player asked a bot to trade: a bot never sees the request window. */
++    fun onTradeRequest(requestor: Player, target: Player) {
++        if (target is Autobot) PlayerTrade.onTradeRequest(requestor, target)
++    }
++
+     fun loadAutobotDashboard(player: Player, autobot: Autobot) {
+         AutobotsUi.loadBotDetails(player, autobot)
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/SocialBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/SocialBehavior.kt
+index b04b0ec..beb96d6 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/SocialBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/SocialBehavior.kt
+@@ -21,7 +21,8 @@ internal open class SocialBehavior(val bot: Player, var socialPreferences: Socia
+         if(bot.getActiveSequence() != null)
+             return
+         
+-        if(bot is Autobot) {
++        // Population bots answer trades in population/trade; this experimental path conjures the items it offers.
++        if(bot is Autobot && bot.life == null) {
+             if(bot.hasActiveTradeRequest() && bot.activeTradeList == null) {
+                 delay(2000)
+                 bot.answerTradeRequest(true)
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index da987de..d9bc4bd 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -51,7 +51,12 @@ internal data class AutobotSettings(
+         @JsonProperty("craftEnabled") var craftEnabled: Boolean = true,
+         @JsonProperty("crafterArtisanPercent") var crafterArtisanPercent: Int = 60,
+         @JsonProperty("questsEnabled") var questsEnabled: Boolean = true,
+-        @JsonProperty("questLog") var questLog: Boolean = true
++        @JsonProperty("questLog") var questLog: Boolean = true,
++        @JsonProperty("socialTradeEnabled") var socialTradeEnabled: Boolean = true,
++        @JsonProperty("scammerPercent") var scammerPercent: Int = 5,
++        @JsonProperty("opportunistPercent") var opportunistPercent: Int = 10,
++        @JsonProperty("loanMaxDays") var loanMaxDays: Int = 3,
++        @JsonProperty("tradeLog") var tradeLog: Boolean = true
+ ){
+     @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
+         setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index 8d64c1f..b4f435a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -16,6 +16,9 @@ import dev.l2j.autobots.population.quests.QuestLog
+ import dev.l2j.autobots.population.skills.SkillLog
+ import dev.l2j.autobots.population.group.GroupFinder
+ import dev.l2j.autobots.population.group.Relations
++import dev.l2j.autobots.population.trade.Loans
++import dev.l2j.autobots.population.trade.SocialTrade
++import dev.l2j.autobots.population.trade.TradeLog
+ import dev.l2j.autobots.utils.giveItemsByClassAndLevel
+ import dev.l2j.autobots.utils.Klock
+ import dev.l2j.autobots.utils.getRandomAppearance
+@@ -54,6 +57,7 @@ internal object PopulationManager {
+         if (settings.populationSize <= 0) return
+ 
+         CoScopes.generalScope.launch {
++            if (settings.socialTradeEnabled) Loans.load()
+             AutobotsDao.loadPopulationMembers().forEach {
+                 addMember(it.objectId, it.name, Instant.ofEpochMilli(it.creationTime).atZone(zone).toLocalDate())
+             }
+@@ -74,7 +78,10 @@ internal object PopulationManager {
+ 
+             offline.mapNotNull { AutobotsManager.activeBots[it.name] }
+                     .filter { it.controller == null && !it.isInCombat && it.life?.keepsOnline() != true }
+-                    .forEach { logout(it) }
++                    .forEach {
++                        SocialTrade.beforeLogout(it)
++                        logout(it)
++                    }
+ 
+             playing.filter { !AutobotsManager.activeBots.containsKey(it.name) }
+                     .shuffled()
+@@ -86,12 +93,14 @@ internal object PopulationManager {
+                 EconomyLog.summary(bots)
+                 QuestLog.summary(bots)
+                 SkillLog.summary(bots)
++                if (SocialTrade.enabled) TradeLog.summary(bots)
+             }
+             if ((ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
+                 GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
+             }
+             val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
+             if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
++            if (ticks % GROUPS_EVERY_TICKS == 1) SocialTrade.tick(online)
+             if (++ticks % SAVE_EVERY_TICKS == 0) {
+                 online.forEach {
+                     AutobotsDao.saveAutobot(it)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt
+index 1c39338..f79ad2c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Enchanter.kt
+@@ -1,5 +1,6 @@
+ package dev.l2j.autobots.population.economy
+ 
++import dev.l2j.autobots.population.trade.Loans
+ import dev.l2j.autobots.Autobot
+ import net.sf.l2j.Config
+ import net.sf.l2j.commons.random.Rnd
+@@ -45,7 +46,7 @@ internal object Enchanter {
+         for (scrollItem in bot.inventory.items.filter { AbstractEnchantPacket._scrolls.containsKey(it.itemId) }) {
+             val scroll = AbstractEnchantPacket._scrolls.getValue(scrollItem.itemId)
+             val target = bot.inventory.paperdollItems
+-                    .filter { scroll.isValid(it) && isEnchantable(it) && it.enchantLevel < capFor(bot, it, temper, scroll.isBlessed) }
++                    .filter { scroll.isValid(it) && isEnchantable(it) && !Loans.isBorrowed(bot, it) && it.enchantLevel < capFor(bot, it, temper, scroll.isBlessed) }
+                     .minByOrNull { it.enchantLevel } ?: continue
+             return scrollItem to target
+         }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index d38ff04..938cbd7 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -6,6 +6,7 @@ import dev.l2j.autobots.behaviors.attributes.PetOwner
+ import dev.l2j.autobots.behaviors.preferences.PetOwnerPreferences
+ import dev.l2j.autobots.extensions.getCombatBehavior
+ import dev.l2j.autobots.population.economy.craft.CraftStock
++import dev.l2j.autobots.population.trade.Loans
+ import net.sf.l2j.gameserver.data.ItemTable
+ import net.sf.l2j.gameserver.enums.items.ArmorType
+ import net.sf.l2j.gameserver.enums.items.CrystalType
+@@ -117,7 +118,7 @@ internal object Gear {
+         return replaced
+     }
+ 
+-    private fun isUpgrade(bot: Player, item: ItemInstance): Boolean {
++    fun isUpgrade(bot: Player, item: ItemInstance): Boolean {
+         val current = bot.inventory.getPaperdollItem(slotOf(bot, item)) ?: return fitsEmptySlot(bot, item)
+         if (current.item.bodyPart != item.item.bodyPart || current.itemType != item.itemType) return false
+         if (item.isWeapon && item.weaponItem.isMagical != current.weaponItem.isMagical) return false
+@@ -194,8 +195,10 @@ internal object Gear {
+         keep += AbstractEnchantPacket._scrolls.filter { (_, scroll) -> worn.any { scroll.isValid(it) } }.keys
+         // Recipes, materials and parts for the bot's own crafts or workshop orders.
+         keep += CraftStock.keep(bot)
++        // Borrowed gear and what it replaced are not the bot's to sell.
++        val lent = Loans.protectedObjects(bot)
+         return bot.inventory.items.filter {
+-            !it.isEquipped && it.itemId !in keep && !it.isQuestItem && !it.isHeroItem && !it.isShadowItem &&
++            !it.isEquipped && it.itemId !in keep && it.objectId !in lent && !it.isQuestItem && !it.isHeroItem && !it.isShadowItem &&
+                     it.referencePrice >= 2 && (it.isSellable || it.isTradable)
+         }
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index 6fe5bc5..432e3d4 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -1,5 +1,7 @@
+ package dev.l2j.autobots.population.economy
+ 
++import dev.l2j.autobots.population.trade.Loans
++import dev.l2j.autobots.population.trade.SocialTrade
+ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.behaviors.sequences.Sequence
+ import dev.l2j.autobots.behaviors.sequences.WalkToSequence
+@@ -109,8 +111,10 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         if (bot.isSitting) bot.standUp()
+ 
+         Gear.equipUpgradesFromInventory(bot)
++        SocialTrade.repayInTown(bot)
+         Crystals.crystallizeJunk(bot)
+         tradeWithStores()
++        SocialTrade.tradeInTown(bot)
+         // Workshop orders when cheaper than shops and stores, then the dwarf's own crafting.
+         Sourcing.orderCheapest(bot) { walkTo(it, "to a workshop or store") }
+         Crafter.work(bot)
+@@ -118,9 +122,10 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         // Skills before gear: a spellbook and the trainer's lesson come first, like for a player.
+         SkillLearner.learn(bot)
+         buySupplies()
++        SocialTrade.borrowForGear(bot)
+         buyGear()
+         // What the new gear replaced is junk now, and so are store goods if the bag is still heavy.
+-        val leftovers = Gear.equipUpgradesFromInventory(bot) + junk()
++        val leftovers = (Gear.equipUpgradesFromInventory(bot) + junk()).filter { it.objectId !in Loans.protectedObjects(bot) }
+         val heavy = if (Errands.loadPercent(bot) >= 40) StoreKeeper.storeGoods(bot) + Gear.surplus(bot).filter { it.isSellable } else emptyList()
+         sellToNpc((leftovers + heavy).distinct().filter { bot.inventory.getItemByObjectId(it.objectId) != null })
+         Enchanter.enchantWorn(bot, cautious)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
+index 22a45f6..9deb240 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
+@@ -4,6 +4,7 @@ import dev.l2j.autobots.Autobot
+ import net.sf.l2j.L2DatabaseFactory
+ import net.sf.l2j.gameserver.model.actor.Player
+ import java.util.concurrent.ConcurrentHashMap
++import kotlin.math.abs
+ 
+ /** What one bot remembers about another character, bot or player. */
+ internal class Relation(var minutesTogether: Int = 0, var affinity: Int = 0, var trust: Int = 0, var lastSeen: Long = 0) {
+@@ -28,6 +29,19 @@ internal object Relations {
+ 
+     fun of(bot: Player, otherId: Int): Relation? = memory[bot.objectId]?.get(otherId)
+ 
++    fun trust(bot: Player, otherId: Int): Int = memory[bot.objectId]?.get(otherId)?.trust ?: 0
++
++    /** A deal kept or broken (stage 2g) moves trust and liking. Only a bot online has its memory loaded. */
++    fun adjust(bot: Player, otherId: Int, trust: Int, affinity: Int = 0) {
++        if (bot !is Autobot || bot.objectId == otherId || !memory.containsKey(bot.objectId)) return
++        relation(bot, otherId).apply {
++            this.trust = (this.trust + trust).coerceIn(-MAX_AFFINITY, MAX_AFFINITY)
++            this.affinity = (this.affinity + affinity).coerceIn(-MAX_AFFINITY, MAX_AFFINITY)
++            lastSeen = System.currentTimeMillis()
++            dirty = true
++        }
++    }
++
+     /** Half a minute in the same party, counted for every pair of members within reach of each other. */
+     fun playedTogether(party: List<Player>, minutes: Double) {
+         val now = System.currentTimeMillis()
+@@ -61,8 +75,8 @@ internal object Relations {
+     private fun relation(bot: Player, otherId: Int): Relation {
+         val relations = memory.getOrPut(bot.objectId) { ConcurrentHashMap() }
+         return relations.getOrPut(otherId) {
+-            // A full memory forgets the least liked, least recent acquaintance.
+-            if (relations.size >= MAX_PER_BOT) relations.entries.minByOrNull { it.value.affinity * 1000L + it.value.lastSeen / 60_000 }?.let { relations.remove(it.key) }
++            // A full memory forgets the most indifferent, least recent acquaintance: a friend or a scammer is remembered.
++            if (relations.size >= MAX_PER_BOT) relations.entries.minByOrNull { (abs(it.value.affinity) + abs(it.value.trust)) * 1000L + it.value.lastSeen / 60_000 }?.let { relations.remove(it.key) }
+             Relation()
+         }
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/Loans.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/Loans.kt
+new file mode 100644
+index 0000000..bd4125d
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/trade/Loans.kt
+@@ -0,0 +1,141 @@
++package dev.l2j.autobots.population.trade
++
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++import java.sql.Statement
++import java.util.concurrent.CopyOnWriteArrayList
++
++/**
++ * Something lent: an item (its object id, so the borrower gives back the very same one) or a sum of adena.
++ * [State.Defaulted] is the lender's view of a loan overdue by `loanMaxDays`: a scam, until it is returned after all.
++ */
++internal class Loan(val id: Int, val lenderId: Int, val borrowerId: Int, val itemId: Int, val itemObjectId: Int, val enchant: Int,
++                    val count: Int, val created: Long, val due: Long, var state: State) {
++    enum class State { Open, Returned, Defaulted }
++
++    /** When the borrower last heard about it from the lender or told the lender something; not stored. */
++    var lastReminder = 0L
++    /** The borrower decided to keep it; not stored, decided again after a restart. */
++    var kept = false
++
++    val isAdena get() = itemId == ADENA
++    val name: String get() = if (isAdena) "${count} adena" else
++        (if (enchant > 0) "+$enchant " else "") + (ItemTable.getInstance().getTemplate(itemId)?.name ?: "$itemId")
++
++    companion object {
++        const val ADENA = 57
++    }
++}
++
++/** Loans between characters, bots or players, kept in `autobot_loans`. Open and defaulted loans stay in memory. */
++internal object Loans {
++    private val active = CopyOnWriteArrayList<Loan>()
++
++    fun load() {
++        active.clear()
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("SELECT id, lender_id, borrower_id, item_id, item_object_id, enchant, count, created, due, state FROM autobot_loans WHERE state<>?").use { ps ->
++                    ps.setInt(1, Loan.State.Returned.ordinal)
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) active += Loan(rs.getInt(1), rs.getInt(2), rs.getInt(3), rs.getInt(4), rs.getInt(5), rs.getInt(6),
++                                rs.getInt(7), rs.getLong(8), rs.getLong(9), Loan.State.values()[rs.getInt(10)])
++                    }
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    fun all(): List<Loan> = active
++
++    fun owedBy(borrower: Player): List<Loan> = active.filter { it.borrowerId == borrower.objectId }
++
++    fun lentBy(lender: Player): List<Loan> = active.filter { it.lenderId == lender.objectId }
++
++    fun between(lender: Player, borrower: Player): List<Loan> = active.filter { it.lenderId == lender.objectId && it.borrowerId == borrower.objectId }
++
++    fun isBorrowed(bot: Player, item: ItemInstance): Boolean = active.any { it.borrowerId == bot.objectId && it.itemObjectId == item.objectId && !it.isAdena }
++
++    /**
++     * Items the borrower must not sell, crystallize or put in a store: the borrowed ones, and for each of them the best
++     * item of the same body part it replaced, so the bot has something to wear again once it gives the loan back.
++     */
++    fun protectedObjects(bot: Player): Set<Int> {
++        val borrowed = active.filter { it.borrowerId == bot.objectId && !it.isAdena }
++        if (borrowed.isEmpty()) return emptySet()
++        val result = HashSet<Int>()
++        for (loan in borrowed) {
++            val item = bot.inventory.getItemByObjectId(loan.itemObjectId) ?: continue
++            result += item.objectId
++            bot.inventory.items.filter { it.objectId != item.objectId && it.item.bodyPart == item.item.bodyPart && it.isEquipable && !isBorrowed(bot, it) }
++                    .maxByOrNull { it.referencePrice }?.let { result += it.objectId }
++        }
++        return result
++    }
++
++    fun open(lender: Player, borrower: Player, itemId: Int, itemObjectId: Int, enchant: Int, count: Int, due: Long): Loan? {
++        val now = System.currentTimeMillis()
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("INSERT INTO autobot_loans (lender_id, borrower_id, item_id, item_object_id, enchant, count, created, due, state) VALUES (?,?,?,?,?,?,?,?,?)",
++                        Statement.RETURN_GENERATED_KEYS).use { ps ->
++                    ps.setInt(1, lender.objectId)
++                    ps.setInt(2, borrower.objectId)
++                    ps.setInt(3, itemId)
++                    ps.setInt(4, itemObjectId)
++                    ps.setInt(5, enchant)
++                    ps.setInt(6, count)
++                    ps.setLong(7, now)
++                    ps.setLong(8, due)
++                    ps.setInt(9, Loan.State.Open.ordinal)
++                    ps.executeUpdate()
++                    ps.generatedKeys.use { keys ->
++                        if (!keys.next()) return null
++                        val loan = Loan(keys.getInt(1), lender.objectId, borrower.objectId, itemId, itemObjectId, enchant, count, now, due, Loan.State.Open)
++                        active += loan
++                        return loan
++                    }
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++            return null
++        }
++    }
++
++    /** The name of a character who is offline: bots are not in the player table the core keeps in memory. */
++    fun nameOf(objectId: Int): String? {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("SELECT char_name FROM autobots WHERE obj_Id=? UNION SELECT char_name FROM characters WHERE obj_Id=?").use { ps ->
++                    ps.setInt(1, objectId)
++                    ps.setInt(2, objectId)
++                    ps.executeQuery().use { rs -> return if (rs.next()) rs.getString(1) else null }
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++            return null
++        }
++    }
++
++    fun setState(loan: Loan, state: Loan.State) {
++        loan.state = state
++        if (state == Loan.State.Returned) active.remove(loan)
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("UPDATE autobot_loans SET state=? WHERE id=?").use { ps ->
++                    ps.setInt(1, state.ordinal)
++                    ps.setInt(2, loan.id)
++                    ps.executeUpdate()
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
+new file mode 100644
+index 0000000..6b8fee5
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
+@@ -0,0 +1,414 @@
++package dev.l2j.autobots.population.trade
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.economy.Market
++import dev.l2j.autobots.population.economy.StoreKeeper
++import dev.l2j.autobots.population.group.Relations
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++import net.sf.l2j.gameserver.model.tradelist.TradeItem
++import java.util.concurrent.ConcurrentHashMap
++
++/**
++ * Deals between a bot and a player: the player whispers what they want ("продай", "дай поносить", "поноси", "верни")
++ * and opens the trade window, or just opens it and puts something in. The bot answers like a player would, puts its
++ * side in the window and confirms only when the other side is what it agreed to. Keyword matching for now, like
++ * party chat; the LLM of stage 5 takes over the talking later.
++ */
++internal object PlayerTrade {
++    private val RETURN = Regex("(верни|отдай|где (мой|моя|мои|моё)|return|give (it )?back|give me back)", RegexOption.IGNORE_CASE)
++    private val LEND_TO_BOT = Regex("(поноси|бери на время|держи,? (потом )?верн|дам (тебе )?(в долг|взаймы|поносить)|lend you|borrow mine|keep it for)", RegexOption.IGNORE_CASE)
++    private val BORROW = Regex("(дай поносить|дашь поносить|одолжи|займи|займ[её]шь|в долг|взаймы|lend me|can i borrow|borrow)", RegexOption.IGNORE_CASE)
++    private val BUY = Regex("(прода(й|шь|[её]шь)|куплю|\\bwtb\\b|\\bwts\\b|меня(ю|ешь|емся)|обмен|есть (у тебя )?.+\\?|\\bsell\\b|\\bbuy\\b|\\bswap\\b)", RegexOption.IGNORE_CASE)
++    private val AMOUNT = Regex("(\\d+(?:[.,]\\d+)?)\\s*(кк|kk|к|k)?", RegexOption.IGNORE_CASE)
++    private val DURATION = Regex("(\\d+)\\s*(мин|min|час|ч\\b|h\\b|hour|дн|день|дня|day|d\\b)", RegexOption.IGNORE_CASE)
++    private val WEAPON = Regex("(оруж|пуш|пух|меч|лук|посох|кинж|weapon|sword|bow|staff|dagger|blade)", RegexOption.IGNORE_CASE)
++    private val ARMOR = Regex("(брон|сет|шмот|armor|armour)", RegexOption.IGNORE_CASE)
++    private val RUSSIAN = Regex("[а-яА-ЯёЁ]")
++    private val STOP_WORDS = setOf("the", "and", "for", "есть", "дай", "продай")
++
++    private const val PENDING_MS = 3 * 60_000L
++    private const val SESSION_MS = 90_000L
++    private const val HOUR = 3_600_000L
++    private const val PLAYER_ITEM_LOAN_HOURS = 1L
++    private const val PLAYER_ADENA_LOAN_HOURS = 24L
++    private const val SCAM_CHANCE_PER_TICK = 15
++    private const val SCAM_COOLDOWN_MS = 24 * HOUR
++    private const val REMIND_EVERY_MS = 30 * 60_000L
++
++    private sealed class Pending(val botId: Int, val expires: Long = System.currentTimeMillis() + PENDING_MS) {
++        class Sell(botId: Int, val item: ItemInstance, val count: Int, val price: Long, val claimedEnchant: Int) : Pending(botId)
++        class LendToPlayer(botId: Int, val item: ItemInstance?, val adena: Int, val due: Long) : Pending(botId)
++        class LendToBot(botId: Int, val due: Long) : Pending(botId)
++        class Return(botId: Int) : Pending(botId)
++    }
++
++    private val pending = ConcurrentHashMap<Int, Pending>()
++    private val language = ConcurrentHashMap<Int, Boolean>()
++    private val lastScam = ConcurrentHashMap<Int, Long>()
++
++    private fun russian(player: Player) = language[player.objectId] ?: true
++
++    private fun say(bot: Autobot, player: Player, ru: String, en: String) {
++        CoScopes.generalScope.launch {
++            delay(Rnd.get(1000, 3000).toLong())
++            bot.tell(player.name, if (russian(player)) ru else en)
++        }
++    }
++
++    // ---- Whispers ----
++
++    /** A whisper from a player to a population bot. @return true if it was about trading. */
++    fun onWhisper(player: Player, bot: Autobot, text: String): Boolean {
++        // A bot behind a store haggles over its store (economy); the trade window is for bots out of a store.
++        if (!SocialTrade.enabled || !SocialTrade.isPopulation(bot) || player is Autobot || bot.isInStoreMode) return false
++        language[player.objectId] = RUSSIAN.containsMatchIn(text)
++        when {
++            RETURN.containsMatchIn(text) -> onReturnAsked(player, bot)
++            LEND_TO_BOT.containsMatchIn(text) -> onLendOffered(player, bot, text)
++            BORROW.containsMatchIn(text) -> onBorrowAsked(player, bot, text)
++            BUY.containsMatchIn(text) -> onBuyAsked(player, bot, text)
++            else -> return false
++        }
++        return true
++    }
++
++    private fun onReturnAsked(player: Player, bot: Autobot) {
++        val owed = Loans.between(player, bot)
++        if (owed.isEmpty()) return say(bot, player, "я тебе ничего не должен", "I don't owe you anything")
++        if (owed.any { SocialTrade.keeps(bot, it, player) }) {
++            if (Rnd.get(100) < 50) say(bot, player, "какой долг? ничего не брал", "what loan? never took anything")
++            return
++        }
++        pending[player.objectId] = Pending.Return(bot.objectId)
++        say(bot, player, "ок, кидай трейд, верну ${owed.joinToString { it.name }}", "ok, trade me, I'll give back ${owed.joinToString { it.name }}")
++    }
++
++    private fun onLendOffered(player: Player, bot: Autobot, text: String) {
++        if (SocialTrade.refusesDeals(bot, player)) return say(bot, player, "от тебя ничего не возьму", "I won't take anything from you")
++        val due = System.currentTimeMillis() + duration(text, PLAYER_ITEM_LOAN_HOURS * HOUR)
++        pending[player.objectId] = Pending.LendToBot(bot.objectId, due)
++        say(bot, player, "о, спс! кидай трейд, верну", "oh thanks! trade me, I'll give it back")
++    }
++
++    private fun onBorrowAsked(player: Player, bot: Autobot, text: String) {
++        val ru = russian(player)
++        val amount = amount(text)
++        val item = if (amount == null) findItem(text, Gear.surplus(bot).filter { it.isTradable && it.isEquipable }) else null
++        if (amount == null && item == null) return say(bot, player, "а что именно? у меня лишнего нет", "what exactly? nothing spare")
++        val value = amount?.toLong() ?: Worth.of(item!!.itemId, item.enchantLevel, 1)
++        if (amount != null && amount > Errands.spendable(bot)) return say(bot, player, "столько нет", "don't have that much")
++        val refusal = SocialTrade.refusalToLend(bot, player, value, ru)
++        if (refusal != null) {
++            TradeLog.log(bot, TradeDeal.Refused, "won't lend ${amount ?: item!!.itemName} to ${player.name}: $refusal")
++            return say(bot, player, refusal, refusal)
++        }
++        val due = System.currentTimeMillis() + duration(text, (if (amount != null) PLAYER_ADENA_LOAN_HOURS else PLAYER_ITEM_LOAN_HOURS) * HOUR)
++        pending[player.objectId] = Pending.LendToPlayer(bot.objectId, item, amount ?: 0, due)
++        val what = amount?.let { "$it аден" } ?: item!!.itemName
++        say(bot, player, "ок, дам $what, кидай трейд. верни вовремя", "ok, I'll lend you ${amount?.let { "$it adena" } ?: item!!.itemName}, trade me. return it in time")
++    }
++
++    private fun onBuyAsked(player: Player, bot: Autobot, text: String) {
++        if (SocialTrade.refusesDeals(bot, player)) return say(bot, player, "с тобой не торгую", "not trading with you")
++        val goods = Gear.surplus(bot).filter { it.isTradable }
++        val item = findItem(text, goods) ?: return say(bot, player, "такого нет, сорри", "don't have it, sorry")
++        val count = if (item.isStackable) (amount(text) ?: item.count).coerceIn(1, item.count) else 1
++        val price = (Worth.asking(bot, item, count) * trustFactor(bot, player)).toLong().coerceAtLeast(1)
++        pending[player.objectId] = Pending.Sell(bot.objectId, item, count, price, item.enchantLevel)
++        val label = "${if (count > 1) "$count " else ""}${item.itemName}${if (item.enchantLevel > 0) " +${item.enchantLevel}" else ""}"
++        say(bot, player, "$label за $price аден, кидай трейд", "$label for $price adena, trade me")
++    }
++
++    /** Friends get a discount, people who let the bot down pay more. */
++    private fun trustFactor(bot: Player, player: Player): Double {
++        val trust = SocialTrade.trusts(bot, player)
++        return when {
++            Relations.affinity(bot, player) >= Relations.FRIEND || trust >= 30 -> 0.9
++            trust < 0 -> 1.2
++            else -> 1.0
++        }
++    }
++
++    private fun amount(text: String): Int? {
++        if (!Regex("(адена|адены|аден|adena|\\d\\s*(к|k|кк|kk)\\b|\\d{3,})", RegexOption.IGNORE_CASE).containsMatchIn(text)) return null
++        val match = AMOUNT.find(text) ?: return null
++        val number = match.groupValues[1].replace(',', '.').toDoubleOrNull() ?: return null
++        val multiplier = when (match.groupValues[2].lowercase()) {
++            "к", "k" -> 1_000.0
++            "кк", "kk" -> 1_000_000.0
++            else -> 1.0
++        }
++        return (number * multiplier).toLong().coerceIn(1, Int.MAX_VALUE.toLong()).toInt()
++    }
++
++    private fun duration(text: String, default: Long): Long {
++        val match = DURATION.find(text) ?: return default
++        val number = match.groupValues[1].toLongOrNull() ?: return default
++        val unit = match.groupValues[2].lowercase()
++        val ms = when {
++            unit.startsWith("мин") || unit.startsWith("min") -> 60_000L
++            unit.startsWith("д") || unit.startsWith("d") -> 24 * HOUR
++            else -> HOUR
++        }
++        return (number * ms).coerceIn(10 * 60_000L, 7 * 24 * HOUR)
++    }
++
++    /** An item named in free text: by the words of its name, or the best spare weapon or armor when only that is said. */
++    private fun findItem(text: String, items: List<ItemInstance>): ItemInstance? {
++        val lower = text.lowercase()
++        val byName = items.map { item ->
++            item to item.itemName.lowercase().split(Regex("[^a-zа-я0-9]+")).count { it.length >= 3 && it !in STOP_WORDS && lower.contains(it) }
++        }.filter { it.second > 0 }.maxWithOrNull(compareBy<Pair<ItemInstance, Int>> { it.second }.thenBy { it.first.referencePrice })?.first
++        if (byName != null) return byName
++        if (WEAPON.containsMatchIn(text)) return items.filter { it.isWeapon }.maxByOrNull { it.referencePrice }
++        if (ARMOR.containsMatchIn(text)) return items.filter { it.isArmor }.maxByOrNull { it.referencePrice }
++        return null
++    }
++
++    // ---- The trade window ----
++
++    /** Called when a player asks a population bot to trade (the request packet). */
++    fun onTradeRequest(player: Player, bot: Autobot) {
++        if (!SocialTrade.enabled || !SocialTrade.isPopulation(bot) || player is Autobot) return
++        CoScopes.generalScope.launch {
++            delay(Rnd.get(1000, 3000).toLong())
++            if (bot.activeRequester !== player) return@launch
++            when {
++                SocialTrade.refusesDeals(bot, player) -> {
++                    bot.answerTradeRequest(false)
++                    TradeLog.log(bot, TradeDeal.Refused, "won't trade with ${player.name}")
++                    say(bot, player, "с тобой не торгую, ты меня кинул", "not trading with you, you scammed me")
++                }
++                bot.isDead || bot.isInCombat || bot.isInStoreMode || !SocialTrade.free(bot) -> bot.answerTradeRequest(false)
++                else -> {
++                    bot.answerTradeRequest(true)
++                    if (bot.activeTradeList != null) SocialTrade.dealing(bot) { session(bot, player) }
++                }
++            }
++        }
++    }
++
++    /** The bot asks the player for a trade and runs the session once the player accepts. */
++    private suspend fun requestTrade(bot: Autobot, player: Player) {
++        if (!TradeWindow.approach(bot, player)) return
++        if (!SocialTrade.free(bot) || player.isProcessingTransaction) return
++        SocialTrade.dealing(bot) {
++            bot.startTradeRequest(player)
++            repeat(20) {
++                delay(1000)
++                if (bot.activeTradeList != null) return@dealing session(bot, player)
++            }
++        }
++    }
++
++    /**
++     * One trade window with a player, from start to end. What the bot puts and when it confirms depends on what
++     * was agreed in whispers; with nothing agreed, the bot gives back what it owes, takes back what it lent, or
++     * offers adena for things it wants.
++     */
++    private suspend fun session(bot: Autobot, player: Player) {
++        val agreed = pending[player.objectId]?.takeIf { it.botId == bot.objectId && it.expires > System.currentTimeMillis() }
++        pending.remove(player.objectId)
++        val owed = Loans.between(player, bot).filter { !SocialTrade.keeps(bot, it, player) }
++        val lent = Loans.between(bot, player)
++        val start = System.currentTimeMillis()
++
++        var gives = emptyList<Pair<ItemInstance, Int>>()
++        var ready: (List<TradeItem>) -> Boolean = { true }
++        var done: (List<TradeItem>) -> Unit = {}
++        var offeredFor: List<TradeItem>? = null
++
++        when {
++            agreed is Pending.Sell -> {
++                gives = listOf(agreed.item to agreed.count)
++                ready = { items -> value(bot, items) >= agreed.price }
++                done = { items ->
++                    if (agreed.claimedEnchant > agreed.item.enchantLevel) TradeLog.log(bot, TradeDeal.Scam,
++                            "sold ${agreed.item.itemName} +${agreed.item.enchantLevel} as +${agreed.claimedEnchant} to ${player.name} for ${value(bot, items)}")
++                    else {
++                        SocialTrade.honestDeal(bot, player)
++                        TradeLog.log(bot, TradeDeal.Sale, "sold ${agreed.count} ${agreed.item.itemName} to ${player.name} for ${value(bot, items)}")
++                    }
++                }
++            }
++            owed.isNotEmpty() && (agreed == null || agreed is Pending.Return) -> {
++                gives = owed.mapNotNull { loan -> repayment(bot, loan)?.let { it to loan.count } }
++                val wornParts = gives.filter { it.first.isEquipped }.map { it.first.item.bodyPart }
++                done = {
++                    owed.forEach { SocialTrade.closeLoan(it, player, bot) }
++                    wornParts.forEach { SocialTrade.wearBest(bot, it) }
++                }
++            }
++            agreed is Pending.LendToPlayer -> {
++                val give = agreed.item ?: bot.inventory.adenaInstance
++                gives = listOfNotNull(give?.let { it to (if (agreed.item != null) it.count else agreed.adena) })
++                done = {
++                    val loan = Loans.open(bot, player, give!!.itemId, agreed.item?.objectId ?: 0, agreed.item?.enchantLevel ?: 0,
++                            if (agreed.item != null) give.count else agreed.adena, agreed.due)
++                    if (loan != null) TradeLog.log(bot, TradeDeal.LoanGiven, "lent ${loan.name} to ${player.name}")
++                }
++            }
++            lent.isNotEmpty() && agreed == null -> {
++                ready = { items -> lent.any { loan -> covers(items, loan) } }
++                done = { items -> lent.filter { covers(items, it) }.forEach { SocialTrade.closeLoan(it, bot, player) } }
++            }
++            agreed is Pending.LendToBot -> {
++                ready = { items -> items.isNotEmpty() }
++                done = { items ->
++                    for (item in items) {
++                        val loan = Loans.open(player, bot, item.item.itemId, if (item.item.isStackable) 0 else item.objectId, item.enchant, item.count, agreed.due)
++                        if (loan != null) TradeLog.log(bot, TradeDeal.LoanGiven, "borrowed ${loan.name} from ${player.name}")
++                    }
++                    bot.inventory.items.filter { Loans.isBorrowed(bot, it) && !it.isEquipped && it.isEquipable }.forEach { Gear.equip(bot, it) }
++                }
++            }
++            else -> {
++                // Nothing agreed: the bot looks at what the player puts and offers adena for what it wants.
++                ready = { items -> offeredFor != null && items.size == offeredFor!!.size }
++                done = { items ->
++                    if (offeredFor.isNullOrEmpty()) {
++                        Relations.adjust(bot, player.objectId, 3, 5)
++                        TradeLog.log(bot, TradeDeal.Gift, "got ${items.joinToString { "${it.count} ${it.item.name}" }} from ${player.name}")
++                    } else {
++                        SocialTrade.honestDeal(bot, player)
++                        TradeLog.log(bot, TradeDeal.Sale, "bought ${items.joinToString { "${it.count} ${it.item.name}" }} from ${player.name}")
++                    }
++                }
++            }
++        }
++
++        delay(Rnd.get(1000, 2000).toLong())
++        for ((item, count) in gives) {
++            if (!TradeWindow.put(bot, item, count)) {
++                bot.cancelActiveTrade()
++                return
++            }
++            delay(Rnd.get(500, 1200).toLong())
++        }
++        val givenBefore = TradeWindow.snapshot(bot, gives.map { it.first.itemId })
++        val givenCounts = gives.groupBy { it.first.itemId }.mapValues { (_, v) -> v.sumOf { it.second } }
++        var receivedBefore = emptyMap<Int, Long>()
++        var confirmedWith: List<TradeItem>? = null
++        var asked = false
++        var lastSize = -1
++        var stableSince = System.currentTimeMillis()
++
++        while (bot.activeTradeList != null && System.currentTimeMillis() - start < SESSION_MS) {
++            delay(1000)
++            val items = TradeWindow.partnerItems(bot).toList()
++            if (items.size != lastSize) {
++                lastSize = items.size
++                stableSince = System.currentTimeMillis()
++            }
++            if (!asked && items.isEmpty() && gives.isEmpty() && System.currentTimeMillis() - start > 8000) {
++                asked = true
++                say(bot, player, "?", "?")
++            }
++            // Nothing agreed: once the player's side stays the same for a few seconds, the bot names its price once.
++            if (agreed == null && owed.isEmpty() && lent.isEmpty() && offeredFor == null && items.isNotEmpty() &&
++                    System.currentTimeMillis() - stableSince > 3000) {
++                offeredFor = items
++                val bid = bid(bot, items)
++                if (bid > 0 && TradeWindow.putAdena(bot, bid)) say(bot, player, "даю $bid", "I'll give $bid")
++                else if (bid <= 0) say(bot, player, "мне это не нужно", "I don't need that")
++                else {
++                    bot.cancelActiveTrade()
++                    return
++                }
++            }
++            if (confirmedWith == null && (gives.isNotEmpty() || items.isNotEmpty()) && ready(items)) {
++                // A bot that doesn't need the things (bid 0) never confirms them as a purchase; a gift needs the player first.
++                if (agreed == null && owed.isEmpty() && lent.isEmpty() && bid(bot, items) <= 0 && !TradeWindow.partnerConfirmed(bot)) continue
++                confirmedWith = items
++                receivedBefore = TradeWindow.snapshot(bot, items.map { it.item.itemId })
++                delay(Rnd.get(1000, 2500).toLong())
++                bot.activeTradeList?.confirm()
++            }
++        }
++        if (bot.activeTradeList != null) {
++            bot.cancelActiveTrade()
++            if (agreed is Pending.Sell && agreed.claimedEnchant > agreed.item.enchantLevel) TradeLog.log(bot, TradeDeal.ScamFailed, "${player.name} didn't buy the fake +${agreed.claimedEnchant}")
++            say(bot, player, "долго, давай потом", "too slow, later")
++            return
++        }
++        val received = confirmedWith ?: return
++        // The window closed after the bot confirmed: it went through if the bot's side left or the player's side arrived.
++        val went = if (gives.isNotEmpty()) givenCounts.all { (id, count) ->
++            (givenBefore[id] ?: 0) - bot.inventory.getItemsByItemId(id).sumOf { it.count.toLong() } >= count
++        } else TradeWindow.gained(bot, receivedBefore, received.groupBy { it.item.itemId }.mapValues { (_, v) -> v.sumOf { it.count } })
++        if (went) done(received)
++    }
++
++    private fun repayment(bot: Player, loan: Loan): ItemInstance? =
++            if (loan.isAdena) bot.inventory.adenaInstance?.takeIf { it.count >= loan.count } else bot.inventory.getItemByObjectId(loan.itemObjectId)
++
++    private fun covers(items: List<TradeItem>, loan: Loan): Boolean =
++            items.filter { it.item.itemId == loan.itemId && it.enchant >= loan.enchant }.sumOf { it.count } >= loan.count
++
++    /** The player's side as the bot sees it: adena at face value, items at what they are worth to the bot. */
++    private fun value(bot: Autobot, items: List<TradeItem>): Long {
++        val wanted = Worth.wanted(bot)
++        return items.sumOf { Worth.receiving(it.item.itemId, it.enchant, it.count, wanted) }
++    }
++
++    /** What the bot pays for things it wants: its store bid, within what it can spend. Things it doesn't want: nothing. */
++    private fun bid(bot: Autobot, items: List<TradeItem>): Int {
++        val wanted = Worth.wanted(bot)
++        val total = items.filter { it.item.itemId in wanted }.sumOf { StoreKeeper.bidPrice(bot, it.item.itemId).toLong() * it.count }
++        return total.coerceAtMost(Errands.spendable(bot).toLong()).toInt()
++    }
++
++    // ---- Periodic, from SocialTrade.tick ----
++
++    /** A bot owes a player: honest, it gives it back when due and the player is around, or asks where they are. */
++    fun repayPlayer(loan: Loan, bot: Autobot, player: Player, now: Long) {
++        if (loan.due > now && loan.state == Loan.State.Open) return
++        if (SocialTrade.keeps(bot, loan, player) || repayment(bot, loan) == null) return
++        if (distance(bot, player) <= 1500 && SocialTrade.free(bot) && !player.isProcessingTransaction) {
++            if (now - loan.lastReminder < 2 * 60_000L) return
++            loan.lastReminder = now
++            say(bot, player, "верну ${loan.name}, прими трейд", "giving back ${loan.name}, accept the trade")
++            CoScopes.generalScope.launch { requestTrade(bot, player) }
++        } else if (now - loan.lastReminder > REMIND_EVERY_MS) {
++            loan.lastReminder = now
++            say(bot, player, "хочу вернуть ${loan.name}, ты где? кинь трейд как будешь рядом", "want to give back ${loan.name}, where are you? trade me when near")
++            pending[player.objectId] = Pending.Return(bot.objectId)
++        }
++    }
++
++    /** A player owes a bot: after the due time the bot reminds them now and then. */
++    fun remindPlayer(loan: Loan, lender: Player, player: Player, now: Long) {
++        val bot = lender as? Autobot ?: return
++        if (!SocialTrade.isPopulation(bot) || loan.due > now || now - loan.lastReminder < REMIND_EVERY_MS) return
++        loan.lastReminder = now
++        say(bot, player, "верни ${loan.name}, срок вышел", "your time is up, give back my ${loan.name}")
++    }
++
++    /**
++     * A scammer in town with a player around offers a "cheap enchanted" piece that is +0 in the window. The player
++     * has to read the window to see it.
++     */
++    fun maybeScamPlayer(bot: Autobot) {
++        val now = System.currentTimeMillis()
++        if (!bot.isInsideZone(ZoneId.TOWN) || !SocialTrade.free(bot) || now - (lastScam[bot.objectId] ?: 0L) < SCAM_COOLDOWN_MS) return
++        if (Rnd.get(100) >= SCAM_CHANCE_PER_TICK) return
++        val player = bot.getKnownTypeInRadius(Player::class.java, 1000).firstOrNull { it !is Autobot && !it.isInStoreMode && pending[it.objectId] == null } ?: return
++        val item = bot.inventory.items.filter { it.isTradable && !it.isEquipped && (it.isWeapon || it.isArmor) && it.enchantLevel == 0 &&
++                !Loans.isBorrowed(bot, it) && Market.fairValue(it.itemId) >= 1000 }.maxByOrNull { it.referencePrice } ?: return
++        lastScam[bot.objectId] = now
++        val claimed = Rnd.get(3, 5)
++        val price = (Market.fairValue(item.itemId) * Worth.enchantFactor(claimed) * 0.6).toLong()
++        pending[player.objectId] = Pending.Sell(bot.objectId, item, 1, price, claimed)
++        TradeLog.note(bot, "offers ${item.itemName} as +$claimed to ${player.name} for $price")
++        say(bot, player, "продаю ${item.itemName} +$claimed за $price, срочно надо адены. кидай трейд", "selling ${item.itemName} +$claimed for $price, need adena fast. trade me")
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt
+new file mode 100644
+index 0000000..a48f564
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/trade/SocialTrade.kt
+@@ -0,0 +1,488 @@
++package dev.l2j.autobots.population.trade
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.AutobotsManager
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.economy.Market
++import dev.l2j.autobots.population.economy.StoreKeeper
++import dev.l2j.autobots.population.group.Relations
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++import java.util.concurrent.ConcurrentHashMap
++
++/**
++ * Social trading (stage 2g): bots swap and sell items to each other through the trade window, lend adena and gear
++ * to people they trust and get it back, and a few of them scam. Every kept or broken word goes to the trust memory in
++ * `autobot_relations`. Deals with players are in [PlayerTrade].
++ */
++internal object SocialTrade {
++    private val settings get() = AutobotData.settings
++    val enabled get() = settings.economyEnabled && settings.socialTradeEnabled
++
++    /** Below this a bot refuses to deal with someone at all. */
++    const val NO_DEALS = -30
++    private const val TRUST_HONEST_DEAL = 3
++    private const val TRUST_RETURNED = 15
++    private const val TRUST_RETURNED_LATE = 40
++    private const val TRUST_CAUGHT = -40
++    private const val TRUST_SCAMMED = -80
++    private const val AFFINITY_SCAMMED = -40
++    private const val TOWN_RADIUS = 1500
++    private const val PARTY_REACH = 600
++    private const val HOUR = 3_600_000L
++    private const val DAY = 24 * HOUR
++    private const val ITEM_LOAN_HOURS = 2L
++    private const val PAIR_COOLDOWN_MS = 30 * 60_000L
++    private const val SCAM_COOLDOWN_MS = DAY
++    private const val REMIND_EVERY_MS = 45 * 60_000L
++    private const val OPPORTUNIST_GREED = 20_000L
++
++    private val busy: MutableSet<Int> = ConcurrentHashMap.newKeySet()
++    private val lastAsk = ConcurrentHashMap<Long, Long>()
++    private val lastScam = ConcurrentHashMap<Int, Long>()
++
++    private fun pair(a: Player, b: Player) = a.objectId.toLong() shl 32 or (b.objectId.toLong() and 0xffffffffL)
++
++    private fun cooledDown(a: Player, b: Player, ms: Long = PAIR_COOLDOWN_MS): Boolean {
++        val now = System.currentTimeMillis()
++        if (now - (lastAsk[pair(a, b)] ?: 0L) < ms) return false
++        lastAsk[pair(a, b)] = now
++        return true
++    }
++
++    fun isPopulation(player: Player?): Boolean = player is Autobot && player.life != null
++
++    fun free(bot: Player): Boolean = bot.objectId !in busy && TradeWindow.canTrade(bot)
++
++    /** Runs [block] with both bots marked busy, so no other deal grabs them meanwhile. */
++    suspend fun <T> dealing(vararg bots: Player, block: suspend () -> T): T? {
++        val ids = bots.map { it.objectId }
++        synchronized(busy) {
++            if (ids.any { it in busy }) return null
++            busy += ids
++        }
++        try {
++            return block()
++        } finally {
++            busy -= ids
++        }
++    }
++
++    // ---- Trust ----
++
++    fun trusts(bot: Player, other: Player): Int = Relations.trust(bot, other.objectId)
++
++    fun refusesDeals(bot: Player, other: Player): Boolean = trusts(bot, other) <= NO_DEALS
++
++    fun honestDeal(a: Player, b: Player) {
++        Relations.adjust(a, b.objectId, TRUST_HONEST_DEAL, 1)
++        Relations.adjust(b, a.objectId, TRUST_HONEST_DEAL, 1)
++    }
++
++    /**
++     * [victim] found out it was scammed: trust and liking crash, it complains to its party and in public, and the
++     * knowledge stage may spread the word.
++     */
++    fun scammed(victim: Player, scammerId: Int, scammerName: String, what: String) {
++        Relations.adjust(victim, scammerId, TRUST_SCAMMED, AFFINITY_SCAMMED)
++        TradeLog.log(victim, TradeDeal.Complaint, "was scammed by $scammerName: $what")
++        TradeEvents.scam(victim, scammerId, scammerName, what)
++        val bot = victim as? Autobot ?: return
++        CoScopes.generalScope.launch {
++            delay(Rnd.get(2000, 6000).toLong())
++            val russian = Rnd.get(100) < 60
++            if (bot.isInParty) bot.partySay(if (russian) "осторожно с $scammerName, кинул меня на $what" else "careful with $scammerName, scammed me on $what")
++            if (Rnd.get(100) < 50) bot.shout(if (russian) listOf("$scammerName кидала! не верните ему ничего", "$scammerName кинул на $what, не ведитесь").random()
++                    else listOf("$scammerName is a scammer, took my $what", "beware $scammerName, scammer").random())
++        }
++    }
++
++    fun caught(victim: Player, scammer: Player, what: String) {
++        Relations.adjust(victim, scammer.objectId, TRUST_CAUGHT, AFFINITY_SCAMMED / 2)
++        TradeLog.log(scammer, TradeDeal.ScamFailed, "${victim.name} noticed the swap: $what")
++    }
++
++    // ---- Loans ----
++
++    /**
++     * Would [lender] lend [value] worth to [borrower]? @return null for yes, or the reason to say.
++     * Friends and people who returned loans before get it; strangers don't, nor anyone who already owes.
++     */
++    fun refusalToLend(lender: Autobot, borrower: Player, value: Long, russian: Boolean): String? {
++        val trust = trusts(lender, borrower)
++        val affinity = Relations.affinity(lender, borrower)
++        val sameParty = lender.isInParty && lender.party === borrower.party
++        val owes = Loans.between(lender, borrower).firstOrNull()
++        return when {
++            trust <= NO_DEALS -> if (russian) "ты меня уже кидал, нет" else "you scammed me before, no"
++            owes != null -> if (russian) "сначала верни ${owes.name}" else "give back ${owes.name} first"
++            Honesty.of(lender) == Honesty.Scammer -> if (russian) "сам на мели, сорри" else "broke myself, sorry"
++            value > lender.adena + lender.inventory.items.sumOf { if (it.isEquipped) Worth.of(it.itemId, it.enchantLevel, 1) else 0L } / 3 ->
++                if (russian) "многовато просишь" else "too much, sorry"
++            !(affinity >= Relations.FRIEND || trust >= 30 || (sameParty && affinity >= 10)) -> if (russian) "я тебя не знаю, сорри" else "I don't know you, sorry"
++            Rnd.get(100) >= (40 + trust / 2 + affinity / 3).coerceIn(10, 95) -> if (russian) "не, сорри, самому надо" else "nah, need it myself"
++            else -> null
++        }
++    }
++
++    private fun lenderOf(loan: Loan): Player? = World.getInstance().getPlayer(loan.lenderId)
++
++    private fun borrowerOf(loan: Loan): Player? = World.getInstance().getPlayer(loan.borrowerId)
++
++    /** Does the borrower mean to keep it? Decided once per loan and session. */
++    fun keeps(borrower: Player, loan: Loan, lender: Player?): Boolean {
++        if (loan.kept) return true
++        if (borrower !is Autobot) return false
++        val keep = when (Honesty.of(borrower)) {
++            Honesty.Scammer -> true
++            Honesty.Opportunist -> Worth.of(loan.itemId, loan.enchant, loan.count) >= OPPORTUNIST_GREED && Relations.trust(borrower, loan.lenderId) < 20
++            Honesty.Honest -> false
++        }
++        if (keep && !loan.kept) {
++            loan.kept = true
++            TradeLog.log(borrower, TradeDeal.LoanKept, "keeps ${loan.name} borrowed from ${lender?.name ?: loan.lenderId}")
++        }
++        return keep
++    }
++
++    /** What the borrower would put in the window for [loan]: the very item, or the adena. */
++    private fun repayment(borrower: Player, loan: Loan): ItemInstance? =
++            if (loan.isAdena) borrower.inventory.adenaInstance?.takeIf { it.count >= loan.count }
++            else borrower.inventory.getItemByObjectId(loan.itemObjectId)
++
++    /** Gives back [loan] to a bot lender through the window. @return true when done. */
++    suspend fun repayBot(borrower: Autobot, loan: Loan, lender: Autobot, fast: Boolean = false): Boolean {
++        if (keeps(borrower, loan, lender)) return false
++        val item = repayment(borrower, loan) ?: return false
++        val wasWorn = item.isEquipped
++        val bodyPart = item.item.bodyPart
++        val russian = Rnd.get(100) < 60
++        if (!fast) borrower.tell(lender.name, if (russian) "держи ${loan.name}, спс что выручил" else "here is your ${loan.name}, thanks")
++        val outcome = dealing(borrower, lender) {
++            TradeWindow.exchange(borrower, lender, listOf(item to loan.count), emptyList(), listOf(Promise(loan.itemId, loan.enchant, loan.count)), fast)
++        } ?: return false
++        if (outcome != TradeWindow.Outcome.Done) return false
++        closeLoan(loan, lender, borrower)
++        if (wasWorn) wearBest(borrower, bodyPart)
++        return true
++    }
++
++    /** The lender got its loan back: in time a little more trust, late a part of what the default cost. */
++    fun closeLoan(loan: Loan, lender: Player, borrower: Player) {
++        val late = loan.state == Loan.State.Defaulted
++        Loans.setState(loan, Loan.State.Returned)
++        Relations.adjust(lender, borrower.objectId, if (late) TRUST_RETURNED_LATE else TRUST_RETURNED, if (late) -AFFINITY_SCAMMED / 2 else 5)
++        Relations.adjust(borrower, lender.objectId, 5, 3)
++        TradeLog.log(borrower, if (late) TradeDeal.LoanLate else TradeDeal.LoanReturned, "returned ${loan.name} to ${lender.name}${if (late) " late" else ""}")
++    }
++
++    /** After giving back a borrowed piece, the bot puts on the best one of its own for that slot. */
++    fun wearBest(bot: Player, bodyPart: Int) {
++        val best = bot.inventory.items.filter { !it.isEquipped && it.isEquipable && it.item.bodyPart == bodyPart && !Loans.isBorrowed(bot, it) }
++                .maxByOrNull { it.referencePrice } ?: return
++        Gear.equip(bot, best)
++    }
++
++    /** A lent piece arrived: the borrower wears it right away, that is what it asked for. */
++    private fun wearBorrowed(borrower: Player, loan: Loan) {
++        val item = borrower.inventory.getItemByObjectId(loan.itemObjectId) ?: return
++        if (item.isEquipable && !item.isEquipped) Gear.equip(borrower, item)
++    }
++
++    /** [lender] lends [item] (or [adena]) to [borrower], both bots. @return the loan when the window went through. */
++    private suspend fun lend(lender: Autobot, borrower: Autobot, item: ItemInstance?, adena: Int, due: Long): Loan? {
++        val give = item ?: lender.inventory.adenaInstance ?: return null
++        val count = if (item != null) item.count else adena
++        val itemId = give.itemId
++        val enchant = item?.enchantLevel ?: 0
++        val objectId = item?.objectId ?: 0
++        val outcome = dealing(lender, borrower) {
++            TradeWindow.exchange(lender, borrower, listOf(give to count), emptyList(), listOf(Promise(itemId, enchant, count)))
++        } ?: return null
++        if (outcome != TradeWindow.Outcome.Done) return null
++        val loan = Loans.open(lender, borrower, itemId, objectId, enchant, count, due) ?: return null
++        TradeLog.log(lender, TradeDeal.LoanGiven, "lent ${loan.name} to ${borrower.name} until ${java.time.Instant.ofEpochMilli(due)}")
++        if (!loan.isAdena) wearBorrowed(borrower, loan)
++        return loan
++    }
++
++    // ---- Town: called from the bot's town trip ----
++
++    /** First thing in town: give back what is due to a lender standing around. */
++    suspend fun repayInTown(bot: Autobot) {
++        if (!enabled) return
++        for (loan in Loans.owedBy(bot)) {
++            if (loan.isAdena && Errands.spendable(bot) < loan.count) continue
++            if (!loan.isAdena && loan.state == Loan.State.Open && loan.due > System.currentTimeMillis()) continue
++            val lender = lenderOf(loan) as? Autobot ?: continue
++            if (!isPopulation(lender) || distance(bot, lender) > TOWN_RADIUS || !free(lender)) continue
++            repayBot(bot, loan, lender)
++        }
++    }
++
++    /**
++     * Before buying gear: short of adena for the next kit piece, the bot asks a friend around for the rest, to give
++     * back in a day or two. A scammer asks too, without needing it and without any intention to give it back.
++     */
++    suspend fun borrowForGear(bot: Autobot) {
++        if (!enabled) return
++        val scammer = Honesty.of(bot) == Honesty.Scammer
++        val wish = Gear.wishes(bot).firstOrNull { Market.npcPrice(it.itemId) != null }
++        val price = wish?.let { Market.npcPrice(it.itemId) } ?: 0
++        val shortfall = price - Errands.spendable(bot)
++        val need = when {
++            wish != null && shortfall in 1..(price * 6 / 10) -> shortfall
++            scammer && Rnd.get(100) < 30 && System.currentTimeMillis() - (lastScam[bot.objectId] ?: 0L) > SCAM_COOLDOWN_MS -> Rnd.get(2, 10) * bot.level * 100
++            else -> return
++        }
++        val lender = bot.getKnownTypeInRadius(Autobot::class.java, TOWN_RADIUS)
++                .filter { isPopulation(it) && free(it) && Errands.spendable(it) >= need * 2 && Relations.affinity(bot, it) >= 0 }
++                .maxByOrNull { Relations.affinity(it, bot) + trusts(it, bot) } ?: return
++        if (!cooledDown(bot, lender, if (scammer) SCAM_COOLDOWN_MS else PAIR_COOLDOWN_MS)) return
++        val russian = Rnd.get(100) < 60
++        val what = wish?.template?.name ?: if (russian) "банки" else "potions"
++        bot.tell(lender.name, if (russian) "привет, одолжишь $need аден до завтра? на $what не хватает" else "hi, can you lend me $need adena till tomorrow? short for $what")
++        delay(Rnd.get(2000, 5000).toLong())
++        val refusal = refusalToLend(lender, bot, need.toLong(), russian)
++        if (refusal != null) {
++            lender.tell(bot.name, refusal)
++            TradeLog.log(lender, TradeDeal.Refused, "won't lend $need adena to ${bot.name}: $refusal")
++            return
++        }
++        lender.tell(bot.name, if (russian) "ок, держи, верни потом" else "ok, here, give it back later")
++        if (scammer) lastScam[bot.objectId] = System.currentTimeMillis()
++        lend(lender, bot, null, need, System.currentTimeMillis() + Rnd.get(1, 2) * DAY)
++    }
++
++    /**
++     * Direct deals with bots around: the bot looks for what it wants in their bags (not their stores) and pays with
++     * something they want, adena making up the difference, or with adena alone. A scammer instead sells a lookalike.
++     */
++    suspend fun tradeInTown(bot: Autobot) {
++        if (!enabled) return
++        if (Honesty.of(bot) == Honesty.Scammer && sellLookalike(bot)) return
++        val wanted = Worth.wanted(bot)
++        if (wanted.isEmpty()) return
++        val grade = Gear.gradeFor(bot.level).id
++        for (seller in bot.getKnownTypeInRadius(Autobot::class.java, TOWN_RADIUS).shuffled()) {
++            if (!isPopulation(seller) || !free(seller) || refusesDeals(bot, seller) || refusesDeals(seller, bot)) continue
++            val item = StoreKeeper.storeGoods(seller).firstOrNull { it.itemId in wanted && it.isTradable && it.item.crystalType.id <= grade } ?: continue
++            val count = if (item.isStackable) item.count.coerceAtMost(1000) else 1
++            val price = Worth.asking(seller, item, count)
++            // Never above what the shop or the store would take.
++            val limit = (Market.npcPrice(item.itemId)?.toLong()?.times(count) ?: (Worth.of(item.itemId, item.enchantLevel, count) * 13 / 10))
++            if (price > limit) continue
++            if (!cooledDown(bot, seller)) continue
++            buyFrom(bot, seller, item, count, price)
++            return
++        }
++    }
++
++    private suspend fun buyFrom(buyer: Autobot, seller: Autobot, item: ItemInstance, count: Int, price: Long) {
++        val russian = Rnd.get(100) < 60
++        // Pay with goods the seller wants when there are any, adena for the rest.
++        val sellerWants = Worth.wanted(seller)
++        val barter = StoreKeeper.storeGoods(buyer).filter { it.itemId in sellerWants && it.isTradable && it.objectId != item.objectId }
++                .firstOrNull { Worth.of(it.itemId, it.enchantLevel, it.count) <= price * 3 / 2 }
++        val barterValue = barter?.let { Worth.of(it.itemId, it.enchantLevel, it.count) } ?: 0L
++        val adena = (price - barterValue).coerceAtLeast(0).toInt()
++        if (adena > Errands.spendable(buyer)) return
++        val label = "${if (count > 1) "$count " else ""}${item.itemName}${if (item.enchantLevel > 0) " +${item.enchantLevel}" else ""}"
++        buyer.tell(seller.name, when {
++            barter != null && russian -> "меняю ${barter.itemName}${if (adena > 0) " + $adena" else ""} на $label?"
++            barter != null -> "swap my ${barter.itemName}${if (adena > 0) " + $adena" else ""} for your $label?"
++            russian -> "продашь $label за $adena?"
++            else -> "wts $label for $adena?"
++        })
++        delay(Rnd.get(2000, 5000).toLong())
++        seller.tell(buyer.name, if (russian) "давай, кидай трейд" else "ok, trade me")
++        val buyerGives = listOfNotNull(barter?.let { it to it.count }, buyer.inventory.adenaInstance?.takeIf { adena > 0 }?.let { it to adena })
++        val promise = listOf(Promise(item.itemId, item.enchantLevel, count))
++        val outcome = dealing(buyer, seller) {
++            // The seller puts its item first; the buyer reads the window before paying.
++            TradeWindow.exchange(seller, buyer, listOf(item to count), buyerGives, promise)
++        } ?: return
++        if (outcome == TradeWindow.Outcome.Done) {
++            honestDeal(buyer, seller)
++            TradeLog.log(buyer, if (barter != null) TradeDeal.Swap else TradeDeal.Sale,
++                    "got $label from ${seller.name} for ${listOfNotNull(barter?.itemName, adena.takeIf { it > 0 }?.let { "$it adena" }).joinToString(" + ")}")
++            buyer.inventory.getItemsByItemId(item.itemId).firstOrNull { it.isEquipable && !it.isEquipped }?.let { Gear.equipUpgradesFromInventory(buyer) }
++        }
++    }
++
++    /**
++     * A scammer offers a bot around the piece it wants and puts a cheaper item of the same kind in the window.
++     * An attentive buyer reads the window and walks away; another one pays and finds out afterwards.
++     */
++    private suspend fun sellLookalike(bot: Autobot): Boolean {
++        if (System.currentTimeMillis() - (lastScam[bot.objectId] ?: 0L) < SCAM_COOLDOWN_MS) return false
++        val mine = bot.inventory.items.filter { it.isTradable && !it.isEquipped && (it.isWeapon || it.isArmor) && !Loans.isBorrowed(bot, it) }
++        if (mine.isEmpty()) return false
++        for (victim in bot.getKnownTypeInRadius(Autobot::class.java, TOWN_RADIUS).shuffled()) {
++            if (!isPopulation(victim) || !free(victim) || refusesDeals(victim, bot)) continue
++            for (wish in Gear.wishes(victim)) {
++                val real = wish.template
++                val fake = mine.firstOrNull {
++                    it.itemId != wish.itemId && it.item.bodyPart == real.bodyPart && it.item.itemType == real.itemType && it.referencePrice < real.referencePrice
++                } ?: continue
++                val price = (Market.fairValue(wish.itemId) * 0.7).toInt()
++                if (price > Errands.spendable(victim) || price <= Market.npcSellPrice(fake.itemId)) continue
++                lastScam[bot.objectId] = System.currentTimeMillis()
++                val russian = Rnd.get(100) < 60
++                bot.tell(victim.name, if (russian) "есть ${real.name}, отдам за $price, дешевле чем в магазе" else "got ${real.name}, yours for $price, cheaper than shop")
++                delay(Rnd.get(2000, 5000).toLong())
++                victim.tell(bot.name, if (russian) "о, давай" else "oh, deal")
++                val outcome = dealing(bot, victim) {
++                    TradeWindow.exchange(bot, victim, listOf(fake to 1), listOf(victim.inventory.adenaInstance!! to price), listOf(Promise(wish.itemId, 0, 1)))
++                } ?: return true
++                when (outcome) {
++                    TradeWindow.Outcome.Noticed -> {
++                        caught(victim, bot, real.name)
++                        victim.tell(bot.name, if (russian) "это не ${real.name}, а ${fake.itemName}. кидала" else "that's ${fake.itemName}, not ${real.name}. scammer")
++                    }
++                    TradeWindow.Outcome.Done -> {
++                        TradeLog.log(bot, TradeDeal.Scam, "sold ${fake.itemName} as ${real.name} to ${victim.name} for $price")
++                        CoScopes.generalScope.launch {
++                            // The victim finds out when it tries the piece on.
++                            delay(Rnd.get(10_000, 60_000).toLong())
++                            scammed(victim, bot.objectId, bot.name, "${real.name} (${fake.itemName})")
++                        }
++                    }
++                    TradeWindow.Outcome.Failed -> {}
++                }
++                return true
++            }
++        }
++        return false
++    }
++
++    // ---- Periodic: loans in parties, returns, reminders, defaults ----
++
++    /** Every 30 seconds from the population tick. Deals run in their own coroutines. */
++    fun tick(online: List<Autobot>) {
++        if (!enabled) return
++        val now = System.currentTimeMillis()
++        try {
++            checkDefaults(now)
++            for (loan in Loans.all()) settleOrRemind(loan, now)
++            for (party in online.filter { it.isInParty && it.party.leader === it }.map { it.party }) partyLoan(party.members)
++            for (bot in online) if (Honesty.of(bot) == Honesty.Scammer) PlayerTrade.maybeScamPlayer(bot)
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    /** A loan overdue by `loanMaxDays` is a scam in the lender's eyes; a bot lender reacts once it is online. */
++    private fun checkDefaults(now: Long) {
++        for (loan in Loans.all()) {
++            if (loan.state != Loan.State.Open || now < loan.due + settings.loanMaxDays * DAY) continue
++            // Only a bot lender online judges; a player decides for themselves.
++            val lender = lenderOf(loan) as? Autobot ?: continue
++            if (!isPopulation(lender)) continue
++            Loans.setState(loan, Loan.State.Defaulted)
++            TradeLog.log(lender, TradeDeal.Scam, "${nameOf(loan.borrowerId)} never returned ${loan.name}")
++            scammed(lender, loan.borrowerId, nameOf(loan.borrowerId), loan.name)
++        }
++    }
++
++    private fun nameOf(objectId: Int): String = World.getInstance().getPlayer(objectId)?.name
++            ?: net.sf.l2j.gameserver.data.sql.PlayerInfoTable.getInstance().getPlayerName(objectId) ?: Loans.nameOf(objectId) ?: "$objectId"
++
++    /**
++     * Both online: a due loan is given back when the two are close (a party, the same spot or town); otherwise the
++     * lender reminds and the borrower answers. Players are handled by [PlayerTrade].
++     */
++    private fun settleOrRemind(loan: Loan, now: Long) {
++        val borrower = borrowerOf(loan) ?: return
++        val lender = lenderOf(loan) ?: return
++        if (!isPopulation(borrower)) return PlayerTrade.remindPlayer(loan, lender, borrower, now)
++        borrower as Autobot
++        if (!isPopulation(lender)) return PlayerTrade.repayPlayer(loan, borrower, lender, now)
++        lender as Autobot
++        val due = loan.due <= now || loan.state == Loan.State.Defaulted
++        val canPay = !loan.isAdena || Errands.spendable(borrower) >= loan.count
++        if ((due || loan.isAdena) && canPay && distance(borrower, lender) <= PARTY_REACH && free(borrower) && free(lender)
++                && !keeps(borrower, loan, lender)) {
++            CoScopes.generalScope.launch { repayBot(borrower, loan, lender) }
++            return
++        }
++        if (due && now - loan.lastReminder > REMIND_EVERY_MS) {
++            loan.lastReminder = now
++            val russian = Rnd.get(100) < 60
++            lender.tell(borrower.name, if (russian) "напоминаю про ${loan.name}, верни как будешь рядом" else "remember my ${loan.name}? give it back when you're around")
++            CoScopes.generalScope.launch {
++                delay(Rnd.get(3000, 10000).toLong())
++                val answer = when {
++                    keeps(borrower, loan, lender) && Rnd.get(100) < 50 -> return@launch
++                    keeps(borrower, loan, lender) -> if (russian) "какой долг? ничего не брал" else "what loan? never took anything"
++                    else -> if (russian) "да, помню, верну как увидимся" else "yes, will give it back when we meet"
++                }
++                borrower.tell(lender.name, answer)
++            }
++        }
++    }
++
++    /**
++     * In a party at rest, a member short of gear asks another for a spare piece that would help it now, until the end
++     * of the session.
++     */
++    private fun partyLoan(members: List<Player>) {
++        val bots = members.filterIsInstance<Autobot>().filter { isPopulation(it) }
++        if (bots.size < 2 || bots.any { it.isInCombat } || Rnd.get(100) >= 20) return
++        for (borrower in bots.shuffled()) {
++            if (!free(borrower)) continue
++            for (lender in bots) {
++                if (lender === borrower || !free(lender) || distance(borrower, lender) > PARTY_REACH) continue
++                val spare = Gear.surplus(lender).firstOrNull { isUpgradeFor(borrower, it) } ?: continue
++                if (!cooledDown(borrower, lender)) continue
++                CoScopes.generalScope.launch { askForItem(borrower, lender, spare) }
++                return
++            }
++        }
++    }
++
++    private fun isUpgradeFor(bot: Player, item: ItemInstance): Boolean = item.isTradable && item.isEquipable && (item.isWeapon || item.isArmor) &&
++            item.item.crystalType.id <= Gear.gradeFor(bot.level).id && (Gear.wishes(bot).any { it.itemId == item.itemId } || Gear.isUpgrade(bot, item))
++
++    private suspend fun askForItem(borrower: Autobot, lender: Autobot, item: ItemInstance) {
++        val russian = Rnd.get(100) < 60
++        borrower.partySay(if (russian) "${lender.name}, дай поносить ${item.itemName}? до конца пати, верну" else "${lender.name}, can I borrow ${item.itemName} for this party? will return")
++        delay(Rnd.get(2000, 5000).toLong())
++        val refusal = refusalToLend(lender, borrower, Worth.of(item.itemId, item.enchantLevel, 1), russian)
++        if (refusal != null) {
++            lender.partySay(refusal)
++            TradeLog.log(lender, TradeDeal.Refused, "won't lend ${item.itemName} to ${borrower.name}: $refusal")
++            return
++        }
++        lender.partySay(if (russian) "держи, потом верни" else "sure, take it")
++        lend(lender, borrower, item, 0, System.currentTimeMillis() + ITEM_LOAN_HOURS * HOUR)
++    }
++
++    /**
++     * Right before a bot logs out: borrowed gear goes back to a lender close by, and a lender takes its things back from
++     * a borrower close by. Quick, like a player who says bye and trades before leaving.
++     */
++    suspend fun beforeLogout(bot: Autobot) {
++        if (!enabled) return
++        for (loan in Loans.owedBy(bot).filter { !it.isAdena }) {
++            val lender = lenderOf(loan) as? Autobot ?: continue
++            if (isPopulation(lender) && distance(bot, lender) <= PARTY_REACH) repayBot(bot, loan, lender, fast = true)
++        }
++        for (loan in Loans.lentBy(bot).filter { !it.isAdena }) {
++            val borrower = borrowerOf(loan) as? Autobot ?: continue
++            if (!isPopulation(borrower) || distance(bot, borrower) > PARTY_REACH) continue
++            bot.tell(borrower.name, if (Rnd.get(100) < 60) "я ухожу, верни ${loan.name}" else "logging off, need my ${loan.name} back")
++            repayBot(borrower, loan, bot, fast = true)
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/TradeLog.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeLog.kt
+new file mode 100644
+index 0000000..683d357
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeLog.kt
+@@ -0,0 +1,53 @@
++package dev.l2j.autobots.population.trade
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import net.sf.l2j.gameserver.model.actor.Player
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.CopyOnWriteArrayList
++import java.util.concurrent.atomic.AtomicInteger
++
++internal enum class TradeDeal { Swap, Sale, LoanGiven, LoanReturned, LoanLate, LoanKept, Scam, ScamFailed, Refused, Gift, Complaint }
++
++internal object TradeLog {
++    private val counts = ConcurrentHashMap<TradeDeal, AtomicInteger>()
++
++    fun log(bot: Player, deal: TradeDeal, message: String) {
++        counts.computeIfAbsent(deal) { AtomicInteger() }.incrementAndGet()
++        if (AutobotData.settings.tradeLog) println("Autobots trade: ${bot.name} (lv ${bot.level}): $message")
++    }
++
++    fun note(bot: Player, message: String) {
++        if (AutobotData.settings.tradeLog) println("Autobots trade: ${bot.name} (lv ${bot.level}): $message")
++    }
++
++    fun summary(online: Collection<Autobot>) {
++        val deals = TradeDeal.values().joinToString(" ") { "$it=${counts[it]?.getAndSet(0) ?: 0}" }
++        val loans = Loans.all()
++        val scammers = online.count { Honesty.of(it) == Honesty.Scammer }
++        println("Autobots trade summary: $deals openLoans=${loans.count { it.state == Loan.State.Open }} " +
++                "defaulted=${loans.count { it.state == Loan.State.Defaulted }} scammersOnline=$scammers/${online.size}")
++    }
++}
++
++/**
++ * What other stages may listen to: a character was found out as a scammer. The knowledge stage (2d) turns it into
++ * rumors; trading itself only changes the victim's own memory.
++ */
++internal object TradeEvents {
++    fun interface ScamListener {
++        fun onScam(victim: Player, scammerId: Int, scammerName: String, what: String)
++    }
++
++    val scamListeners = CopyOnWriteArrayList<ScamListener>()
++
++    fun scam(victim: Player, scammerId: Int, scammerName: String, what: String) {
++        scamListeners.forEach {
++            try {
++                it.onScam(victim, scammerId, scammerName, what)
++            } catch (e: Exception) {
++                e.printStackTrace()
++            }
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt
+new file mode 100644
+index 0000000..4f26fb4
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt
+@@ -0,0 +1,152 @@
++package dev.l2j.autobots.population.trade
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.extensions.moveTo
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.economy.Market
++import dev.l2j.autobots.population.economy.StoreKeeper
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.delay
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.model.actor.Npc
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++import net.sf.l2j.gameserver.model.tradelist.TradeItem
++import net.sf.l2j.gameserver.network.serverpackets.TradeOtherAdd
++
++/** What one side said it would put in the window. */
++internal class Promise(val itemId: Int, val enchant: Int, val count: Int)
++
++/** Prices every deal uses: the economy's own, plus a quarter of the value per enchant level. */
++internal object Worth {
++    fun enchantFactor(enchant: Int): Double = 1 + 0.25 * enchant
++
++    fun of(itemId: Int, enchant: Int, count: Int): Long =
++            if (itemId == Loan.ADENA) count.toLong() else (Market.fairValue(itemId) * enchantFactor(enchant) * count).toLong()
++
++    /** What [bot] would ask for its own item: its store price, so a direct deal is never worse than its store. */
++    fun asking(bot: Autobot, item: ItemInstance, count: Int): Long =
++            (StoreKeeper.askingPrice(bot, item.itemId) * enchantFactor(item.enchantLevel) * count).toLong()
++
++    /** What [bot] would pay for an item: its full value when it wants it, what an NPC pays otherwise. */
++    fun receiving(itemId: Int, enchant: Int, count: Int, wanted: Set<Int>): Long = when {
++        itemId == Loan.ADENA -> count.toLong()
++        itemId in wanted -> of(itemId, enchant, count)
++        else -> (Market.npcSellPrice(itemId) * enchantFactor(enchant) * count).toLong()
++    }
++
++    /** Next kit pieces, things its stores would bid on, materials and recipes a crafter looks for. */
++    fun wanted(bot: Autobot): Set<Int> = (Gear.wishes(bot).map { it.itemId } + StoreKeeper.wanted(bot)).toSet()
++}
++
++/**
++ * The core trade window driven by code: a request and an answer, items put one by one, both confirmations. Nothing
++ * is moved by hand; the exchange is the core's `TradeList`, so a player on the other side sees the usual window.
++ */
++internal object TradeWindow {
++    private const val REACH = 140
++
++    /** Walks [bot] up to [other] if they are a little apart. @return true once they can trade. */
++    suspend fun approach(bot: Player, other: Player, maxDistance: Int = 1500): Boolean {
++        if (distance(bot, other) <= REACH) return true
++        if (distance(bot, other) > maxDistance) return false
++        if (bot.isSitting) bot.standUp()
++        repeat(15) {
++            bot.moveTo(other.x + Rnd.get(-40, 40), other.y + Rnd.get(-40, 40), other.z)
++            delay(1000)
++            if (distance(bot, other) <= REACH) return true
++        }
++        return distance(bot, other) <= Npc.INTERACTION_DISTANCE
++    }
++
++    fun canTrade(bot: Player): Boolean = !bot.isDead && !bot.isInStoreMode && !bot.isProcessingTransaction && !bot.isInCombat &&
++            !bot.isInOlympiadMode && bot.isOnline
++
++    /** Two bots: one asks, the other answers right away (their decision is made before). */
++    fun open(a: Autobot, b: Autobot): Boolean {
++        if (!canTrade(a) || !canTrade(b)) return false
++        a.startTradeRequest(b)
++        if (b.activeRequester !== a) return false
++        b.answerTradeRequest(true)
++        return a.activeTradeList != null && b.activeTradeList != null
++    }
++
++    /** Puts [count] of [item] in the window, taking it off first if it is worn. */
++    fun put(bot: Player, item: ItemInstance, count: Int): Boolean {
++        val list = bot.activeTradeList ?: return false
++        if (item.isEquipped) {
++            bot.useEquippableItem(item, true)
++            bot.broadcastUserInfo()
++        }
++        if (bot.validateItemManipulation(item.objectId) == null) return false
++        val added = list.addItem(item.objectId, count) ?: return false
++        list.partner?.sendPacket(TradeOtherAdd(added))
++        return true
++    }
++
++    fun putAdena(bot: Player, amount: Int): Boolean {
++        val adena = bot.inventory.adenaInstance ?: return false
++        return amount in 1..adena.count && put(bot, adena, amount)
++    }
++
++    fun partnerItems(bot: Player): List<TradeItem> = bot.activeTradeList?.partner?.activeTradeList?.items ?: emptyList()
++
++    fun partnerConfirmed(bot: Player): Boolean = bot.activeTradeList?.partner?.activeTradeList?.isConfirmed == true
++
++    /**
++     * Does what the partner put match the promise? An attentive bot reads names and enchant levels; another one only
++     * glances at the icons: the same kind of item and the count.
++     */
++    fun matches(bot: Player, items: List<TradeItem>, promises: List<Promise>): Boolean = promises.all { promise ->
++        val attentive = Traits.isAttentive(bot)
++        val template = net.sf.l2j.gameserver.data.ItemTable.getInstance().getTemplate(promise.itemId) ?: return@all false
++        items.filter {
++            if (attentive || promise.itemId == Loan.ADENA) it.item.itemId == promise.itemId && it.enchant >= promise.enchant
++            else it.item.bodyPart == template.bodyPart && it.item.type2 == template.type2 && it.item.itemType == template.itemType
++        }.sumOf { it.count } >= promise.count
++    }
++
++    /** Counts of the given item ids in the inventory, to see afterwards whether the exchange happened. */
++    fun snapshot(bot: Player, itemIds: Collection<Int>): Map<Int, Long> =
++            itemIds.associateWith { id -> bot.inventory.getItemsByItemId(id).sumOf { it.count.toLong() } }
++
++    fun gained(bot: Player, before: Map<Int, Long>, expected: Map<Int, Int>): Boolean = expected.all { (id, count) ->
++        bot.inventory.getItemsByItemId(id).sumOf { it.count.toLong() } - (before[id] ?: 0) >= count
++    }
++
++    enum class Outcome { Done, Noticed, Failed }
++
++    /**
++     * A whole deal between two bots: [a] puts [aGives], [b] puts [bGives]. [b] checks [a]'s side against [bExpects]
++     * and cancels if it notices a swap; [a] trusts [b]'s side. Pauses are a player's clicks.
++     */
++    suspend fun exchange(a: Autobot, b: Autobot, aGives: List<Pair<ItemInstance, Int>>, bGives: List<Pair<ItemInstance, Int>>,
++                         bExpects: List<Promise>, fast: Boolean = false): Outcome {
++        suspend fun pause(min: Long, max: Long) = delay(if (fast) 200 else Rnd.get(min, max))
++        if (!approach(a, b)) return Outcome.Failed
++        if (!open(a, b)) return Outcome.Failed
++        try {
++            pause(1000, 2500)
++            for ((item, count) in aGives) {
++                if (!put(a, item, count)) return Outcome.Failed.also { a.cancelActiveTrade() }
++                pause(500, 1500)
++            }
++            for ((item, count) in bGives) {
++                if (!put(b, item, count)) return Outcome.Failed.also { b.cancelActiveTrade() }
++                pause(500, 1500)
++            }
++            pause(1000, 3000)
++            if (!matches(b, partnerItems(b), bExpects)) {
++                b.cancelActiveTrade()
++                return Outcome.Noticed
++            }
++            val bBefore = snapshot(b, aGives.map { it.first.itemId })
++            a.activeTradeList?.confirm() ?: return Outcome.Failed
++            pause(500, 2000)
++            b.activeTradeList?.confirm() ?: return Outcome.Failed
++            return if (gained(b, bBefore, aGives.groupBy { it.first.itemId }.mapValues { (_, v) -> v.sumOf { it.second } })) Outcome.Done else Outcome.Failed
++        } finally {
++            if (a.activeTradeList != null) a.cancelActiveTrade()
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/Traits.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/Traits.kt
+new file mode 100644
+index 0000000..48a9e3a
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/trade/Traits.kt
+@@ -0,0 +1,33 @@
++package dev.l2j.autobots.population.trade
++
++import dev.l2j.autobots.AutobotData
++import net.sf.l2j.gameserver.model.actor.Player
++
++/** How a bot keeps its word, a trait of the object id like its temper or chronotype. */
++internal enum class Honesty {
++    /** Gives back what it borrowed and puts in the window what it promised. */
++    Honest,
++    /** Keeps a valuable loan from someone it barely trusts. */
++    Opportunist,
++    /** Borrows to keep, sells lookalikes, asks for adena it never returns. */
++    Scammer;
++
++    companion object {
++        fun of(bot: Player): Honesty {
++            val roll = Math.floorMod(bot.objectId * 193 + 71, 100)
++            val settings = AutobotData.settings
++            return when {
++                roll < settings.scammerPercent -> Scammer
++                roll < settings.scammerPercent + settings.opportunistPercent -> Opportunist
++                else -> Honest
++            }
++        }
++    }
++}
++
++internal object Traits {
++    private const val ATTENTIVE_PERCENT = 70
++
++    /** An attentive bot reads the trade window before it confirms; the others glance at the icon and the count. */
++    fun isAttentive(bot: Player): Boolean = Math.floorMod(bot.objectId * 37 + 11, 100) < ATTENTIVE_PERCENT
++}
