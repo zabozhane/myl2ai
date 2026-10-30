@@ -1,3 +1,22 @@
+diff -ruN base/aCis_gameserver/java/net/sf/l2j/Config.java work/aCis_gameserver/java/net/sf/l2j/Config.java
+--- a/aCis_gameserver/java/net/sf/l2j/Config.java
++++ b/aCis_gameserver/java/net/sf/l2j/Config.java
+@@ -493,6 +493,7 @@
+ 	
+ 	/** Auto-loot */
+ 	public static boolean AUTO_LOOT;
++	public static boolean AUTO_LOOT_ADENA;
+ 	public static boolean AUTO_LOOT_HERBS;
+ 	public static boolean AUTO_LOOT_RAID;
+ 	
+@@ -1137,6 +1138,7 @@
+ 		MAXIMUM_ONLINE_USERS = server.getProperty("MaximumOnlineUsers", 100);
+ 		
+ 		AUTO_LOOT = server.getProperty("AutoLoot", false);
++		AUTO_LOOT_ADENA = server.getProperty("AutoLootAdena", false);
+ 		AUTO_LOOT_HERBS = server.getProperty("AutoLootHerbs", false);
+ 		AUTO_LOOT_RAID = server.getProperty("AutoLootRaid", false);
+ 		
 diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java work/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java
 --- a/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java
 +++ b/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java
@@ -213,6 +232,26 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/ai/type/Ab
  abstract class AbstractAI
  {
  	private static final int FOLLOW_INTERVAL = 1000;
+diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/Monster.java work/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/Monster.java
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/Monster.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/Monster.java
+@@ -31,6 +31,7 @@
+ import net.sf.l2j.gameserver.model.item.DropCategory;
+ import net.sf.l2j.gameserver.model.item.DropData;
+ import net.sf.l2j.gameserver.model.item.instance.ItemInstance;
++import net.sf.l2j.gameserver.model.itemcontainer.PcInventory;
+ import net.sf.l2j.gameserver.model.manor.Seed;
+ import net.sf.l2j.gameserver.network.SystemMessageId;
+ import net.sf.l2j.gameserver.network.serverpackets.SystemMessage;
+@@ -1131,7 +1132,7 @@
+ 				if (item != null)
+ 				{
+ 					// Check if the autoLoot mode is active
+-					if ((isRaidBoss() && Config.AUTO_LOOT_RAID) || (!isRaidBoss() && Config.AUTO_LOOT))
++					if ((isRaidBoss() && Config.AUTO_LOOT_RAID) || (!isRaidBoss() && Config.AUTO_LOOT) || (item.getId() == PcInventory.ADENA_ID && Config.AUTO_LOOT_ADENA))
+ 						player.doAutoLoot(this, item);
+ 					else
+ 						dropItem(player, item);
 diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/player/HennaList.java work/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/player/HennaList.java
 --- a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/player/HennaList.java
 +++ b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/player/HennaList.java
@@ -600,6 +639,18 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/
  		handler.handleChat(_type, player, _target, _text);
  	}
  	
+--- a/aCis_gameserver/config/server.properties
++++ b/aCis_gameserver/config/server.properties
+@@ -72,6 +72,9 @@
+ # AutoLoot, don't lead herbs behavior. False by default.
+ AutoLoot = False
+ 
++# Adena goes straight to the killer's inventory even when AutoLoot is off; other drops stay on the ground.
++AutoLootAdena = True
++
+ # AutoLoot from raid boss. False by default.
+ AutoLootRaid = False
+ 
 --- a/aCis_datapack/data/xml/adminCommands.xml
 +++ b/aCis_datapack/data/xml/adminCommands.xml
 @@ -334,4 +334,7 @@

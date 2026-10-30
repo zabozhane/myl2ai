@@ -13,12 +13,16 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   - `AutobotsManager.start()` called from `GameServer`: it starts the bots' think loop.
   - Redone hunks: IdFactory (items cleanup keeps autobot items), Player (import), Say2 (`onChat` hook).
   - `RequestBypassToServer`: null check moved before `player.isGM()` (upstream could NPE).
+  - Not from upstream: `AutoLootAdena` in `server.properties` (on): adena goes straight to the killer's
+    inventory for everyone, other drops stay on the ground.
 - `l2autobots-fixes.patch` - upstream fixes: Kotlin 1.9 compatibility (exhaustive `when`, lambda labels,
   `minBy` -> `minByOrNull`: since Kotlin 1.7 `minBy` throws on an empty list, which killed every bot tick
   with no target around), think-loop errors logged with stack traces, and
   `sql/autobots.sql`, whose table options were a separate statement after `);` (MariaDB syntax error).
   Targeting: monsters only within bot level -5..+3 (unless they attack the bot) and in line of sight
   (geodata); `config.xml` defaults to the closest target in 1000 range instead of a random one in 2000.
+  Looting (`LootPicker`): bots pick up their own and ownerless drops within 400, one per tick, before fighting
+  back; below 40% HP they fight instead. Items they cannot take (weight, slots) are not retried.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 

@@ -88,10 +88,27 @@ index d6c9c8f..06fa0da 100644
                                      AdminActions.despawnAutobot(autobot)
                                  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-index ce85df0..aa03245 100644
+index ce85df0..29c2062 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-@@ -287,7 +287,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -34,6 +34,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+     
+     private val blacklistedTargets: MutableList<Int> = mutableListOf()
+     
++    private val lootPicker = LootPicker(player)
++    
+     internal suspend fun onUpdate() {
+         if(player.isDead) {
+             handleDeath()
+@@ -42,6 +44,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         
+         ensureSummonPet()        
+         handleShots()
++        if(lootPicker.onUpdate()) return
+         targetAppropriateTarget()
+         checkSelfSupportingSkills()
+         beforeAttack()
+@@ -287,7 +290,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
          val targets: MutableList<Creature> = when(targetingPreference) {
              TargetingPreference.Random -> player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) }.toMutableList()
              TargetingPreference.Closest -> {
@@ -100,6 +117,57 @@ index ce85df0..aa03245 100644
                  if(target != null) mutableListOf(target) else mutableListOf()
              }
          }
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt
+new file mode 100644
+index 0000000..a2d78d8
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt
+@@ -0,0 +1,45 @@
++package dev.l2j.autobots.behaviors
++
++import dev.l2j.autobots.utils.distance
++import dev.l2j.autobots.utils.getHealthPercentage
++import net.sf.l2j.gameserver.enums.IntentionType
++import net.sf.l2j.gameserver.geoengine.GeoEngine
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++
++/**
++ * Picks up drops around the bot one item per think tick, the way a player clicks them.
++ * Looting goes before fighting back (a live player grabs the drop first), unless health is low.
++ */
++internal class LootPicker(private val player: Player) {
++
++    // Items the bot could not take (weight, slots, someone else took it): never retried, so the bot does not loop on them.
++    private val skippedItemIds = mutableSetOf<Int>()
++
++    /** @return true while the bot is busy looting, so the combat step of this tick is skipped. */
++    fun onUpdate(): Boolean {
++        if (player.isDead || player.getHealthPercentage() < MIN_HEALTH_PERCENT_TO_LOOT) return false
++        if (player.ai.desire.intention == IntentionType.PICK_UP) return true
++
++        val item = findClosestLootableItem() ?: return false
++        skippedItemIds.add(item.objectId)
++        player.ai.setIntention(IntentionType.PICK_UP, item)
++        return true
++    }
++
++    private fun findClosestLootableItem(): ItemInstance? = player.getKnownTypeInRadius(ItemInstance::class.java, LOOT_RADIUS)
++            .filter { isLootable(it) }
++            .minByOrNull { distance(player.x, player.y, player.z, it.x, it.y, it.z) }
++
++    private fun isLootable(item: ItemInstance): Boolean = item.isVisible &&
++            item.objectId !in skippedItemIds &&
++            (item.ownerId == 0 || player.isLooterOrInLooterParty(item.ownerId)) &&
++            player.inventory.validateWeight(item.count * item.item.weight) &&
++            player.inventory.validateCapacity(item) &&
++            GeoEngine.getInstance().canMoveToTarget(player.x, player.y, player.z, item.x, item.y, item.z)
++
++    companion object {
++        private const val LOOT_RADIUS = 400
++        private const val MIN_HEALTH_PERCENT_TO_LOOT = 40.0
++    }
++}
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt
 index 6fe02b1..5561f1b 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/attributes/Healer.kt
