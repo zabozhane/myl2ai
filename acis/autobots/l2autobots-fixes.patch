@@ -341,13 +341,13 @@ index 0000000..e6679fb
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
 new file mode 100644
-index 0000000..7bd5585
+index 0000000..2caf7cb
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
 @@ -0,0 +1,40 @@
 +package dev.l2j.autobots.behaviors
 +
-+import dev.l2j.autobots.population.isAttackedByMonster
++import dev.l2j.autobots.population.isUnderAttack
 +import dev.l2j.autobots.utils.getHealthPercentage
 +import dev.l2j.autobots.utils.getManaPercentage
 +import net.sf.l2j.gameserver.model.actor.Creature
@@ -361,11 +361,11 @@ index 0000000..7bd5585
 +        if (player.isDead) return false
 +
 +        if (player.isSitting) {
-+            if (player.isAttackedByMonster() || isRested()) player.standUp()
++            if (player.isUnderAttack() || isRested()) player.standUp()
 +            return true
 +        }
 +
-+        if (isTired() && !player.isAttackedByMonster() && !player.isMoving && !hasLiveTarget()) {
++        if (isTired() && !player.isUnderAttack() && !player.isMoving && !hasLiveTarget()) {
 +            player.sitDown()
 +            return true
 +        }
@@ -537,7 +537,7 @@ index 0000000..8536d63
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
 new file mode 100644
-index 0000000..01ab5ef
+index 0000000..afc1459
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
 @@ -0,0 +1,59 @@
@@ -545,7 +545,7 @@ index 0000000..01ab5ef
 +
 +import dev.l2j.autobots.extensions.location
 +import dev.l2j.autobots.extensions.moveTo
-+import dev.l2j.autobots.population.isAttackedByMonster
++import dev.l2j.autobots.population.isUnderAttack
 +import dev.l2j.autobots.utils.CancellationToken
 +import dev.l2j.autobots.utils.distance
 +import kotlinx.coroutines.delay
@@ -566,7 +566,7 @@ index 0000000..01ab5ef
 +
 +        while (true) {
 +            val remaining = distance(bot.location(), destination)
-+            if (remaining <= arrivalRadius || bot.isDead || bot.isAttackedByMonster()) return
++            if (remaining <= arrivalRadius || bot.isDead || bot.isUnderAttack()) return
 +
 +            if (remaining < bestDistance - MIN_PROGRESS) {
 +                bestDistance = remaining
@@ -879,10 +879,10 @@ index 0000000..613b0c2
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 new file mode 100644
-index 0000000..ba32df1
+index 0000000..1255471
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,139 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.Autobot
@@ -897,8 +897,10 @@ index 0000000..ba32df1
 +import net.sf.l2j.gameserver.model.actor.instance.Monster
 +import net.sf.l2j.gameserver.model.location.TeleportLocation
 +
-+internal fun Player.isAttackedByMonster(): Boolean =
-+        getKnownTypeInRadius(Monster::class.java, ATTACKER_RADIUS).any { !it.isDead && it.target === this }
++/** A monster that targets us, or a flagged or PK player who does: both are worth fighting back. */
++internal fun Player.isUnderAttack(): Boolean =
++        getKnownTypeInRadius(Monster::class.java, ATTACKER_RADIUS).any { !it.isDead && it.target === this } ||
++        getKnownTypeInRadius(Player::class.java, ATTACKER_RADIUS).any { !it.isDead && it.target === this && (it.pvpFlag > 0 || it.karma > 0) }
 +
 +private const val ATTACKER_RADIUS = 1000
 +
@@ -918,7 +920,7 @@ index 0000000..ba32df1
 +    private var gatekeeperFailed = false
 +
 +    suspend fun onUpdate() {
-+        if (bot.isDead || bot.isAttackedByMonster()) {
++        if (bot.isDead || bot.isUnderAttack()) {
 +            bot.combatBehavior.onUpdate()
 +            return
 +        }
@@ -1022,10 +1024,10 @@ index 0000000..ba32df1
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 new file mode 100644
-index 0000000..a8a0ff5
+index 0000000..c47f926
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,135 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.Autobot
@@ -1034,6 +1036,7 @@ index 0000000..a8a0ff5
 +import dev.l2j.autobots.AutobotsNameService
 +import dev.l2j.autobots.CoScopes
 +import dev.l2j.autobots.behaviors.preferences.ActivityType
++import dev.l2j.autobots.behaviors.preferences.AttackPlayerType
 +import dev.l2j.autobots.behaviors.preferences.SocialPreferences
 +import dev.l2j.autobots.dao.AutobotsDao
 +import dev.l2j.autobots.models.RespawnAction
@@ -1150,6 +1153,8 @@ index 0000000..a8a0ff5
 +        val bot = AutobotsDao.loadByName(member.name) ?: return
 +        bot.life = LifeBehavior(bot)
 +        bot.respawnAction = RespawnAction.None
++        // Like a player: fight back against whoever flags on us, never start PvP on the innocent.
++        bot.combatBehavior.combatPreferences.attackPlayerType = AttackPlayerType.Flagged
 +        AutobotsManager.spawnAutobot(bot)
 +    }
 +
@@ -1171,7 +1176,7 @@ index bf8668c..84d84e0 100644
          deactivateStates(player, "BotDetailsViewState")
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
-index 8c88e5c..a6ba498 100644
+index 8c88e5c..f15854c 100644
 --- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
 @@ -19,6 +19,7 @@ import net.sf.l2j.gameserver.enums.actors.ClassRace
@@ -1182,12 +1187,19 @@ index 8c88e5c..a6ba498 100644
  import net.sf.l2j.gameserver.model.WorldObject
  import net.sf.l2j.gameserver.model.WorldRegion
  import net.sf.l2j.gameserver.model.actor.Creature
-@@ -450,6 +451,15 @@ internal fun Creature.getKnownTargatablesInRadius(radius: Int, attackPlayerType:
+@@ -445,11 +446,21 @@ internal fun Creature.getKnownTargatablesInRadius(radius: Int, attackPlayerType:
+     fun shouldTarget(it: WorldObject, attackPlayerType: AttackPlayerType) : Boolean {
+         return when(attackPlayerType){
+             AttackPlayerType.None -> it is Monster
+-            AttackPlayerType.Flagged -> (it is Player && (it.pvpFlag > 0 || it.karma > 0)) || it is Monster
++            // Self-defense only: a flagged or PK player counts while it is going after us.
++            AttackPlayerType.Flagged -> (it is Player && (it.pvpFlag > 0 || it.karma > 0) && it.target === this) || it is Monster
+             AttackPlayerType.Innocent -> it is Player || it is Monster
          }
      }
  
 -    return region.surroundingRegions.flatMap { it.objects }.filterIsInstance<Creature>().filter { condition(it) && shouldTarget(it, attackPlayerType) && !it.isGM && !it.isDead && it !== this && MathUtil.checkIfInRange(radius, this, it, true)}
-+    return region.surroundingRegions.flatMap { it.objects }.filterIsInstance<Creature>().filter { condition(it) && shouldTarget(it, attackPlayerType) && !it.isGM && !it.isDead && it !== this && MathUtil.checkIfInRange(radius, this, it, true) && isWorthTargeting(it) && GeoEngine.getInstance().canSeeTarget(this, it)}
++    return region.surroundingRegions.flatMap { it.objects }.filterIsInstance<Creature>().filter { condition(it) && shouldTarget(it, attackPlayerType) && (!it.isGM || it.target === this) && !it.isDead && it !== this && MathUtil.checkIfInRange(radius, this, it, true) && isWorthTargeting(it) && GeoEngine.getInstance().canSeeTarget(this, it)}
  }
  
 +
