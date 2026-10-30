@@ -1226,10 +1226,10 @@ index 0000000..8536d63
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
 new file mode 100644
-index 0000000..afc1459
+index 0000000..11d29af
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,88 @@
 +package dev.l2j.autobots.behaviors.sequences
 +
 +import dev.l2j.autobots.extensions.location
@@ -1238,11 +1238,18 @@ index 0000000..afc1459
 +import dev.l2j.autobots.utils.CancellationToken
 +import dev.l2j.autobots.utils.distance
 +import kotlinx.coroutines.delay
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.geoengine.GeoEngine
 +import net.sf.l2j.gameserver.model.actor.Player
 +import net.sf.l2j.gameserver.model.location.Location
++import kotlin.math.atan2
++import kotlin.math.cos
++import kotlin.math.sin
 +
 +/**
 + * Walks to [destination] in short legs, so pathfinding only has to solve nearby obstacles.
++ * When a leg leads nowhere (the server finds no path to it, as with a point inside a wall or on another floor),
++ * the bot sidesteps a few times like a player feeling its way around a building, then goes on.
 + * Stops when the bot is attacked, and calls [onStuck] when it stops getting closer.
 + */
 +internal class WalkToSequence(override val bot: Player, private val destination: Location, private val arrivalRadius: Int, private val onStuck: () -> Unit) : Sequence {
@@ -1252,6 +1259,7 @@ index 0000000..afc1459
 +    override suspend fun definition() {
 +        var bestDistance = Double.MAX_VALUE
 +        var checksWithoutProgress = 0
++        var detours = 0
 +
 +        while (true) {
 +            val remaining = distance(bot.location(), destination)
@@ -1266,7 +1274,13 @@ index 0000000..afc1459
 +            }
 +
 +            if (!bot.isMoving) {
-+                val leg = nextLeg(remaining)
++                val leg = if (checksWithoutProgress >= CHECKS_BEFORE_DETOUR && detours < MAX_DETOURS) {
++                    detours++
++                    checksWithoutProgress = 0
++                    detour()
++                } else {
++                    nextLeg(remaining)
++                }
 +                bot.moveTo(leg.x, leg.y, leg.z)
 +            }
 +            delay(CHECK_INTERVAL_MS)
@@ -1276,14 +1290,29 @@ index 0000000..afc1459
 +    private fun nextLeg(remaining: Double): Location {
 +        if (remaining <= LEG_LENGTH) return destination
 +        val ratio = LEG_LENGTH / remaining
-+        return Location(
-+                bot.x + ((destination.x - bot.x) * ratio).toInt(),
-+                bot.y + ((destination.y - bot.y) * ratio).toInt(),
-+                bot.z + ((destination.z - bot.z) * ratio).toInt())
++        val x = bot.x + ((destination.x - bot.x) * ratio).toInt()
++        val y = bot.y + ((destination.y - bot.y) * ratio).toInt()
++        // A straight-line height is often under a floor or over a bridge; the ground under the point is reachable.
++        val z = bot.z + ((destination.z - bot.z) * ratio).toInt()
++        return Location(x, y, GeoEngine.getInstance().getHeight(x, y, z).toInt())
++    }
++
++    /** A step to one side of the straight line, so the next leg starts from somewhere the pathfinder can solve. */
++    private fun detour(): Location {
++        val heading = atan2((destination.y - bot.y).toDouble(), (destination.x - bot.x).toDouble())
++        val turn = Math.toRadians(Rnd.get(45, 120).toDouble()) * (if (Rnd.nextBoolean()) 1 else -1)
++        val length = Rnd.get(DETOUR_MIN, DETOUR_MAX)
++        val x = bot.x + (cos(heading + turn) * length).toInt()
++        val y = bot.y + (sin(heading + turn) * length).toInt()
++        return Location(x, y, GeoEngine.getInstance().getHeight(x, y, bot.z).toInt())
 +    }
 +
 +    companion object {
 +        private const val LEG_LENGTH = 2000.0
++        private const val CHECKS_BEFORE_DETOUR = 2
++        private const val MAX_DETOURS = 6
++        private const val DETOUR_MIN = 300
++        private const val DETOUR_MAX = 900
 +        private const val MIN_PROGRESS = 100
 +        private const val CHECK_INTERVAL_MS = 2000L
 +        private const val MAX_CHECKS_WITHOUT_PROGRESS = 15
