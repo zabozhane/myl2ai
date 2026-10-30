@@ -69,15 +69,16 @@ index 02ab43f..a4ac63a 100644
 +private fun Autobot.dwarfBranch(): ClassId =
 +        if (Math.floorMod(objectId * 977 + 3, 100) < AutobotData.settings.crafterArtisanPercent) ClassId.ARTISAN else ClassId.SCAVENGER
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
-index d64fe1a..cdb5929 100644
+index a1a8e14..b8bbf52 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
-@@ -11,8 +11,25 @@ import java.util.concurrent.atomic.AtomicInteger
- import kotlin.math.exp
- 
- /** A patch of the map where monsters spawn, with the levels of those monsters. */
--internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>) {
-+internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>, private val npcIds: List<Int> = emptyList()) {
+@@ -14,8 +14,26 @@ import kotlin.math.exp
+  * A patch of the map where monsters spawn, with the levels of those monsters and the highest level of the ones that
+  * attack on sight ([dangerLevel], 0 without any).
+  */
+-internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>, val dangerLevel: Int = 0) {
++internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>, val dangerLevel: Int = 0,
++                           private val npcIds: List<Int> = emptyList()) {
      fun monstersFor(level: Int): Int = HuntingSpots.suitableLevels(level).let { range -> monsterLevels.count { it in range } }
 +
 +    /** Monsters of [level] that drop (or, with [spoil], give when spoiled) any of [items]. */
@@ -99,8 +100,8 @@ index d64fe1a..cdb5929 100644
  }
  
  /**
-@@ -34,10 +51,10 @@ internal object HuntingSpots {
-     fun isSuitable(spot: HuntingSpot, level: Int): Boolean = spot.monstersFor(level) >= MIN_SUITABLE_MONSTERS
+@@ -42,10 +60,10 @@ internal object HuntingSpots {
+             spot.monstersFor(level) >= MIN_SUITABLE_MONSTERS && spot.dangerLevel <= level + DANGER_LEVELS_ABOVE
  
      /** Picks a spot with monsters for [level], which is below the bot's own when it falls back to easier hunting. */
 -    fun choose(bot: Player, level: Int, excluded: Set<Long>): HuntingSpot? {
@@ -112,11 +113,11 @@ index d64fe1a..cdb5929 100644
                  .sortedByDescending { it.second }
                  .take(CANDIDATES)
                  .toList()
-@@ -64,14 +81,24 @@ internal object HuntingSpots {
+@@ -72,14 +90,24 @@ internal object HuntingSpots {
          return spot.monstersFor(level) * exp(-distance(bot.location(), spot.location) / DISTANCE_DECAY) / (1 + crowd)
      }
  
--    private class MonsterSpawn(val x: Int, val y: Int, val z: Int, val level: Int)
+-    private class MonsterSpawn(val x: Int, val y: Int, val z: Int, val level: Int, val aggressive: Boolean = false)
 +    /**
 +     * A bot farming for specific loot (a spoiler after materials crafters want, a hunter after the parts of its next
 +     * weapon) prefers spots whose monsters yield it, up to 5 times over an ordinary spot.
@@ -127,28 +128,31 @@ index d64fe1a..cdb5929 100644
 +        return 1.0 + 4.0 * matching / spot.monstersFor(level).coerceAtLeast(1)
 +    }
 +
-+    private class MonsterSpawn(val x: Int, val y: Int, val z: Int, val level: Int, val npcId: Int)
++    private class MonsterSpawn(val x: Int, val y: Int, val z: Int, val level: Int, val aggressive: Boolean = false, val npcId: Int = 0)
  
      private fun buildSpots(): List<HuntingSpot> = SpawnTable.getInstance().spawns
              .filter { it.template.isType("Monster") }
              .mapNotNull { spawn ->
                  // Territory spawns have no fixed location; the monster they placed tells where they are.
                  val loc = spawn.loc ?: spawn.npc?.position ?: return@mapNotNull null
--                MonsterSpawn(loc.x, loc.y, loc.z, spawn.template.level.toInt())
-+                MonsterSpawn(loc.x, loc.y, loc.z, spawn.template.level.toInt(), spawn.template.npcId)
+-                MonsterSpawn(loc.x, loc.y, loc.z, spawn.template.level.toInt(), spawn.template.aggroRange > 0)
++                MonsterSpawn(loc.x, loc.y, loc.z, spawn.template.level.toInt(), spawn.template.aggroRange > 0, spawn.template.npcId)
              }
-             .groupBy { cellKey(it.x, it.y) }
+             .groupBy { cellKey(it.x, it.y, it.z) }
              .map { (key, spawns) ->
-@@ -79,9 +106,12 @@ internal object HuntingSpots {
+@@ -87,7 +115,8 @@ internal object HuntingSpots {
                  val centerY = spawns.map { it.y }.average()
                  // A real spawn point is known to be walkable ground, unlike the bare cell center.
                  val anchor = spawns.minByOrNull { (it.x - centerX) * (it.x - centerX) + (it.y - centerY) * (it.y - centerY) }!!
--                HuntingSpot(key, Location(anchor.x, anchor.y, anchor.z), spawns.map { it.level })
-+                HuntingSpot(key, Location(anchor.x, anchor.y, anchor.z), spawns.map { it.level }, spawns.map { it.npcId })
+-                HuntingSpot(key, Location(anchor.x, anchor.y, anchor.z), spawns.map { it.level }, spawns.filter { it.aggressive }.maxOfOrNull { it.level } ?: 0)
++                HuntingSpot(key, Location(anchor.x, anchor.y, anchor.z), spawns.map { it.level }, spawns.filter { it.aggressive }.maxOfOrNull { it.level } ?: 0,
++                        spawns.map { it.npcId })
              }
              .also { println("Autobots population: ${it.size} hunting spots.") }
  
-     private fun cellKey(x: Int, y: Int): Long = (Math.floorDiv(x, CELL_SIZE).toLong() shl 32) or (Math.floorDiv(y, CELL_SIZE).toLong() and 0xffffffffL)
+@@ -95,3 +124,6 @@ internal object HuntingSpots {
+     private fun cellKey(x: Int, y: Int, z: Int): Long = ((Math.floorDiv(x, CELL_SIZE).toLong() and 0xffffffL) shl 40) or
+             ((Math.floorDiv(y, CELL_SIZE).toLong() and 0xffffffL) shl 16) or (Math.floorDiv(z, FLOOR_HEIGHT).toLong() and 0xffffL)
  }
 +
 +/** Loot a bot goes looking for: dropped items, or items given by Sweeper after a spoil. */

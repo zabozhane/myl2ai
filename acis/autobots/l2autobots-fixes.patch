@@ -1603,10 +1603,10 @@ index 0000000..4c7caff
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
 new file mode 100644
-index 0000000..d64fe1a
+index 0000000..a1a8e14
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,97 @@
 +package dev.l2j.autobots.population
 +
 +import dev.l2j.autobots.extensions.location
@@ -1619,8 +1619,11 @@ index 0000000..d64fe1a
 +import java.util.concurrent.atomic.AtomicInteger
 +import kotlin.math.exp
 +
-+/** A patch of the map where monsters spawn, with the levels of those monsters. */
-+internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>) {
++/**
++ * A patch of the map where monsters spawn, with the levels of those monsters and the highest level of the ones that
++ * attack on sight ([dangerLevel], 0 without any).
++ */
++internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>, val dangerLevel: Int = 0) {
 +    fun monstersFor(level: Int): Int = HuntingSpots.suitableLevels(level).let { range -> monsterLevels.count { it in range } }
 +}
 +
@@ -1634,13 +1637,18 @@ index 0000000..d64fe1a
 +    private const val MIN_SUITABLE_MONSTERS = 4
 +    private const val DISTANCE_DECAY = 10000.0
 +    private const val CANDIDATES = 5
++    /** Floors of one place (a village above, catacombs below) are separate spots. */
++    private const val FLOOR_HEIGHT = 1000
++    /** Aggressive monsters this many levels above the hunter make a spot a death trap. */
++    private const val DANGER_LEVELS_ABOVE = 5
 +
 +    private val spots: List<HuntingSpot> by lazy { buildSpots() }
 +    private val hunters = ConcurrentHashMap<Long, AtomicInteger>()
 +
 +    fun suitableLevels(level: Int): IntRange = (level - 4).coerceAtLeast(1)..(level + 2)
 +
-+    fun isSuitable(spot: HuntingSpot, level: Int): Boolean = spot.monstersFor(level) >= MIN_SUITABLE_MONSTERS
++    fun isSuitable(spot: HuntingSpot, level: Int): Boolean =
++            spot.monstersFor(level) >= MIN_SUITABLE_MONSTERS && spot.dangerLevel <= level + DANGER_LEVELS_ABOVE
 +
 +    /** Picks a spot with monsters for [level], which is below the bot's own when it falls back to easier hunting. */
 +    fun choose(bot: Player, level: Int, excluded: Set<Long>): HuntingSpot? {
@@ -1673,26 +1681,28 @@ index 0000000..d64fe1a
 +        return spot.monstersFor(level) * exp(-distance(bot.location(), spot.location) / DISTANCE_DECAY) / (1 + crowd)
 +    }
 +
-+    private class MonsterSpawn(val x: Int, val y: Int, val z: Int, val level: Int)
++    private class MonsterSpawn(val x: Int, val y: Int, val z: Int, val level: Int, val aggressive: Boolean = false)
 +
 +    private fun buildSpots(): List<HuntingSpot> = SpawnTable.getInstance().spawns
 +            .filter { it.template.isType("Monster") }
 +            .mapNotNull { spawn ->
 +                // Territory spawns have no fixed location; the monster they placed tells where they are.
 +                val loc = spawn.loc ?: spawn.npc?.position ?: return@mapNotNull null
-+                MonsterSpawn(loc.x, loc.y, loc.z, spawn.template.level.toInt())
++                MonsterSpawn(loc.x, loc.y, loc.z, spawn.template.level.toInt(), spawn.template.aggroRange > 0)
 +            }
-+            .groupBy { cellKey(it.x, it.y) }
++            .groupBy { cellKey(it.x, it.y, it.z) }
 +            .map { (key, spawns) ->
 +                val centerX = spawns.map { it.x }.average()
 +                val centerY = spawns.map { it.y }.average()
 +                // A real spawn point is known to be walkable ground, unlike the bare cell center.
 +                val anchor = spawns.minByOrNull { (it.x - centerX) * (it.x - centerX) + (it.y - centerY) * (it.y - centerY) }!!
-+                HuntingSpot(key, Location(anchor.x, anchor.y, anchor.z), spawns.map { it.level })
++                HuntingSpot(key, Location(anchor.x, anchor.y, anchor.z), spawns.map { it.level }, spawns.filter { it.aggressive }.maxOfOrNull { it.level } ?: 0)
 +            }
 +            .also { println("Autobots population: ${it.size} hunting spots.") }
 +
-+    private fun cellKey(x: Int, y: Int): Long = (Math.floorDiv(x, CELL_SIZE).toLong() shl 32) or (Math.floorDiv(y, CELL_SIZE).toLong() and 0xffffffffL)
++    /** 24 bits for each of x and y, 16 for the floor: unique for any map coordinates. */
++    private fun cellKey(x: Int, y: Int, z: Int): Long = ((Math.floorDiv(x, CELL_SIZE).toLong() and 0xffffffL) shl 40) or
++            ((Math.floorDiv(y, CELL_SIZE).toLong() and 0xffffffL) shl 16) or (Math.floorDiv(z, FLOOR_HEIGHT).toLong() and 0xffffL)
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 new file mode 100644
