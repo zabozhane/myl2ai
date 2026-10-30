@@ -41,6 +41,34 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     but never starts PvP itself.
   - Nothing from thin air any more: no gear on spawn or level up, no free shots, potions, arrows, buffs or
     mana; bots use what they own and sit down to regenerate (`Rester`).
+  Living economy (`population/economy/`, `economyEnabled` in `config.xml`): population bots live on what they
+  earn; nothing is created, every deal goes through the same code paths a client request would.
+  - `Market`: town shops indexed from merchant spawns and buy lists (clan hall stewards excluded). Buying and
+    selling mirror `RequestBuyItem`/`RequestSellItem` (castle tax, stock, half the reference price on sale);
+    private stores are used through `TradeList.privateStoreBuy/Sell`, so players and bots trade both ways.
+    Town shops sell No-grade and D-grade weapons and armor only; higher grades and enchant scrolls come from drops
+    and private stores.
+  - `TownTrip`: a bot leaves its spot for town (Scroll of Escape, or on foot if close) when its bag passes 45% of
+    the weight limit (the penalty starts at 50%), it runs out of shots or arrows, it can afford the next kit piece,
+    or every 90 minutes with loot to sell; a death in town also triggers a visit. In town: private stores first
+    (buy below shop price, sell above NPC price), then merchants (junk out; Scroll of Escape, grade-matched shots,
+    arrows, potions, the next kit piece in), then equip and enchant. The target kit is `equipment.xml`, which
+    used to be handed out for free.
+  - `Enchanter`: worn gear with the bot's own scrolls, chances from `EnchantScroll.getChance`; a failed normal
+    scroll crystallizes the item, a blessed one resets it. The temper (from the object id) sets the risk:
+    50% cautious (safe levels only), 35% normal (armor +4, weapon +6 if the adena would replace the item), 15%
+    gamblers (armor +6, weapon +10).
+  - `StoreKeeper`: AFK sessions of bots with goods become store sessions, and 30% of bots with goods stay online
+    30-90 minutes after their session in a store. Valuable surplus (materials, recipes, gear, scrolls: stacks worth
+    2000+) goes to a sell store at 0.65-0.9 of the shop price, or 0.8-1.5 of the reference price for items no shop
+    sells; unsold items get 10% cheaper per session. With no goods, a buy store bids on the next kit piece shops
+    don't sell and on scrolls for worn gear, paid with the bot's own adena.
+  - `Fitness`: 3 deaths in an hour or gear more than a grade below the level switch the bot to farming monsters
+    5 levels lower, saving for gear and enchanting safely; dying again there sets `needsGroup` (for the group
+    stage) and drops 3 more levels. An hour without deaths with decent gear brings it back.
+  - Population bots have a real weight limit and inventory size again; shots and arrows match the weapon grade;
+    bots use shop Healing Potions and Mana Drugs. `economyLog` logs every deal, `economyChat` lets bots remark on
+    enchants and upgrades in chat.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 
