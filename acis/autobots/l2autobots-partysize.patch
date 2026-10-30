@@ -1,0 +1,315 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
+index 95d3eac..f0b19de 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
+@@ -198,6 +198,8 @@ internal class PartyState {
+     var gatheringSince: Long? = null
+     /** Full or casual; a party a player put together counts as casual. */
+     var kind = PartyKind.Casual
++    /** How many people the party wants now, see [PartySize]; 0 until a bot leader settles it. */
++    var targetSize = 0
+     /** When a casual party bots formed goes separate ways; null for the others. */
+     var breakUpAt: Long? = null
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+index f7f30a5..2352012 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+@@ -11,6 +11,7 @@ import kotlinx.coroutines.launch
+ import net.sf.l2j.commons.random.Rnd
+ import net.sf.l2j.gameserver.data.xml.MapRegionData
+ import net.sf.l2j.gameserver.enums.LootRule
++import net.sf.l2j.gameserver.enums.MessageType
+ import net.sf.l2j.gameserver.model.actor.Player
+ import net.sf.l2j.gameserver.model.group.Party
+ import net.sf.l2j.gameserver.network.serverpackets.AskJoinParty
+@@ -25,7 +26,8 @@ import java.util.concurrent.ConcurrentHashMap
+  * a tank and a healer at least, a buffer and a spoiler when there are any, damage dealers up to [PartyKind.Full]'s size.
+  * Such a bot waits [WAIT_FOR_FULL_MS] for the roles to turn up and then settles for a casual party: whoever is around,
+  * any professions, which hunts for an hour or so and goes separate ways. A bot-led party with free places shouts for
+- * members and answers players looking for a group, inviting the ones it can use.
++ * members and answers players looking for a group, inviting the ones it can use. How many it wants changes with
++ * what each member earns, see [PartySize]: a party short of its size takes lookers of its region in.
+  */
+ internal object GroupFinder {
+     const val FULL_FROM_LEVEL = 20
+@@ -50,6 +52,9 @@ internal object GroupFinder {
+     /** A leader's whispered offer to a looking player: their answer is taken as a request to join for a while. */
+     private val offers = ConcurrentHashMap<Int, Pair<Int, Long>>()
+     private const val OFFER_VALID_MS = 5 * 60_000L
++    /** A bot that left a party to make it smaller: object id -> the leader and until when it won't come back. */
++    private val leftParty = ConcurrentHashMap<Int, Pair<Int, Long>>()
++    private const val NO_RETURN_MS = 30 * 60_000L
+ 
+     private val settings get() = AutobotData.settings
+     private val enabled get() = settings.groupsEnabled && settings.groupFinderEnabled
+@@ -95,6 +100,7 @@ internal object GroupFinder {
+         pendingPlayer.remove(bot.objectId)
+         smallSince.remove(bot.objectId)
+         offers.remove(bot.objectId)
++        leftParty.remove(bot.objectId)
+     }
+ 
+     fun offered(leader: Autobot, player: Player) {
+@@ -117,6 +123,7 @@ internal object GroupFinder {
+             fullSeekers.remove(it.objectId)
+         }
+ 
++        val leftover = mutableListOf<Autobot>()
+         for ((_, regionLookers) in lookers.groupBy { MapRegionData.getInstance().getMapRegion(it.x, it.y) }) {
+             val pool = regionLookers.sortedWith(compareByDescending<Autobot> { Sociability.of(it).ordinal }.thenByDescending { it.level }).toMutableList()
+             // Full parties first: they need particular people, a casual party takes whoever is left.
+@@ -136,9 +143,15 @@ internal object GroupFinder {
+                 form(leader, members, PartyKind.Casual)
+                 grouped += members.size + 1
+             }
++            leftover += pool.filter { !it.isInParty }
+         }
+ 
+-        online.filter { it.isInParty && it.party.leader === it }.forEach { recruit(it, now) }
++        val leaders = online.filter { it.isInParty && it.party.leader === it }
++        for (leader in leaders) {
++            if (grouped >= cap) break
++            if (fill(leader, leftover, now)) grouped++
++        }
++        leaders.forEach { recruit(it, now) }
+         remember(online)
+     }
+ 
+@@ -161,7 +174,7 @@ internal object GroupFinder {
+         wipes = 0
+         for (party in parties) {
+             val leader = party.leader
+-            println("  ${PartyPlan.state(party).kind.name.lowercase()} party ${leader.name} lv ${leader.level}: " + party.members.filter { it !== leader }.joinToString {
++            println("  ${PartyPlan.state(party).kind.name.lowercase()} party ${leader.name} lv ${leader.level} size ${party.membersCount}/${PartySize.target(party)}${PartySize.describe(party)}: " + party.members.filter { it !== leader }.joinToString {
+                 "${it.name} ${Role.of(it.classId)} ${distance(leader, it).toInt()}${if (it.isDead) " dead" else ""} ${(it as? Autobot)?.activeSequence?.javaClass?.simpleName ?: it.ai.desire.intention}"
+             } + " | leader ${(leader as? Autobot)?.activeSequence?.javaClass?.simpleName ?: leader.ai.desire.intention}" + if (leader.isDead) " (leader dead)" else "")
+         }
+@@ -237,6 +250,7 @@ internal object GroupFinder {
+         leader.party?.let { party ->
+             val state = PartyPlan.state(party)
+             state.kind = kind
++            state.targetSize = party.membersCount.coerceIn(kind.minSize, PartySize.MAX)
+             state.breakUpAt = if (kind == PartyKind.Casual) System.currentTimeMillis() + Rnd.get(CASUAL_MIN_MS, CASUAL_MAX_MS) else null
+         }
+         nextShout[leader.objectId] = System.currentTimeMillis() + Rnd.get(SHOUT_MIN_MS, SHOUT_MAX_MS)
+@@ -269,12 +283,63 @@ internal object GroupFinder {
+             }
+         } else smallSince.remove(leader.objectId)
+ 
+-        if (size >= state.kind.wantedSize || now < (nextShout[leader.objectId] ?: 0)) return
++        when (PartySize.update(party, now)) {
++            PartySize.Change.Shrink -> letGo(party)
++            PartySize.Change.Grow -> if (settings.groupLog) println("Autobots groups: ${leader.name}'s party tries ${PartySize.target(party)} people")
++            null -> {}
++        }
++        if (party.membersCount >= PartySize.target(party) || now < (nextShout[leader.objectId] ?: 0)) return
+         nextShout[leader.objectId] = now + Rnd.get(SHOUT_MIN_MS, SHOUT_MAX_MS)
+         looking[leader.objectId] = looking[leader.objectId] ?: now
+         leader.shout(GroupChat.lookingForMembers(party, needs(party), placeName(leader)))
+     }
+ 
++    /**
++     * A party short of its size takes one fitting looker of its region a tick: a role it lacks first, never a second
++     * tank or healer for a full party. A bot holding out for a full party joins full ones only.
++     */
++    private fun fill(leader: Autobot, lookers: MutableList<Autobot>, now: Long): Boolean {
++        val party = leader.party ?: return false
++        if (party.membersCount >= PartySize.target(party).coerceAtMost(PartySize.MAX)) return false
++        val state = PartyPlan.state(party)
++        val region = MapRegionData.getInstance().getMapRegion(leader.x, leader.y)
++        val roles = party.members.map { Role.of(it.classId) }
++        val wanted = needs(party)
++        val candidates = fitting(leader, lookers.filter { bot ->
++            !bot.isInParty && MapRegionData.getInstance().getMapRegion(bot.x, bot.y) == region &&
++                    (state.kind == PartyKind.Full || !waitsForFull(bot, now)) &&
++                    leftParty[bot.objectId]?.let { it.first == leader.objectId && it.second > now } != true
++        }).filter { state.kind != PartyKind.Full || Role.of(it.classId).let { role -> (role != Role.Tank && role != Role.Healer) || role !in roles } }
++        val member = candidates.minByOrNull { wanted.indexOf(Role.of(it.classId)).let { i -> if (i < 0) wanted.size else i } } ?: return false
++        member.cancelSequence()
++        party.addPartyMember(member)
++        lookers.remove(member)
++        looking.remove(member.objectId)
++        fullSeekers.remove(member.objectId)
++        if (settings.groupLog) println("Autobots groups: ${member.name} (lv ${member.level} ${Role.of(member.classId)}) joined ${leader.name}'s party, " +
++                "${party.membersCount}/${PartySize.target(party)}")
++        return true
++    }
++
++    /**
++     * Too many for what the spot gives: one bot leaves, the one the leader likes least among those the party can spare
++     * (damage dealers first, never its only tank or healer, never a player), and goes looking for another group.
++     */
++    private fun letGo(party: Party) {
++        val leader = party.leader as? Autobot ?: return
++        val roles = party.members.map { Role.of(it.classId) }
++        val member = party.members.filterIsInstance<Autobot>()
++                .filter { it !== leader && Role.of(it.classId).let { role -> (role != Role.Tank && role != Role.Healer) || roles.count { r -> r == role } > 1 } }
++                .sortedWith(compareBy<Autobot> { if (Role.of(it.classId) == Role.Damage) 0 else 1 }.thenBy { Relations.affinity(leader, it) })
++                .firstOrNull() ?: return
++        member.partySay(listOf("too many of us here, exp is low, I'm off. ty all", "мало опыта на всех, пойду дальше, всем спасибо",
++                "нас многовато для этого места, я отвалюсь", "gonna leave, too crowded for exp, gl").random())
++        party.removePartyMember(member, MessageType.LEFT)
++        leftParty[member.objectId] = leader.objectId to System.currentTimeMillis() + NO_RETURN_MS
++        startLooking(member)
++        if (settings.groupLog) println("Autobots groups: ${member.name} left ${leader.name}'s party to make it smaller, now ${PartySize.target(party)}")
++    }
++
+     /** What the party lacks most, as a player would put it in a shout. A casual party takes anybody. */
+     fun needs(party: Party): List<Role> {
+         if (PartyPlan.state(party).kind == PartyKind.Casual) return listOf(Role.Damage)
+@@ -291,7 +356,7 @@ internal object GroupFinder {
+ 
+     /** A party a looking player could join: led by a bot of this region, with room and levels that fit. */
+     fun partiesFor(player: Player, online: Collection<Autobot>): List<Party> = online
+-            .filter { it.isInParty && it.party.leader === it && it.party.membersCount < (PartyPlan.state(it.party).kind.wantedSize + 2).coerceAtMost(9) }
++            .filter { it.isInParty && it.party.leader === it && it.party.membersCount < (PartySize.target(it.party) + 2).coerceAtMost(PartySize.MAX) }
+             .filter { MapRegionData.getInstance().getMapRegion(it.x, it.y) == MapRegionData.getInstance().getMapRegion(player.x, player.y) }
+             .map { it.party }
+             .filter { p -> kotlin.math.abs(p.members.sumOf { it.level } / p.membersCount - player.level) <= MAX_LEVEL_SPREAD }
+@@ -309,7 +374,7 @@ internal object GroupFinder {
+         if (player.karma > 0) return GroupChat.Line.NoPk
+         val role = Role.of(player.classId)
+         val roles = party.members.map { Role.of(it.classId) }
+-        if ((role == Role.Tank || role == Role.Healer) && role in roles && party.membersCount >= PartyPlan.state(party).kind.wantedSize) return GroupChat.Line.RoleTaken
++        if ((role == Role.Tank || role == Role.Healer) && role in roles && party.membersCount >= PartySize.target(party)) return GroupChat.Line.RoleTaken
+         val expected = Gear.gradeFor(player.level).id
+         val weapon = player.activeWeaponItem?.crystalType?.id ?: -1
+         val friend = leader is Autobot && Relations.affinity(leader, player) >= Relations.FRIEND
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartySize.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartySize.kt
+new file mode 100644
+index 0000000..b3ec243
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartySize.kt
+@@ -0,0 +1,131 @@
++package dev.l2j.autobots.population.group
++
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.group.Party
++
++/**
++ * How many people a bot-led party wants, from its kind's minimum up to [MAX]. A party starts at the size it was formed
++ * with and weighs what a member earns, experience and adena per minute, over [WINDOW_MS] at a time with the same people
++ * at the same spot. It keeps a size that pays, tries one more when nobody died and the last step up didn't cost it,
++ * and lets one go when a member earns clearly less than at the size below, or when the spot stops feeding this many.
++ */
++internal object PartySize {
++    const val MAX = 9
++    private const val WINDOW_MS = 10 * 60_000L
++    /** Earnings measured at another size are compared for this long, then the party tries again. */
++    private const val RECORD_TTL_MS = 40 * 60_000L
++    /** The leader went further than this: another spot, earnings start over. */
++    private const val SAME_SPOT = 3000.0
++    /** A member earning less than this share of what it earned with one fewer person: one fewer is better. */
++    private const val WORSE = 0.85
++    /** Earnings at the same size fell below this share of the last window: the spot runs out of monsters for so many. */
++    private const val DEPLETED = 0.7
++    private const val TRY_BIGGER_PERCENT = 50
++
++    enum class Change { Shrink, Grow }
++
++    /** A member's earnings per minute at one size. */
++    private class Sample(val exp: Double, val adena: Double, val at: Long)
++
++    private class Tracker {
++        var startedAt = 0L
++        var x = 0
++        var y = 0
++        var members = emptySet<Int>()
++        val exp = HashMap<Int, Long>()
++        val adena = HashMap<Int, Long>()
++        var died = false
++        val records = HashMap<Int, Sample>()
++        var last: Sample? = null
++    }
++
++    private val trackers = java.util.Collections.synchronizedMap(java.util.WeakHashMap<Party, Tracker>())
++
++    fun target(party: Party): Int = PartyPlan.state(party).let { if (it.targetSize > 0) it.targetSize else it.kind.wantedSize }
++
++    private fun min(party: Party) = PartyPlan.state(party).kind.minSize
++
++    /** Earnings per member at the current size, for the summary. */
++    fun describe(party: Party): String {
++        val last = trackers[party]?.last ?: return ""
++        return " exp/min ${last.exp.toLong()} adena/min ${last.adena.toLong()}"
++    }
++
++    /** Called every tick for a party a bot leads. @return a change of size the party agreed on, if any. */
++    fun update(party: Party, now: Long): Change? {
++        val leader = party.leader ?: return null
++        val state = PartyPlan.state(party)
++        if (state.targetSize == 0) state.targetSize = party.membersCount.coerceIn(min(party), MAX)
++        val tracker = trackers.getOrPut(party) { Tracker() }
++        val ids = party.members.map { it.objectId }.toSet()
++        if (tracker.startedAt == 0L || Math.hypot((leader.x - tracker.x).toDouble(), (leader.y - tracker.y).toDouble()) > SAME_SPOT) {
++            tracker.records.clear()
++            tracker.last = null
++            restart(tracker, party, now)
++            return null
++        }
++        // Earnings are compared size by size: anyone joining or leaving starts the window again.
++        if (ids != tracker.members) {
++            restart(tracker, party, now)
++            return null
++        }
++        if (party.members.any { it.isDead }) tracker.died = true
++        if (now - tracker.startedAt < WINDOW_MS) return null
++
++        val size = ids.size
++        val sample = measure(tracker, party, now)
++        tracker.records.values.removeIf { now - it.at > RECORD_TTL_MS }
++        val smaller = tracker.records[size - 1]
++        val bigger = tracker.records[size + 1]
++        val previous = tracker.records[size]
++        tracker.records[size] = sample
++        tracker.last = sample
++        val died = tracker.died
++        restart(tracker, party, now)
++
++        val change = when {
++            size > min(party) && smaller != null && ratio(sample, smaller) < WORSE -> Change.Shrink
++            size > min(party) && smaller == null && previous != null && ratio(sample, previous) < DEPLETED -> Change.Shrink
++            size < MAX && size >= state.targetSize && !died && (smaller == null || ratio(sample, smaller) >= 1.0) &&
++                    (bigger == null || ratio(bigger, sample) >= 1.0) && Rnd.get(100) < TRY_BIGGER_PERCENT -> Change.Grow
++            else -> null
++        }
++        when (change) {
++            Change.Shrink -> state.targetSize = size - 1
++            Change.Grow -> state.targetSize = size + 1
++            null -> if (state.targetSize > size && bigger != null && ratio(bigger, sample) < 1.0) state.targetSize = size
++        }
++        return change
++    }
++
++    private fun restart(tracker: Tracker, party: Party, now: Long) {
++        val leader = party.leader
++        tracker.startedAt = now
++        tracker.x = leader.x
++        tracker.y = leader.y
++        tracker.members = party.members.map { it.objectId }.toSet()
++        tracker.exp.clear()
++        tracker.adena.clear()
++        for (member in party.members) {
++            tracker.exp[member.objectId] = member.exp
++            tracker.adena[member.objectId] = member.adena.toLong()
++        }
++        tracker.died = false
++    }
++
++    /** What a member earned per minute; a death's lost experience or a purchase counts as nothing earned, not a loss. */
++    private fun measure(tracker: Tracker, party: Party, now: Long): Sample {
++        val members: List<Player> = party.members
++        val minutes = (now - tracker.startedAt) / 60_000.0
++        val exp = members.sumOf { (it.exp - (tracker.exp[it.objectId] ?: it.exp)).coerceAtLeast(0) }
++        val adena = members.sumOf { (it.adena - (tracker.adena[it.objectId] ?: it.adena.toLong())).coerceAtLeast(0) }
++        return Sample(exp / members.size / minutes, adena / members.size / minutes, now)
++    }
++
++    /** How [a] compares to [b]: the average of the experience and adena ratios, over what [b] earned at all. */
++    private fun ratio(a: Sample, b: Sample): Double {
++        val parts = listOfNotNull(if (b.exp > 0) a.exp / b.exp else null, if (b.adena > 0) a.adena / b.adena else null)
++        return if (parts.isEmpty()) 1.0 else parts.average()
++    }
++}
