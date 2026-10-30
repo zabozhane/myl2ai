@@ -167,8 +167,17 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     even if someone spawns it.
   - The summary line gets `Craft CraftFail CraftOrder RecipeLearn Workshop` counts and
     `crafters workshops recipes adenaPerCrafter adenaPerOtherSameLevel`.
-- `l2autobots-raids.patch` - raid bosses (stage 4v, spec in `docs/raids.md`), applied last.
+- `l2autobots-raids.patch` - raid bosses (stage 4v, spec in `docs/raids.md`).
   - A bot never picks a raid boss or its minion as prey (`isWorthTargeting`); it only fights one that attacks it.
+- `l2autobots-partysize.patch` - adaptive party size (`PartySize`), applied last. A bot-led party wants from its
+  kind's minimum (full 5, casual 3) up to 9 people. It starts at the size it was formed with and measures what a member
+  earns, exp and adena per minute, over 10-minute windows with the same people at the same spot (another spot, more
+  than 3000 away, starts over). It tries one more (50% per window) when nobody died and the last step up didn't cost
+  it; one member leaves when a member earns under 85% of the size below, or under 70% of the last window at the same
+  size (the spot runs out of monsters). The one leaving is a bot the party can spare (damage dealers first, never its
+  only tank or healer, never a player), the one the leader likes least; it won't come back for 30 minutes. A party
+  below its size takes one fitting looker of its region a tick (lacking roles first, full parties no second tank or
+  healer), besides the shouts. The groups summary shows `size N/target` and the last exp/min and adena/min.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 
