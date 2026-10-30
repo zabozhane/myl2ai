@@ -253,7 +253,7 @@ index d6c9c8f..06fa0da 100644
                                      AdminActions.despawnAutobot(autobot)
                                  }
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-index ce85df0..c2618dd 100644
+index ce85df0..e146c32 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 @@ -34,6 +34,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
@@ -323,19 +323,20 @@ index ce85df0..c2618dd 100644
              player.rechargeShots(true, true)
          }
      }
-@@ -355,7 +353,10 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -355,7 +353,11 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
              Consumable(1540) { autobot -> autobot.getCombatBehavior().combatPreferences.useQuickHealingPots &&  autobot.getHealthPercentage() < 30 },
              Consumable(728) { autobot -> autobot.getCombatBehavior().combatPreferences.useManaPots && autobot !is SecretManaRegen &&  autobot.getManaPercentage() < 60 },
              Consumable(1539) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterHealingPots &&  autobot.getHealthPercentage() < 80 && !autobot.hasEffect(2037) },
 -            Consumable(5592) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterCpPots &&  autobot.getCpPercentage() < 80 }
 +            Consumable(5592) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterCpPots &&  autobot.getCpPercentage() < 80 },
-+            // Shop potions population bots buy: a heal over time and a mana regen, not stacked with a running one.
-+            Consumable(1061) { autobot -> autobot.getHealthPercentage() < 40 && !autobot.hasEffect(2032) },
++            // Shop potions population bots buy (heals over time) and a mana drug from drops, not stacked with a running one.
++            Consumable(1061) { autobot -> autobot.getHealthPercentage() < 40 && !autobot.hasEffect(2032) && !autobot.hasEffect(2031) },
++            Consumable(1060) { autobot -> autobot.getHealthPercentage() < 40 && !autobot.hasEffect(2031) && !autobot.hasEffect(2032) },
 +            Consumable(726) { autobot -> autobot.getManaPercentage() < 30 && !autobot.hasEffect(2279) }
      )
  
      internal fun validateConditionalSkill(skill: L2Skill) =
-@@ -374,4 +375,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+@@ -374,4 +376,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
      init {
          player.setIsRunning(true)
      }
@@ -1578,7 +1579,7 @@ index 0000000..244f82c
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
 new file mode 100644
-index 0000000..5a98d56
+index 0000000..5de9855
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
 @@ -0,0 +1,180 @@
@@ -1608,8 +1609,8 @@ index 0000000..5a98d56
 + */
 +internal object Gear {
 +    const val SCROLL_OF_ESCAPE = 736
-+    const val HEALING_POTION = 1061
-+    const val MANA_DRUG = 726
++    /** Healing potions town shops sell, best first: starting villages only have the lesser one. */
++    val HEALING_POTIONS = listOf(1061, 1060)
 +
 +    private val POTIONS = setOf(725, 726, 727, 728, 1060, 1061, 1539, 1540, 5592)
 +    private val BEGINNER_SHOTS = setOf(5789, 5790)
@@ -1764,10 +1765,10 @@ index 0000000..5a98d56
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
 new file mode 100644
-index 0000000..206f96f
+index 0000000..5663c3e
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
-@@ -0,0 +1,190 @@
+@@ -0,0 +1,195 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -1938,6 +1939,11 @@ index 0000000..206f96f
 +        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): $message")
 +    }
 +
++    /** A planned deal that didn't happen, and why: shows what holds the economy back. */
++    fun skip(bot: Player, reason: String) {
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): skipped: $reason")
++    }
++
 +    /**
 +     * One line about the whole population since the last summary, so a run can be judged without reading every deal:
 +     * deals by kind, then the state of the bots online.
@@ -2105,10 +2111,10 @@ index 0000000..a47de5d
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 new file mode 100644
-index 0000000..296f5e9
+index 0000000..761833a
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,221 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -2120,6 +2126,7 @@ index 0000000..296f5e9
 +import dev.l2j.autobots.utils.distance
 +import kotlinx.coroutines.delay
 +import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.ItemTable
 +import net.sf.l2j.gameserver.data.xml.MapRegionData
 +import net.sf.l2j.gameserver.enums.ZoneId
 +import net.sf.l2j.gameserver.model.actor.Npc
@@ -2259,8 +2266,8 @@ index 0000000..296f5e9
 +
 +    private suspend fun sellToNpc(items: List<ItemInstance>) {
 +        if (items.isEmpty()) return
-+        val shop = Market.closestShop(bot) ?: return
-+        if (!walkTo(shop.merchant)) return
++        val shop = Market.closestShop(bot) ?: return EconomyLog.skip(bot, "no shop in town to sell to")
++        if (!walkTo(shop.merchant)) return EconomyLog.skip(bot, "couldn't reach ${shop.merchant.name} to sell")
 +        Market.sellToNpc(bot, shop, items)
 +    }
 +
@@ -2273,25 +2280,29 @@ index 0000000..296f5e9
 +        }
 +        // A bow without arrows can't hunt at all.
 +        if (Gear.isArcher(bot)) buy(Gear.arrowId(bot), target = 1500, budgetShare = 0.6, onlyBelow = 500)
-+        buy(Gear.HEALING_POTION, target = 10, budgetShare = 0.5, onlyBelow = 3)
-+        if (bot.isMageClass) buy(Gear.MANA_DRUG, target = 10, budgetShare = 0.3, onlyBelow = 3)
++        // No town shop sells mana potions in Interlude: mages rest, as players did.
++        val potions = Gear.HEALING_POTIONS.sumOf { Gear.count(bot, it) }
++        val potion = Gear.HEALING_POTIONS.firstOrNull { Market.findProduct(bot, it) != null }
++        if (potion != null) buy(potion, target = 10, budgetShare = 0.5, onlyBelow = 3, have = potions)
 +    }
 +
 +    /** Buys up to [target] pieces when the bot has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */
-+    private suspend fun buy(itemId: Int, target: Int, budgetShare: Double, onlyBelow: Int) {
-+        val have = Gear.count(bot, itemId)
++    private suspend fun buy(itemId: Int, target: Int, budgetShare: Double, onlyBelow: Int, have: Int = Gear.count(bot, itemId)) {
 +        if (have >= onlyBelow) return
-+        val (shop, product) = Market.findProduct(bot, itemId) ?: return
++        val name = ItemTable.getInstance().getTemplate(itemId)?.name ?: "$itemId"
++        val (shop, product) = Market.findProduct(bot, itemId) ?: return EconomyLog.skip(bot, "no shop in town sells $name")
 +        val price = Market.priceWithTax(shop, product).coerceAtLeast(1)
 +        val count = minOf(target - have, (Errands.spendable(bot) * budgetShare / price).toInt())
-+        if (count <= 0 || !walkTo(shop.merchant)) return
++        if (count <= 0) return EconomyLog.skip(bot, "can't afford $name at $price (adena ${bot.adena}, reserve ${Errands.reserve(bot)})")
++        if (!walkTo(shop.merchant)) return EconomyLog.skip(bot, "couldn't reach ${shop.merchant.name} for $name")
 +        Market.buyFromNpc(bot, shop, product, count)
 +    }
 +
 +    private suspend fun buyGear() {
 +        val wish = Errands.affordableUpgrade(bot) ?: return
 +        val (shop, product) = Market.findProduct(bot, wish.itemId) ?: return
-+        if (Market.priceWithTax(shop, product) > Errands.spendable(bot) || !walkTo(shop.merchant)) return
++        if (Market.priceWithTax(shop, product) > Errands.spendable(bot)) return
++        if (!walkTo(shop.merchant)) return EconomyLog.skip(bot, "couldn't reach ${shop.merchant.name} for ${product.item.name}")
 +        if (!Market.buyFromNpc(bot, shop, product, 1)) return
 +        val item = bot.inventory.getItemsByItemId(wish.itemId).firstOrNull { !it.isEquipped } ?: return
 +        Gear.equip(bot, item)
