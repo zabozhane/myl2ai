@@ -193,6 +193,46 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
   goes isn't taken back (or offered that party) for 30 minutes. A party
   below its size takes one fitting looker of its region a tick (lacking roles first, full parties no second tank or
   healer), besides the shouts. The groups summary shows `size N/target` and the last exp/min and adena/min.
+- `acis-382-trade.patch` - one core hook, applied after `acis-382-autobots.patch`: `TradeRequest` calls
+  `AutobotsManager.onTradeRequest`, because a bot never sees the trade request window (like `RequestJoinParty`).
+- `l2autobots-trade.patch` - social trading (stage 2g), applied last. New code in `population/trade/`,
+  `socialTradeEnabled`, `scammerPercent`, `opportunistPercent`, `loanMaxDays`, `tradeLog` in `config.xml`. Every deal
+  goes through the core `TradeList` (request, answer, items put one by one, both confirmations), so a player sees the
+  usual trade window, and a bot can only put what it owns.
+  - The upstream `TradingSequence` (accepts any trade and creates the items it offers) is off for population bots,
+    and so is its "ty" after a trade.
+  - `Honesty` (a trait of the object id): `scammerPercent` scammers, `opportunistPercent` opportunists, the rest
+    honest. `Traits.isAttentive`: 70% of bots read the window (id and enchant) before confirming, the rest only
+    check the kind of item and the count.
+  - Town (`TownTrip`): a bot first gives back what is due to a lender standing around, then looks into the bags (not
+    the stores) of bots around for what it wants (`Worth.wanted`: next kit pieces and what its buy store would bid on)
+    and pays with goods the seller wants, adena making up the difference, or adena alone, never above the shop or
+    store price. Short of up to 60% of the next kit piece, it asks a bot around for the rest as a loan of 1-2 days.
+  - Parties: a member asks another for a spare piece from its bag that is an upgrade (until the end of the party, 2 h),
+    wears it and gives it back when due, or right before either of them logs out while they are close. Borrowed gear
+    and what it replaced are never sold, crystallized, put in a store or enchanted (`Loans.protectedObjects`).
+  - Lending: friends (liking 60+), trusted people (trust 30+) and party mates with some liking get it, with a chance
+    by trust and liking; never someone who owes the lender or scammed it, never more than a third of the lender's
+    worth; scammers don't lend.
+  - Scams: a scammer asks for adena it keeps, keeps gear it borrowed, sells a cheaper item of the same kind as the
+    piece a bot wants (an attentive buyer notices and cancels: trust -40), and offers a player a "+3..+5" item that
+    is +0 in the window. An opportunist keeps a loan worth 20000+ from someone it trusts below 20. At most one scam
+    attempt a day per scammer.
+  - `autobot_loans` (`sql/autobot_loans.sql`): lender, borrower, item (object id, so the very item comes back) or
+    adena, due time, state. The lender reminds every 45 minutes after the due time; `loanMaxDays` later the loan is
+    defaulted: trust -80, liking -40, the lender complains to its party and in shout chat and `TradeEvents.scam` fires
+    for the knowledge stage (2d). A late return gives back trust +40. A return in time: trust +15.
+  - Trust (`autobot_relations.trust`, -100..100): an honest deal +3 both ways. At -30 or below a bot refuses to
+    trade or lend ("ты меня кинул"); liking below -30 already keeps it out of a party with that character. A full
+    memory now forgets the most indifferent acquaintance, so friends and scammers are remembered.
+  - Players (`PlayerTrade`), whispers in Russian or English: "продай X" / "есть X?" (the bot names its store price,
+    friends get 10% off, people it distrusts pay 20% more), "дай поносить X" / "одолжи 5к" (the bot decides like for
+    a bot), "поноси" / "дам в долг" (the bot takes the item as a loan and gives it back), "верни". Then the player
+    opens the trade window; the bot puts its side and confirms only when the other side is what was agreed. With
+    nothing agreed the bot gives back what it owes, takes back what it lent, or names a price for things it wants
+    (a thing it doesn't want is accepted only as a gift). Items are found by the words of their name, or "оружие" /
+    "броня" for the best spare piece.
+  - `Autobots trade summary:` every 10 minutes: deals by kind, open and defaulted loans, scammers online.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 

@@ -22,6 +22,17 @@ for kind in "from NPC" "sold to NPC" "from store of" "to store of" "equipped" "e
 done
 
 echo
+echo "== Social trading =="
+grep -o 'Autobots trade summary: .*' <<<"$log" | tail -n 3 || echo "no summary yet"
+trades="$(grep -o 'Autobots trade: .*' <<<"$log" || true)"
+for kind in "got " "lent " "returned " "keeps " "won't " "never returned" "was scammed" "sold " "noticed"; do
+  matches="$(grep -F -- "$kind" <<<"$trades" || true)"
+  count="$(grep -c . <<<"$matches" || true)"
+  printf '%-18s %s\n' "$kind" "$count"
+  [ "$count" -gt 0 ] && head -n 2 <<<"$matches" | sed 's/^Autobots trade: /    /'
+done
+
+echo
 echo "== Bot errors =="
 grep -B2 -A8 'dev\.l2j\.autobots' <<<"$log" | grep -E 'Exception|Error|at dev\.l2j' | sort | uniq -c | sort -rn | head -n 10 || echo "none"
 
