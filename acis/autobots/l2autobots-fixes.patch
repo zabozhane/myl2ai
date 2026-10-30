@@ -2628,10 +2628,10 @@ index 0000000..698845b
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
 new file mode 100644
-index 0000000..5da5fd1
+index 0000000..54e0f4f
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
-@@ -0,0 +1,199 @@
+@@ -0,0 +1,209 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.population.group.Role
@@ -2644,6 +2644,7 @@ index 0000000..5da5fd1
 +import net.sf.l2j.gameserver.data.sql.SpawnTable
 +import net.sf.l2j.gameserver.enums.actors.StoreType
 +import net.sf.l2j.gameserver.model.ItemRequest
++import net.sf.l2j.gameserver.model.actor.Npc
 +import net.sf.l2j.gameserver.model.actor.Player
 +import net.sf.l2j.gameserver.model.actor.instance.Merchant
 +import net.sf.l2j.gameserver.model.buylist.Product
@@ -2691,6 +2692,15 @@ index 0000000..5da5fd1
 +            .minByOrNull { (shop, _) -> distance(bot, shop.merchant) }
 +
 +    fun closestShop(bot: Player): Shop? = shopsNear(bot).minByOrNull { distance(bot, it.merchant) }
++
++    /** Village Newbie Guides: their "support magic" buffs novices of level 10-24 for free, as on retail. */
++    private val newbieGuides: List<Npc> by lazy {
++        SpawnTable.getInstance().spawns.mapNotNull { it.npc }.filter { it.npcId in NEWBIE_GUIDE_IDS }
++    }
++
++    fun newbieGuideNear(bot: Player): Npc? = newbieGuides.filter { distance(bot, it) <= TOWN_RADIUS }.minByOrNull { distance(bot, it) }
++
++    private val NEWBIE_GUIDE_IDS = setOf(30598, 30599, 30600, 30601, 30602, 31076, 31077)
 +
 +    /** Price per piece with the castle tax, as RequestBuyItem charges it. */
 +    fun priceWithTax(shop: Shop, product: Product): Int = (product.price * (1 + (shop.merchant.castle?.taxRate ?: 0.0))).toInt()
@@ -2980,10 +2990,10 @@ index 0000000..eabb9c1
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
 new file mode 100644
-index 0000000..af4974f
+index 0000000..538f966
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,251 @@
 +package dev.l2j.autobots.population.economy
 +
 +import dev.l2j.autobots.Autobot
@@ -3093,6 +3103,16 @@ index 0000000..af4974f
 +        sellToNpc((leftovers + heavy).distinct().filter { bot.inventory.getItemByObjectId(it.objectId) != null })
 +        Enchanter.enchantWorn(bot, cautious)
 +        bot.refreshOverloaded()
++        getNewbieBuffs()
++    }
++
++    /** Last stop before leaving town, so the buffs last into the hunt; the guide itself checks level and class. */
++    private suspend fun getNewbieBuffs() {
++        if (!bot.isNewbie || bot.level < NEWBIE_BUFF_MIN_LEVEL) return
++        val guide = Market.newbieGuideNear(bot) ?: return
++        if (!walkTo(guide, "for newbie buffs")) return
++        guide.onBypassFeedback(bot, "SupportMagic")
++        delay(Rnd.get(1000, 3000).toLong())
 +    }
 +
 +    /** Cheap surplus that isn't worth a store slot. */
@@ -3215,6 +3235,7 @@ index 0000000..af4974f
 +        private const val MAX_STORE_VISITS = 4
 +        private const val SHOTS_PER_TRIP = 1000
 +        private const val APPROACH_RADIUS = 300
++        private const val NEWBIE_BUFF_MIN_LEVEL = 10
 +        private const val FINAL_APPROACH_SECONDS = 15
 +
 +        private fun shotsFor(level: Int) = when {
