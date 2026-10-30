@@ -24,6 +24,8 @@ java { targetCompatibility = JavaVersion.VERSION_11 }
 
 sourceSets.main {
     kotlin.srcDir("$autobotsSources/src/main/kotlin")
+    // Dashboard HTML templates (views/*.htv) and the bot name wordlist are loaded from the classpath.
+    resources.srcDir("$autobotsSources/src/main/resources")
     // aCis Java sources are only read for symbol resolution; javac never compiles them here.
     kotlin.srcDir("$acisSources/aCis_gameserver/java")
     java.setSrcDirs(emptyList<String>())
