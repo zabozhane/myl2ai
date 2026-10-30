@@ -169,6 +169,20 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     `crafters workshops recipes adenaPerCrafter adenaPerOtherSameLevel`.
 - `l2autobots-raids.patch` - raid bosses (stage 4v, spec in `docs/raids.md`).
   - A bot never picks a raid boss or its minion as prey (`isWorthTargeting`); it only fights one that attacks it.
+  - `population/raid/`: `RaidBosses` (bosses of `raidboss_spawnlist`, what bots saw: killed, empty place; the
+    server respawn timer is never read), `RaidPlanner` (a bot leader with 5+ members and a healer thinks every 5 minutes;
+    the boss must fit levels: not below average − 3, not above youngest + 3, nobody over boss + 8; chance by temper,
+    15/30/50% times `raidChancePercent`; no daily limit), `RaidBehavior` (wait, rest, tank pulls, damage dealers wait
+    4 s, kill minions first, step back to the tank when the boss turns on them, everyone but the tank leaves area skills,
+    retreat at half the party dead or all healers dead, 40 s of looting after a kill), `RaidLog`.
+  - Bosses of 150k+ hp (real hp of the live boss, raid multipliers included): the leader shouts for a second party; another bot party of fitting level answers and fights with it.
+  - Manners (a trait of the object id, 25% rude): a rude leader takes a boss others are fighting, half the time also
+    attacking them (damage dealers, forced attack, karma by the core's rules). Polite ones wait 5 minutes, then leave.
+  - A gambler leader sets finders-keepers loot for its party, the others random.
+  - A party on its way fills up to 9: the leader shouts once, free bots of the region that fit the boss join by
+    sociability (`RaidPlanner.fill`); the adaptive party size leaves a party on a raid alone.
+  - Deaths in a raid do not count for the fall-back to easier monsters. A player in the party can suggest «пойдём на рб».
+  - `raidsEnabled`, `raidChancePercent`, `raidLog` in `config.xml`; `Autobots raids summary:` every 10 minutes.
 - `l2autobots-partysize.patch` - adaptive party size (`PartySize`), applied after sessions. A bot-led party wants from its
   kind's minimum (full 5, casual 3) up to 9 people. It starts at the size it was formed with and measures what a member
   earns, exp and adena per minute, over 10-minute windows with the same people at the same spot (another spot, more
