@@ -143,20 +143,19 @@ index b8bbf52..17fe68f 100644
          hunters.computeIfAbsent(spot.key) { AtomicInteger() }.incrementAndGet()
      }
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index 1ee79c4..96005fb 100644
+index c28836c..da4543b 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-@@ -22,7 +22,9 @@ import dev.l2j.autobots.population.raid.RaidLog
+@@ -22,6 +22,8 @@ import dev.l2j.autobots.population.raid.RaidLog
  import dev.l2j.autobots.population.raid.RaidPlanner
  import dev.l2j.autobots.utils.distance
  import net.sf.l2j.commons.random.Rnd
 +import net.sf.l2j.gameserver.data.xml.MapRegionData
- import net.sf.l2j.gameserver.data.xml.TeleportLocationData
 +import net.sf.l2j.gameserver.data.xml.MapRegionData.TeleportType
+ import net.sf.l2j.gameserver.data.xml.TeleportLocationData
  import net.sf.l2j.gameserver.enums.ZoneId
  import net.sf.l2j.gameserver.model.actor.Player
- import net.sf.l2j.gameserver.model.actor.instance.Monster
-@@ -244,11 +246,32 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -244,6 +246,7 @@ internal class LifeBehavior(private val bot: Autobot) {
                      " weapon ${bot.activeWeaponItem?.crystalType ?: "none"}, at ${bot.x},${bot.y},${bot.z}" +
                      (RaidPlanner.raidOf(bot.party)?.let { ", raid ${it.boss.name} ${it.phase}" } ?: ""))
          }
@@ -164,6 +163,8 @@ index 1ee79c4..96005fb 100644
          // A raid is a risk the bot took on purpose: it does not make the bot fall back to easier monsters.
          if (RaidPlanner.isRaiding(bot)) RaidLog.count(RaidLog.Event.Deaths) else fitness.onDeath()
          if (!bot.isInParty) session.onDeath(context())
+@@ -254,6 +257,26 @@ internal class LifeBehavior(private val bot: Autobot) {
+         })
      }
  
 +    /** Killed at its spot by an aggressive monster far above it: the spot is marked for everyone and this bot moves on. */
@@ -188,8 +189,8 @@ index 1ee79c4..96005fb 100644
 +
      fun onLevelUp() {
          if (!bot.isInParty) session.onLevelUp(context())
-     }
-@@ -467,6 +490,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         dev.l2j.autobots.population.llm.BotChatter.event(bot, "you reached level ${bot.level}")
+@@ -473,6 +496,7 @@ internal class LifeBehavior(private val bot: Autobot) {
  
      companion object {
          private const val SPOT_RADIUS = 1500
@@ -198,10 +199,10 @@ index 1ee79c4..96005fb 100644
          private const val PARTY_LEG_ARRIVAL = 150
          private const val MAX_PLAYERS_AT_SPOT = 6
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-index 7b1ffa1..afd375a 100644
+index 9e68eb4..5dfa133 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-@@ -179,6 +179,7 @@ internal object PopulationManager {
+@@ -180,6 +180,7 @@ internal object PopulationManager {
          // Like a player: fight back against whoever flags on us, never start PvP on the innocent.
          bot.combatBehavior.combatPreferences.attackPlayerType = AttackPlayerType.Flagged
          AutobotsManager.spawnAutobot(bot)
