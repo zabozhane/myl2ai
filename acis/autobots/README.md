@@ -302,7 +302,10 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     rewrites it into one of the commands the code already knows ("rest", "sell bow", "lend me 5k", "invite", "stay")
     or NONE; the command runs through the same code with all its checks.
   - `BotTalk` (`llmChat`, always the near model): free talk the code has no answer for, in whispers, party chat
-    (the bot named, otherwise a random one with `llmPartyAnswerPercent` chance) and nearby chat that names a bot.
+    (the bot named, otherwise a random one with `llmPartyAnswerPercent` chance), nearby chat (the bot named, otherwise
+    one sociable bot around, at most once per 10 s per player) and shouts (1-2 bots of the region, the second sees the
+    first reply, at most once per 15 s per player). Where nobody was addressed the model may answer "-" and the bot
+    stays silent, like a player who scrolls past.
     Each conversation keeps its last 10 lines for 30 minutes; a bot speaks at most once per 4 s, after a typing delay.
   - `Persona`: the system prompt from traits the bot already has (sociability, enchant temper, greed, manners,
     honesty, relation and trust to the speaker, PK) and a typing manner of its own; talking it promises nothing.

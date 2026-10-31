@@ -46,7 +46,7 @@ index 7cdc9fa..fc6cae6 100644
 +  <llmLog>true</llmLog>
  </settings>
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-index cc77a3c..8e0d61f 100644
+index cc77a3c..49d6c65 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 @@ -14,6 +14,7 @@ import dev.l2j.autobots.models.BotChat
@@ -65,7 +65,17 @@ index cc77a3c..8e0d61f 100644
                  activeBots.forEach {
                      if(MathUtil.checkIfInRange(1250, it.value, chatter, true) && !BlockList.isBlocked(it.value, chatter)) {
                          it.value.addChat(BotChat(ChatType.All, chatter.name, text))
-@@ -107,7 +109,8 @@ object AutobotsManager {
+@@ -97,6 +99,9 @@ object AutobotsManager {
+                 }
+             }
+             1 -> { // shout !
++                val chatterRegion = MapRegionData.getInstance().getMapRegion(chatter.x, chatter.y)
++                BotTalk.onShout(chatter, text, activeBots.values.filter {
++                    MapRegionData.getInstance().getMapRegion(it.x, it.y) == chatterRegion && !BlockList.isBlocked(it, chatter) })
+                 activeBots.forEach {
+                     val region = MapRegionData.getInstance().getMapRegion(it.value.x, it.value.y)
+                     if (!BlockList.isBlocked(it.value, chatter) && region == MapRegionData.getInstance().getMapRegion(it.value.x, it.value.y)) {
+@@ -107,7 +112,8 @@ object AutobotsManager {
              2 -> { // pm "
                  if(target == null) return false
                  val bot = activeBots.getOrElse(target) {null} ?: return false
@@ -409,10 +419,10 @@ index 0000000..e3e6ad2
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
 new file mode 100644
-index 0000000..9c2606e
+index 0000000..949669f
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,212 @@
 +package dev.l2j.autobots.population.llm
 +
 +import dev.l2j.autobots.AutobotData
@@ -420,6 +430,7 @@ index 0000000..9c2606e
 +import dev.l2j.autobots.CoScopes
 +import dev.l2j.autobots.population.group.GroupChat
 +import dev.l2j.autobots.population.group.GroupFinder
++import dev.l2j.autobots.population.group.Sociability
 +import dev.l2j.autobots.population.trade.PlayerTrade
 +import kotlinx.coroutines.delay
 +import kotlinx.coroutines.launch
@@ -443,6 +454,10 @@ index 0000000..9c2606e
 +    private const val BOT_COOLDOWN_MS = 4000L
 +    private const val MAX_INPUT_CHARS = 300
 +    private const val MAX_LINE_CHARS = 120
++    private const val SHOUT_EVERY_MS = 15_000L
++    private const val NEARBY_EVERY_MS = 10_000L
++    /** What the model answers when a real player would not reply at all. */
++    private const val SILENCE = "-"
 +
 +    private class Conversation {
 +        val lines = ArrayList<LlmMessage>()
@@ -504,13 +519,60 @@ index 0000000..9c2606e
 +        respond(speaker, player, "party:${System.identityHashCode(party)}", "${player.name}: $text", situation, group = true) { speaker.partySay(it) }
 +    }
 +
-+    /** Normal chat nearby: only a bot addressed by name answers. */
++    /**
++     * Normal chat nearby. A bot named in the line answers; otherwise one bot around may answer if a player in its
++     * place would (the model can stay silent), like people standing next to each other in town.
++     */
 +    fun onNearbyChat(player: Player, text: String, nearby: Collection<Autobot>) {
 +        if (!enabled || player is Autobot) return
-+        val bot = nearby.firstOrNull { text.contains(it.name, ignoreCase = true) } ?: return
++        val named = nearby.firstOrNull { text.contains(it.name, ignoreCase = true) }
++        if (named != null) {
++            Attention.talked(named, player)
++            val situation = "${player.name} says something to you in general chat nearby, others can see it; you are ${activity(named)}"
++            respond(named, player, "near:${player.objectId}", "${player.name}: $text", situation) { named.say(it) }
++            return
++        }
++        if (!throttle("near:${player.objectId}", NEARBY_EVERY_MS)) return
++        val bot = pickTalkers(nearby, 1).firstOrNull() ?: return
 +        Attention.talked(bot, player)
-+        val situation = "${player.name} says something to you in general chat nearby, others can see it; you are ${activity(bot)}"
-+        respond(bot, player, "near:${bot.objectId}:${player.objectId}", "${player.name}: $text", situation) { bot.say(it) }
++        val situation = "${player.name}, a player standing near you, says this in general chat to everyone around, not to you in particular; " +
++                "you are ${activity(bot)}"
++        respond(bot, player, "near:${player.objectId}", "${player.name}: $text", situation, group = true, maySkip = true) { bot.say(it) }
++    }
++
++    /**
++     * A player's shout (!) to the whole region. One or two bots of the region may answer, the second seeing the first
++     * one's reply; each can stay silent if a real player would just scroll past.
++     */
++    fun onShout(player: Player, text: String, region: Collection<Autobot>) {
++        if (!enabled || player is Autobot) return
++        if (!throttle("shout:${player.objectId}", SHOUT_EVERY_MS)) return
++        val key = "shout:${player.objectId}"
++        pickTalkers(region, 2).forEachIndexed { i, bot ->
++            CoScopes.generalScope.launch {
++                delay(i * Rnd.get(4000, 9000).toLong())
++                val situation = "${player.name} shouts this to the whole region (shout chat, everyone nearby sees it, people often joke, " +
++                        "argue, ask for help, sell stuff or ask questions there); you are ${activity(bot)}"
++                respond(bot, player, key, "${player.name}: $text", situation, group = true, maySkip = true) { bot.shout(it) }
++            }
++        }
++    }
++
++    /** Who of the bots around feels like talking: sociable ones first, never two answers in a row from one bot. */
++    private fun pickTalkers(bots: Collection<Autobot>, count: Int): List<Autobot> = bots
++            .filter { it.life != null && !it.isDead && (lastSpoke[it.objectId] ?: 0L) < System.currentTimeMillis() - BOT_COOLDOWN_MS }
++            .filter { Rnd.get(100) < when (Sociability.of(it)) { Sociability.Loner -> 15; Sociability.Regular -> 50; Sociability.TeamPlayer -> 90 } }
++            .shuffled().take(count)
++
++    private val throttled = ConcurrentHashMap<String, Long>()
++
++    /** At most one answered line per [everyMs] for this key, so a chatty player does not cost a request a line. */
++    private fun throttle(key: String, everyMs: Long): Boolean {
++        val now = System.currentTimeMillis()
++        val last = throttled[key] ?: 0L
++        if (now - last < everyMs) return false
++        throttled[key] = now
++        return true
 +    }
 +
 +    private fun activity(bot: Autobot): String = when {
@@ -521,7 +583,7 @@ index 0000000..9c2606e
 +    }
 +
 +    private fun respond(bot: Autobot, player: Player, key: String, line: String, situation: String,
-+                        group: Boolean = false, send: (String) -> Unit) {
++                        group: Boolean = false, maySkip: Boolean = false, send: (String) -> Unit) {
 +        val now = System.currentTimeMillis()
 +        val previous = lastSpoke[bot.objectId]
 +        if (previous != null && now - previous < BOT_COOLDOWN_MS) {
@@ -532,8 +594,11 @@ index 0000000..9c2606e
 +        val history = remember(key, LlmMessage("user", line.take(MAX_INPUT_CHARS)))
 +        CoScopes.generalScope.launch {
 +            val started = System.currentTimeMillis()
-+            val reply = Llm.near.chat(Persona.system(bot, player, situation), history, AutobotData.settings.llmMaxReplyTokens) ?: return@launch
++            val system = Persona.system(bot, player, situation) +
++                    (if (maySkip) " If a real player in your place would not answer this at all, reply with exactly $SILENCE" else "")
++            val reply = Llm.near.chat(system, history, AutobotData.settings.llmMaxReplyTokens) ?: return@launch
 +            val answer = clean(reply.text, bot.name) ?: return@launch
++            if (answer.trim() == SILENCE || answer.trim().trim('.') == SILENCE) return@launch
 +            // Typing takes time: about a second for 15 characters, after reading the line.
 +            val typing = 1200L + answer.length * 70L + Rnd.get(0, 1500)
 +            delay((typing - (System.currentTimeMillis() - started)).coerceAtLeast(300L))
