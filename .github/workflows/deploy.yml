@@ -1,0 +1,25 @@
+name: deploy
+
+# Push to main -> the self-hosted runner ON the 24/7 server pulls, rebuilds and
+# restarts the stack, runs the protocol smoke test and rolls back on failure.
+# Runner setup: docs/server-24x7.md
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # manual re-deploy from the Actions tab
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false # never leave a half-applied deploy
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, macOS, l2server]
+    timeout-minutes: 45 # image rebuild on an i5 takes a while
+    steps:
+      - name: Deploy on the server checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$HOME/l2aiserver"
+          ./scripts/deploy.sh

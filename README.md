@@ -4,6 +4,8 @@
 
 **Развернуть у себя на macOS или Windows — пошаговая инструкция в [docs/setup.md](docs/setup.md).**
 
+**Выделенный сервер 24/7 (вторая машина, деплой пушем в main через self-hosted runner) — [docs/server-24x7.md](docs/server-24x7.md).**
+
 Этапы, решения и текущий шаг — в [PROGRESS.md](PROGRESS.md).
 
 ## Схема
