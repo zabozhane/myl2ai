@@ -1,0 +1,92 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index a126e07..d6d9019 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -4,8 +4,10 @@ import dev.l2j.autobots.extensions.location
+ import dev.l2j.autobots.utils.distance
+ import net.sf.l2j.commons.random.Rnd
+ import net.sf.l2j.gameserver.data.sql.SpawnTable
++import net.sf.l2j.gameserver.data.xml.TeleportLocationData
+ import net.sf.l2j.gameserver.model.actor.Player
+ import net.sf.l2j.gameserver.model.location.Location
++import net.sf.l2j.gameserver.model.location.TeleportLocation
+ import java.util.concurrent.ConcurrentHashMap
+ import java.util.concurrent.atomic.AtomicInteger
+ import kotlin.math.exp
+@@ -69,11 +71,16 @@ internal object HuntingSpots {
+     fun isSuitable(spot: HuntingSpot, level: Int): Boolean =
+             spot.monstersFor(level) >= MIN_SUITABLE_MONSTERS && !isDeadly(spot.dangerLevel, level)
+ 
+-    /** Picks a spot with monsters for [level], which is below the bot's own when it falls back to easier hunting. */
+-    fun choose(bot: Player, level: Int, excluded: Set<Long>, wanted: WantedLoot? = null, maxDistance: Int = Int.MAX_VALUE): HuntingSpot? {
++    /**
++     * Picks a spot with monsters for [level], which is below the bot's own when it falls back to easier hunting.
++     * Only spots within reach are taken: at most [maxWalk] away on foot, or, when the bot can pay a gatekeeper
++     * ([useExits]), at most [maxWalk] of walking left after the best teleport exit.
++     */
++    fun choose(bot: Player, level: Int, excluded: Set<Long>, wanted: WantedLoot? = null,
++               maxWalk: Int = Int.MAX_VALUE, useExits: Boolean = false): HuntingSpot? {
+         val candidates = spots.asSequence()
+                 .filter { it.key !in excluded && isSuitable(it, level) }
+-                .filter { maxDistance == Int.MAX_VALUE || distance(bot.location(), it.location) <= maxDistance }
++                .filter { withinReach(bot, it, maxWalk, useExits) }
+                 .map { it to score(it, bot, level) * lootBonus(it, level, wanted) }
+                 .sortedByDescending { it.second }
+                 .take(CANDIDATES)
+@@ -88,6 +95,18 @@ internal object HuntingSpots {
+         return candidates.last().first
+     }
+ 
++    /** True when hunting at [spot] doesn't mean a walk across the map: close directly, or close after a teleport exit. */
++    private fun withinReach(bot: Player, spot: HuntingSpot, maxWalk: Int, useExits: Boolean): Boolean {
++        if (maxWalk == Int.MAX_VALUE) return true
++        if (distance(bot.location(), spot.location) <= maxWalk) return true
++        return useExits && (teleportExits.minOfOrNull { distance(it, spot.location) } ?: Double.MAX_VALUE) <= maxWalk
++    }
++
++    /** The non-nobility gatekeeper destinations; a ride lands the bot at one of them, the rest is walking. */
++    private val teleportExits: List<TeleportLocation> by lazy {
++        TeleportLocationData.getInstance().allTeleportLocations.filter { !it.isNoble }
++    }
++
+     /** True when an aggressive monster of [monsterLevel] is a death trap for a hunter of [hunterLevel]. */
+     fun isDeadly(monsterLevel: Int, hunterLevel: Int): Boolean = monsterLevel > hunterLevel + DANGER_LEVELS_ABOVE
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index e329f84..aedb56a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -285,13 +285,15 @@ internal class LifeBehavior(private val bot: Autobot) {
+                 else -> "${killer.name} lv ${killer.level}"
+             }
+             val potions = dev.l2j.autobots.population.economy.Gear.HEALING_POTIONS.sumOf { dev.l2j.autobots.population.economy.Gear.count(bot, it) }
+-            println("Autobots death: ${bot.name} (lv ${bot.level} ${bot.classId}) killed by $by, attackers ${attackers.size}" +
++            println("Autobots death: ${bot.name} (lv ${bot.level} ${bot.classId}) ${if (killer === bot) "drowned" else "killed by $by"}, attackers ${attackers.size}" +
+                     " [${attackers.joinToString(" ") { "${it.name}/${it.level}" }}], potions $potions, mode ${fitness.mode}," +
+                     " hunt lv $spotLevel, spot ${spot?.key ?: "-"}, party ${bot.party?.membersCount ?: 0}," +
+                     " weapon ${bot.activeWeaponItem?.crystalType ?: "none"}, at ${bot.x},${bot.y},${bot.z}" +
+                     (RaidPlanner.raidOf(bot.party)?.let { ", raid ${it.boss.name} ${it.phase}" } ?: ""))
+         }
+         avoidDeadlySpot(killer)
++        // Died on a long walk to its spot: the way there is what kills, don't walk it again.
++        if (killer === bot) spot?.takeIf { distance(bot.location(), it.location) > MAX_TRAVEL_ON_FOOT }?.let { abandon(it) }
+         // A raid is a risk the bot took on purpose: it does not make the bot fall back to easier monsters.
+         if (RaidPlanner.isRaiding(bot)) RaidLog.count(RaidLog.Event.Deaths) else fitness.onDeath()
+         if (!bot.isInParty) session.onDeath(context())
+@@ -484,11 +486,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+         current?.let { HuntingSpots.leave(it) }
+         val wanted = if (economy) Prospecting.wantedLoot(bot) else null
+-        // A bot that can't pay a gatekeeper walks, so its spot must be within reach on foot; a far one means a
+-        // walk across the map, which is where newbies drowned. With no free spot nearby a crowded one still beats the walk.
+-        val onFoot = !canTeleport()
+-        val next = HuntingSpots.choose(bot, level, excludedSpots, wanted, if (onFoot) MAX_TRAVEL_ON_FOOT else Int.MAX_VALUE)
+-                ?: if (onFoot) HuntingSpots.choose(bot, level, emptySet(), wanted, MAX_TRAVEL_ON_FOOT) else null
++        // A bot reaches its spot on foot or by a gatekeeper ride plus a walk: either way no more than
++        // MAX_TRAVEL_ON_FOOT of walking, or the way there is what kills it. A crowded close spot beats a far one.
++        val canRide = canTeleport()
++        val next = HuntingSpots.choose(bot, level, excludedSpots, wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide)
++                ?: HuntingSpots.choose(bot, level, emptySet(), wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide)
+         if (next != null && wanted != null) EconomyLog.note(bot, "farming for ${if (wanted.spoil) "spoil" else "drops"} " +
+                 "${wanted.items.take(5).joinToString { ItemTable.getInstance().getTemplate(it)?.name ?: "$it" }} at ${next.location}")
+         next?.let { HuntingSpots.join(it) }
