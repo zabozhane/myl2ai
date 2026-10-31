@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index 7cdc9fa..2fdec0a 100644
+index 7cdc9fa..a6e3ad6 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -73,4 +73,47 @@
+@@ -73,4 +73,55 @@
    <opportunistPercent>10</opportunistPercent>
    <loanMaxDays>3</loanMaxDays>
    <tradeLog>true</tradeLog>
@@ -47,6 +47,14 @@ index 7cdc9fa..2fdec0a 100644
 +  <llmChat>true</llmChat>
 +  <llmUnderstand>true</llmUnderstand>
 +  <llmDecisions>true</llmDecisions>
++  <!-- Bots chatting among themselves where a real player hears it (party with the player, clan, next to the player,
++       shout of the player's region for raids and scams): a death, a new level, a raid, a scam or small talk in a party
++       (llmBotSmallTalkPercent chance every 30 s per party with a player) starts it, 1-3 bots pick it up. At most one
++       conversation per place every llmBotChatMinutes and llmBotChatPerHour in total. -->
++  <llmBotChatter>true</llmBotChatter>
++  <llmBotChatMinutes>3</llmBotChatMinutes>
++  <llmBotChatPerHour>40</llmBotChatPerHour>
++  <llmBotSmallTalkPercent>15</llmBotSmallTalkPercent>
 +  <llmPartyAnswerPercent>60</llmPartyAnswerPercent>
 +  <llmLog>true</llmLog>
  </settings>
@@ -91,10 +99,10 @@ index cc77a3c..49d6c65 100644
                  World.getInstance().players.filter { it.isGM }.forEach {
                      it.sendPacket(CreatureSay(0, 15, "${chatter.name} -> ${bot.name}", text))
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index e0fc229..7289027 100644
+index e0fc229..17801ec 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -60,7 +60,33 @@ internal data class AutobotSettings(
+@@ -60,7 +60,37 @@ internal data class AutobotSettings(
          @JsonProperty("scammerPercent") var scammerPercent: Int = 5,
          @JsonProperty("opportunistPercent") var opportunistPercent: Int = 10,
          @JsonProperty("loanMaxDays") var loanMaxDays: Int = 3,
@@ -124,13 +132,17 @@ index e0fc229..7289027 100644
 +        @JsonProperty("llmChat") var llmChat: Boolean = true,
 +        @JsonProperty("llmUnderstand") var llmUnderstand: Boolean = true,
 +        @JsonProperty("llmDecisions") var llmDecisions: Boolean = true,
++        @JsonProperty("llmBotChatter") var llmBotChatter: Boolean = true,
++        @JsonProperty("llmBotChatMinutes") var llmBotChatMinutes: Int = 3,
++        @JsonProperty("llmBotChatPerHour") var llmBotChatPerHour: Int = 40,
++        @JsonProperty("llmBotSmallTalkPercent") var llmBotSmallTalkPercent: Int = 15,
 +        @JsonProperty("llmPartyAnswerPercent") var llmPartyAnswerPercent: Int = 60,
 +        @JsonProperty("llmLog") var llmLog: Boolean = true
  ){
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
          setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index 71e2266..1ee79c4 100644
+index 71e2266..c28836c 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 @@ -55,6 +55,29 @@ internal class LifeBehavior(private val bot: Autobot) {
@@ -187,7 +199,24 @@ index 71e2266..1ee79c4 100644
          }
          // A fight in progress is finished first, like a player who kills the mob before leaving the keyboard.
          if (session.isOver() && (bot.target == null || session.activity == null)) nextSegment()
-@@ -238,6 +266,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -219,10 +247,16 @@ internal class LifeBehavior(private val bot: Autobot) {
+         // A raid is a risk the bot took on purpose: it does not make the bot fall back to easier monsters.
+         if (RaidPlanner.isRaiding(bot)) RaidLog.count(RaidLog.Event.Deaths) else fitness.onDeath()
+         if (!bot.isInParty) session.onDeath(context())
++        dev.l2j.autobots.population.llm.BotChatter.event(bot, "you died, killed by " + when (killer) {
++            null -> "something"
++            is Player -> "player ${killer.name}"
++            else -> "${killer.name} (level ${killer.level})"
++        })
+     }
+ 
+     fun onLevelUp() {
+         if (!bot.isInParty) session.onLevelUp(context())
++        dev.l2j.autobots.population.llm.BotChatter.event(bot, "you reached level ${bot.level}")
+     }
+ 
+     fun onLogout() {
+@@ -238,6 +272,7 @@ internal class LifeBehavior(private val bot: Autobot) {
       * @return true while the bot wants to stay online.
       */
      fun keepsOnline(): Boolean {
@@ -196,10 +225,10 @@ index 71e2266..1ee79c4 100644
              lingerDecided = true
              val crafter = CraftBook.isCrafter(bot)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-index 5614d6b..7b1ffa1 100644
+index 5614d6b..9e68eb4 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-@@ -107,6 +107,7 @@ internal object PopulationManager {
+@@ -107,10 +107,12 @@ internal object PopulationManager {
                  GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
                  SessionPlan.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
                  RaidLog.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
@@ -207,6 +236,11 @@ index 5614d6b..7b1ffa1 100644
              }
              val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
              if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
+             if (ticks % GROUPS_EVERY_TICKS == 1) SocialTrade.tick(online)
++            if (ticks % GROUPS_EVERY_TICKS == 0) dev.l2j.autobots.population.llm.BotChatter.tick(online)
+             if (++ticks % SAVE_EVERY_TICKS == 0) {
+                 online.forEach {
+                     AutobotsDao.saveAutobot(it)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt b/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
 index ff91d55..fe2d7df 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
@@ -425,6 +459,163 @@ index 0000000..e3e6ad2
 +    }
 +
 +    fun tier(bot: Autobot): Llm.Tier = if (isNear(bot)) Llm.Tier.Near else Llm.Tier.Far
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotChatter.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotChatter.kt
+new file mode 100644
+index 0000000..e95cc43
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/BotChatter.kt
+@@ -0,0 +1,151 @@
++package dev.l2j.autobots.population.llm
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.group.GroupFinder
++import dev.l2j.autobots.population.group.Sociability
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.handler.ChatHandler
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Player
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
++
++/**
++ * Bots talking among themselves where a real player can hear it: in a party with the player, in clan chat, next to
++ * the player, or in the shout of the player's region. Something that happened to a bot (a death, a new level, a raid,
++ * a scam) or plain small talk in a party starts it; the bot says a line and one to three others pick it up.
++ * Nobody reads chat far from players, so it costs nothing there; with a far model (Ollama) it could run everywhere.
++ */
++internal object BotChatter {
++    enum class Channel { Party, Clan, Nearby, Shout }
++
++    private const val MAX_REPLIES = 3
++    private const val TRANSCRIPT_LINES = 8
++
++    private val lastTalk = ConcurrentHashMap<String, Long>()
++    private val hour = AtomicInteger()
++    private var hourStarted = System.currentTimeMillis()
++
++    init {
++        dev.l2j.autobots.population.trade.TradeEvents.scamListeners += dev.l2j.autobots.population.trade.TradeEvents.ScamListener { victim, _, scammerName, what ->
++            if (victim is Autobot) event(victim, "$scammerName scammed you: $what", loud = true)
++        }
++    }
++
++    private val settings get() = AutobotData.settings
++    private val enabled get() = settings.llmBotChatter && settings.llmChat && Llm.near.available
++
++    /** Something worth telling happened to [bot]; [what] is a short English description for the model. */
++    fun event(bot: Autobot, what: String, loud: Boolean = false) {
++        if (!enabled || bot.life == null) return
++        val (channel, listeners) = audience(bot, loud) ?: return
++        start(bot, channel, listeners, "Just now: $what. You may mention it in chat, the way players do (complain, brag, joke).")
++    }
++
++    /** Every population tick: parties with a real player sometimes chat about nothing in particular. */
++    fun tick(online: Collection<Autobot>) {
++        if (!enabled) return
++        online.asSequence()
++                .mapNotNull { it.party }
++                .distinct()
++                .filter { p -> p.members.any { it !is Autobot && it.isOnline } && p.members.count { it is Autobot } >= 2 }
++                .forEach { party ->
++                    if (Rnd.get(100) >= settings.llmBotSmallTalkPercent) return@forEach
++                    val bots = party.members.filterIsInstance<Autobot>().filter { it.life != null && !it.isDead }
++                    val starter = bots.filter { Sociability.of(it) != Sociability.Loner }.randomOrNull() ?: return@forEach
++                    start(starter, Channel.Party, bots - starter,
++                            "A quiet moment while hunting near ${GroupFinder.placeName(starter)}. Say something to the party: " +
++                                    "small talk, a joke, a question about gear, spots, the server, real life, or a comment on how it goes.")
++                }
++    }
++
++    /** Where a real player would hear this bot, and which other bots could answer there. */
++    private fun audience(bot: Autobot, loud: Boolean): Pair<Channel, List<Autobot>>? {
++        val party = bot.party
++        if (party != null && party.members.any { it !is Autobot && it.isOnline }) {
++            return Channel.Party to party.members.filterIsInstance<Autobot>().filter { it !== bot && it.life != null && !it.isDead }
++        }
++        val clan = bot.clan
++        if (clan != null) {
++            val online = clan.onlineMembers
++            if (online.any { it !is Autobot }) return Channel.Clan to online.filterIsInstance<Autobot>().filter { it !== bot && it.life != null }
++        }
++        val range = settings.llmNearRange
++        if (bot.getKnownTypeInRadius(Player::class.java, range).any { it !is Autobot && it.isOnline }) {
++            return Channel.Nearby to bot.getKnownTypeInRadius(Autobot::class.java, range).filter { it !== bot && it.life != null && !it.isDead }
++        }
++        if (loud) {
++            val region = MapRegionData.getInstance().getMapRegion(bot.x, bot.y)
++            val players = World.getInstance().players.filter { it !is Autobot && MapRegionData.getInstance().getMapRegion(it.x, it.y) == region }
++            if (players.isNotEmpty()) return Channel.Shout to World.getInstance().players.filterIsInstance<Autobot>()
++                    .filter { it !== bot && it.life != null && MapRegionData.getInstance().getMapRegion(it.x, it.y) == region }.shuffled().take(20)
++        }
++        return null
++    }
++
++    private fun start(starter: Autobot, channel: Channel, others: List<Autobot>, situation: String) {
++        val key = when (channel) {
++            Channel.Party -> "party:${System.identityHashCode(starter.party)}"
++            Channel.Clan -> "clan:${starter.clanId}"
++            Channel.Nearby -> "near:${starter.x / 3000}:${starter.y / 3000}"
++            Channel.Shout -> "shout:${MapRegionData.getInstance().getMapRegion(starter.x, starter.y)}"
++        }
++        val now = System.currentTimeMillis()
++        if (now - (lastTalk[key] ?: 0L) < settings.llmBotChatMinutes * 60_000L) return
++        synchronized(this) {
++            if (now - hourStarted > 3_600_000L) { hourStarted = now; hour.set(0) }
++            if (hour.get() >= settings.llmBotChatPerHour) return
++            hour.incrementAndGet()
++        }
++        lastTalk[key] = now
++        val where = when (channel) {
++            Channel.Party -> "party chat"
++            Channel.Clan -> "clan chat"
++            Channel.Nearby -> "general chat, people around can read it"
++            Channel.Shout -> "shout chat, the whole region reads it"
++        }
++        CoScopes.generalScope.launch {
++            val transcript = ArrayList<String>()
++            val first = line(starter, "$situation You write in $where.", transcript, mayStaySilent = false) ?: return@launch
++            say(starter, channel, first)
++            transcript += "${starter.name}: $first"
++            val repliers = others.filter { Rnd.get(100) < when (Sociability.of(it)) { Sociability.Loner -> 20; Sociability.Regular -> 50; Sociability.TeamPlayer -> 80 } }
++                    .shuffled().take(Rnd.get(1, MAX_REPLIES))
++            for (bot in repliers) {
++                delay(Rnd.get(4000, 10000).toLong())
++                if (!bot.isOnline) continue
++                val reply = line(bot, "Others are chatting in $where; join in if you have something to say.", transcript, mayStaySilent = true) ?: continue
++                say(bot, channel, reply)
++                transcript += "${bot.name}: $reply"
++            }
++        }
++    }
++
++    private suspend fun line(bot: Autobot, situation: String, transcript: List<String>, mayStaySilent: Boolean): String? {
++        val system = Persona.system(bot, null, situation) +
++                (if (mayStaySilent) " If you have nothing to add, reply with exactly -" else "") +
++                " Write in Russian unless the chat so far is in English."
++        val user = if (transcript.isEmpty()) "(nobody has said anything yet; write your line)"
++                else transcript.takeLast(TRANSCRIPT_LINES).joinToString("\n") + "\n(your line)"
++        val reply = Llm.near.chat(system, listOf(LlmMessage("user", user)), settings.llmMaxReplyTokens, Llm.Purpose.Talk) ?: return null
++        val line = reply.text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: return null
++        val clean = line.removePrefix("${bot.name}:").trim().trim('"', '«', '»').take(120)
++        if (clean.isBlank() || clean.trim('.', ' ') == "-") return null
++        return clean
++    }
++
++    private fun say(bot: Autobot, channel: Channel, text: String) {
++        when (channel) {
++            Channel.Party -> bot.partySay(text)
++            Channel.Clan -> if (bot.clan != null) ChatHandler.getInstance().getHandler(4).handleChat(4, bot, null, text)
++            Channel.Nearby -> bot.say(text)
++            Channel.Shout -> bot.shout(text)
++        }
++        Llm.log("${bot.name} (${channel.name.lowercase()}): $text")
++    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
 new file mode 100644
@@ -1368,7 +1559,7 @@ index 0000000..457dc44
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidPlanner.kt b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidPlanner.kt
-index 93dc1e2..075cb7a 100644
+index 93dc1e2..641108e 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidPlanner.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidPlanner.kt
 @@ -8,6 +8,8 @@ import dev.l2j.autobots.population.group.PartyPlan
@@ -1425,6 +1616,15 @@ index 93dc1e2..075cb7a 100644
      /** A player in the party suggests a raid: the leader agrees if a boss fits, else says why not. */
      fun proposedByPlayer(party: Party, russian: Boolean): GroupChat.Line {
          val leader = party.leader as? Autobot ?: return GroupChat.Line.RaidNotLeader
+@@ -228,6 +263,8 @@ internal object RaidPlanner {
+         calls.remove(party)
+         nextThink[party] = System.currentTimeMillis() + THINK_EVERY_MS
+         party.leader?.let { RaidLog.note(it, "${raid.boss.name}: $outcome") }
++        (party.leader as? Autobot)?.let { dev.l2j.autobots.population.llm.BotChatter.event(it,
++                "your party's raid on boss ${raid.boss.name} (level ${raid.boss.level}) ended: $outcome", loud = true) }
+     }
+ 
+     /** Parties on the same boss: this one and its helper or caller. */
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
 index 9f8e5ca..11056cb 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt

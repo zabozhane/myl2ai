@@ -307,6 +307,11 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     first reply, at most once per 15 s per player). Where nobody was addressed the model may answer "-" and the bot
     stays silent, like a player who scrolls past.
     Each conversation keeps its last 10 lines for 30 minutes; a bot speaks at most once per 4 s, after a typing delay.
+  - `BotChatter` (`llmBotChatter`): bots talk among themselves where a real player hears it: in a party with the player,
+    in clan chat, next to the player, or in the shout of the player's region (raids and scams only). A death, a new
+    level, the end of a raid, a scam (`TradeEvents`) or small talk in a party with a player (`llmBotSmallTalkPercent`
+    every 30 s) starts it; the bot says a line and 1-3 others may pick it up, each seeing the transcript and free to stay
+    silent. At most one conversation per place every `llmBotChatMinutes` and `llmBotChatPerHour` in total.
   - `Persona`: the system prompt from traits the bot already has (sociability, enchant temper, greed, manners,
     honesty, relation and trust to the speaker, PK) and a typing manner of its own; talking it promises nothing.
   - Log: `Autobots llm:` on start (each tier on/off and why), errors, pauses, every answer, reading and decision with
