@@ -51,7 +51,8 @@ services:
       <<: *db-credentials
       LOGIN_JAVA_OPTS: ${LOGIN_JAVA_OPTS}
     ports:
-      - "127.0.0.1:2106:2106"
+      # BIND_ADDR: 127.0.0.1 для локальной игры, 0.0.0.0 для выделенного сервера в LAN
+      - "${BIND_ADDR:-127.0.0.1}:2106:2106"
     volumes:
       - ./logs/login:/opt/acis/login/log
     depends_on:
@@ -72,7 +73,7 @@ services:
       GAME_JAVA_OPTS: ${GAME_JAVA_OPTS}
       GAME_PUBLIC_HOST: ${GAME_PUBLIC_HOST}
     ports:
-      - "127.0.0.1:7777:7777"
+      - "${BIND_ADDR:-127.0.0.1}:7777:7777"
     volumes:
       - ./geodata:/opt/acis/geodata
       - ./logs/game:/opt/acis/gameserver/log
