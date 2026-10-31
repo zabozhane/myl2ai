@@ -276,7 +276,7 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     and waits for the logout there (or keeps a store, as before). AFK and going-home bots do not join parties.
   - `populationSessionLog` prints every switch with its reason (`Autobots session: <name> lv N Hunt -> Afk for 12 min
     (died)`); `Autobots session summary:` every 10 minutes counts hunting, trading, AFK, going home and party bots.
-- `l2autobots-llm.patch` - the bots' language models (stage 5, `population/llm/`), applied last.
+- `l2autobots-llm.patch` - the bots' language models (stage 5, `population/llm/`).
   - `LlmProvider` is the one interface the rest of the code talks to; `OpenAiCompatibleProvider` speaks the OpenAI
     Chat Completions API, which OpenAI, Ollama and most vendors share. Provider and model are strings in `config.xml`.
   - Two tiers (`Llm.near`, `Llm.far`, settings `llmNear*` / `llmFar*`). `Attention` puts a bot in the near tier when a
@@ -324,3 +324,22 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     decision, memory), the day's tokens and cost estimate (`llm*PriceInputPerMillion` / `OutputPerMillion`, gpt-5.4-mini by
     default), failures, dropped, latency, and decisions (asked, chosen by the model, left to the code). The same lines go
     to `log/llm.log` (`logs/game/llm.log` on the host), which survives container re-creation.
+- `l2autobots-newbies.patch` - fixes for low level bots that die where players don't, applied last.
+  - Orc Mystic: no attack spell until Life Drain is learned (level 7, 520 SP at a trainer), so it fights with its
+    fists. Upstream never used Soul Cry (skill 1001, known from level 1, +4.5 P.Atk at level 1, about +70% to a
+    newbie's punch), and switched to "skills only" at level 7 whether Life Drain was learned or not, so a level 7 bot
+    that had not been to a trainer stood still under attack. Now Soul Cry goes on against a live monster while the bot
+    still punches and goes off between fights (`CombatBehavior.stopIdleToggles`, it drains mana every 3 seconds), and
+    the bot casts only once it really knows Life Drain.
+  - `Rester` also remembers what the last fights cost in HP and sits down before a fight when HP is below 1.5 times
+    that (at most 90% of the bar), not only below 45%. A newbie loses about half its HP to a monster of its level, so
+    the old threshold let it start the next fight at 50% and die. Bots that kill without a scratch rest as before.
+  - Bots up to level 19 pick monsters at most 1 level above them (was 3): without potions, shots or real gear a
+    newbie loses to a monster 2-3 levels up about as often as it wins. Monsters that attack first are fought anyway.
+  - Deadly spots: near the Dark Elf village a newbie spot (Balor orcs, levels 8-12, z about -3400) lies right above
+    a level 72-75 area of aggressive Tomb Guards, Crypt Preachers and Lesser Ancient Scouts (z -4896, the next
+    "floor" of `HuntingSpots`); bots of 7-12 got down there and died again and again (25 of 122 deaths in one log).
+    Now a bot killed at its spot (within 5000) by an aggressive monster more than 5 levels above it marks the spot
+    (`HuntingSpots.reportKiller` raises its `dangerLevel` until the server restarts, logged as `spot ... marked
+    dangerous`) and leaves it, so no bot that weak is sent there again. A bot that logs in next to such monsters goes
+    straight to town (`LifeBehavior.escapeDangerOnLogin`, `Autobots session: ... logged in next to ..., back to town`).

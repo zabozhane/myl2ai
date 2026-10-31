@@ -1,0 +1,291 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index 9d43c68..1426367 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -52,6 +52,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         
+         ensureSummonPet()        
+         handleShots()
++        stopIdleToggles()
+         if(AutofarmManager.allowsRest(player) && rester.onUpdate()) return
+         if(AutofarmManager.allowsLoot(player) && lootPicker.onUpdate()) return
+         targetAppropriateTarget()
+@@ -74,11 +75,15 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+ 
+         ensureSummonPet()
+         handleShots()
++        stopIdleToggles()
+         if(idleSupport()) return
+         if(rester.onUpdate()) return
+         lootPicker.onUpdate()
+     }
+ 
++    /** Switches off toggles that burn mana while there is nothing to fight, before the bot rests or walks on. */
++    protected open fun stopIdleToggles() {}
++
+     /** Heals, buffs or servitor care that need no enemy target. @return true if the bot cast something. */
+     internal open suspend fun idleSupport(): Boolean = false
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
+index 2caf7cb..f4668ad 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
+@@ -9,9 +9,17 @@ import net.sf.l2j.gameserver.model.actor.Player
+ /** Sits down to regenerate between fights, the way a player without potions does. */
+ internal class Rester(private val player: Player) {
+ 
++    // HP the last fights cost: a player who knows a monster takes half the bar rests before the next one, not at 45%.
++    private var fightCost = 0.0
++    private var hpAtFightStart = -1.0
++
+     /** Returns true while resting, so the bot does not start a new fight. */
+     fun onUpdate(): Boolean {
+-        if (player.isDead) return false
++        if (player.isDead) {
++            hpAtFightStart = -1.0
++            return false
++        }
++        trackFightCost()
+ 
+         if (player.isSitting) {
+             if (player.isUnderAttack() || isRested()) player.standUp()
+@@ -25,7 +33,19 @@ internal class Rester(private val player: Player) {
+         return false
+     }
+ 
+-    private fun isTired() = player.getHealthPercentage() < TIRED_HEALTH_PERCENT || player.getManaPercentage() < TIRED_MANA_PERCENT
++    private fun isTired() = player.getHealthPercentage() < TIRED_HEALTH_PERCENT || player.getManaPercentage() < TIRED_MANA_PERCENT ||
++            player.currentHp < minOf(fightCost * FIGHT_COST_MARGIN, player.maxHp * MAX_FIGHT_COST_SHARE)
++
++    private fun trackFightCost() {
++        val fighting = hasLiveTarget() || player.isUnderAttack()
++        if (fighting && hpAtFightStart < 0) hpAtFightStart = player.currentHp
++        if (!fighting && hpAtFightStart >= 0) {
++            val cost = (hpAtFightStart - player.currentHp).coerceAtLeast(0.0)
++            // One easy kill does not make the next monster harmless: the estimate comes down only halfway.
++            fightCost = maxOf(cost, (fightCost + cost) / 2)
++            hpAtFightStart = -1.0
++        }
++    }
+ 
+     private fun isRested() = player.getHealthPercentage() >= RESTED_HEALTH_PERCENT && player.getManaPercentage() >= RESTED_MANA_PERCENT
+ 
+@@ -36,5 +56,9 @@ internal class Rester(private val player: Player) {
+         private const val TIRED_MANA_PERCENT = 20.0
+         private const val RESTED_HEALTH_PERCENT = 95.0
+         private const val RESTED_MANA_PERCENT = 90.0
++        /** Enough HP for the usual fight and half again, for a crit or a second monster. */
++        private const val FIGHT_COST_MARGIN = 1.5
++        /** Below [RESTED_HEALTH_PERCENT], or a bot that stood up rested would sit right down again. */
++        private const val MAX_FIGHT_COST_SHARE = 0.9
+     }
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/OrcMysticBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/OrcMysticBehavior.kt
+index 09c05c6..65ed4c8 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/OrcMysticBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/OrcMysticBehavior.kt
+@@ -4,26 +4,50 @@ import dev.l2j.autobots.behaviors.CombatBehavior
+ import dev.l2j.autobots.behaviors.attributes.SecretManaRegen
+ import dev.l2j.autobots.behaviors.preferences.CombatPreferences
+ import dev.l2j.autobots.behaviors.preferences.SkillPreferences
++import dev.l2j.autobots.population.isUnderAttack
+ import dev.l2j.autobots.skills.BotSkill
++import dev.l2j.autobots.utils.hasEffect
+ import net.sf.l2j.gameserver.enums.items.ShotType
++import net.sf.l2j.gameserver.model.actor.Creature
+ import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
+ 
+ 
+ internal class OrcMysticBehavior(player: Player, combatPreferences: CombatPreferences) : CombatBehavior(player, combatPreferences), SecretManaRegen {
+-    override var skillPreferences: SkillPreferences = SkillPreferences(player.level >= 7)
++    override var skillPreferences: SkillPreferences = SkillPreferences(knowsAttackSpell())
+ 
+     override fun getShotType(): ShotType {
+         return ShotType.BLESSED_SPIRITSHOT
+     }
+ 
+     override val getOffensiveSkills: List<BotSkill> = listOf(
+-            BotSkill(1090))
++            BotSkill(LIFE_DRAIN))
+ 
+-    override fun onLevelUp(oldLevel: Int, newLevel: Int) {
+-        if(player.level >= 7) {
+-            skillPreferences.isSkillsOnly = true
+-        }
++    // An orc mystic has no attack spell until Life Drain is learned at a trainer (level 7 and SP) and fights with its
++    // fists; Soul Cry, known from level 1, is what makes those fists hurt, so it goes on for every melee fight.
++    override val getSelfSupportSkills: List<BotSkill> = listOf(
++            BotSkill(SOUL_CRY) { bot, _, target -> !skillPreferences.isSkillsOnly && !bot.hasEffect(SOUL_CRY) && target.isLiveMonster() })
++
++    // Casting only once the spell is really known: a level 7 bot that has not been to a trainer yet still has to punch.
++    override suspend fun attack() {
++        skillPreferences.isSkillsOnly = knowsAttackSpell()
++        super.attack()
++    }
++
++    // Soul Cry drains mana every 3 seconds; left on between fights it would empty the bar before the next pull.
++    override fun stopIdleToggles() {
++        val soulCry = player.getFirstEffect(SOUL_CRY) ?: return
++        if (!(player.target as? Creature).isLiveMonster() && !player.isUnderAttack()) player.removeEffect(soulCry)
+     }
+ 
+     override val conditionalSkills: List<Int> = emptyList()
+-}
+\ No newline at end of file
++
++    private fun knowsAttackSpell() = player.getSkill(LIFE_DRAIN) != null
++
++    private fun Creature?.isLiveMonster() = this is Monster && !isDead
++
++    companion object {
++        private const val LIFE_DRAIN = 1090
++        private const val SOUL_CRY = 1001
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index b8bbf52..17fe68f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -14,8 +14,16 @@ import kotlin.math.exp
+  * A patch of the map where monsters spawn, with the levels of those monsters and the highest level of the ones that
+  * attack on sight ([dangerLevel], 0 without any).
+  */
+-internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>, val dangerLevel: Int = 0,
++internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>, dangerLevel: Int = 0,
+                            private val npcIds: List<Int> = emptyList()) {
++    /** Raised at run time when an aggressive monster the spawns didn't show kills a hunter here ([HuntingSpots.reportKiller]). */
++    @Volatile var dangerLevel: Int = dangerLevel
++        private set
++
++    fun raiseDanger(level: Int) {
++        if (level > dangerLevel) dangerLevel = level
++    }
++
+     fun monstersFor(level: Int): Int = HuntingSpots.suitableLevels(level).let { range -> monsterLevels.count { it in range } }
+ 
+     /** Monsters of [level] that drop (or, with [spoil], give when spoiled) any of [items]. */
+@@ -57,7 +65,7 @@ internal object HuntingSpots {
+     fun suitableLevels(level: Int): IntRange = (level - 4).coerceAtLeast(1)..(level + 2)
+ 
+     fun isSuitable(spot: HuntingSpot, level: Int): Boolean =
+-            spot.monstersFor(level) >= MIN_SUITABLE_MONSTERS && spot.dangerLevel <= level + DANGER_LEVELS_ABOVE
++            spot.monstersFor(level) >= MIN_SUITABLE_MONSTERS && !isDeadly(spot.dangerLevel, level)
+ 
+     /** Picks a spot with monsters for [level], which is below the bot's own when it falls back to easier hunting. */
+     fun choose(bot: Player, level: Int, excluded: Set<Long>, wanted: WantedLoot? = null): HuntingSpot? {
+@@ -77,6 +85,21 @@ internal object HuntingSpots {
+         return candidates.last().first
+     }
+ 
++    /** True when an aggressive monster of [monsterLevel] is a death trap for a hunter of [hunterLevel]. */
++    fun isDeadly(monsterLevel: Int, hunterLevel: Int): Boolean = monsterLevel > hunterLevel + DANGER_LEVELS_ABOVE
++
++    /**
++     * A hunter at [spot] was killed by an aggressive monster far above it. The spawn cells can't tell everything (a
++     * high level area just below the floor of a newbie spot, holes in the geodata), so the spot remembers it until
++     * the server restarts and no hunter that weak is sent there again.
++     */
++    fun reportKiller(spot: HuntingSpot, killerLevel: Int, hunterLevel: Int): Boolean {
++        if (!isDeadly(killerLevel, hunterLevel) || killerLevel <= spot.dangerLevel) return false
++        spot.raiseDanger(killerLevel)
++        println("Autobots population: spot ${spot.key} at ${spot.location} marked dangerous, aggressive monster lv $killerLevel killed a lv $hunterLevel hunter")
++        return true
++    }
++
+     fun join(spot: HuntingSpot) {
+         hunters.computeIfAbsent(spot.key) { AtomicInteger() }.incrementAndGet()
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index c28836c..02ef97c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -22,6 +22,8 @@ import dev.l2j.autobots.population.raid.RaidLog
+ import dev.l2j.autobots.population.raid.RaidPlanner
+ import dev.l2j.autobots.utils.distance
+ import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.data.xml.MapRegionData.TeleportType
+ import net.sf.l2j.gameserver.data.xml.TeleportLocationData
+ import net.sf.l2j.gameserver.enums.ZoneId
+ import net.sf.l2j.gameserver.model.actor.Player
+@@ -244,6 +246,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+                     " weapon ${bot.activeWeaponItem?.crystalType ?: "none"}, at ${bot.x},${bot.y},${bot.z}" +
+                     (RaidPlanner.raidOf(bot.party)?.let { ", raid ${it.boss.name} ${it.phase}" } ?: ""))
+         }
++        avoidDeadlySpot(killer)
+         // A raid is a risk the bot took on purpose: it does not make the bot fall back to easier monsters.
+         if (RaidPlanner.isRaiding(bot)) RaidLog.count(RaidLog.Event.Deaths) else fitness.onDeath()
+         if (!bot.isInParty) session.onDeath(context())
+@@ -254,6 +257,28 @@ internal class LifeBehavior(private val bot: Autobot) {
+         })
+     }
+ 
++    /** Killed at its spot by an aggressive monster far above it: the spot is marked for everyone and this bot moves on. */
++    private fun avoidDeadlySpot(killer: net.sf.l2j.gameserver.model.actor.Creature?) {
++        val current = spot ?: return
++        if (killer !is Monster || !killer.isAggressive || !HuntingSpots.isDeadly(killer.level, bot.level)) return
++        // Killed on the way somewhere else says nothing about the spot.
++        if (distance(bot.location(), current.location) > DEADLY_SPOT_RADIUS) return
++        HuntingSpots.reportKiller(current, killer.level, bot.level)
++        abandon(current)
++    }
++
++    /**
++     * A bot logs in where it logged out. If that is next to aggressive monsters far above its level (it died its way
++     * there, or a spot turned out deadly), it gets out to town at once, as a player would with a scroll or a restart.
++     */
++    fun escapeDangerOnLogin() {
++        val threat = bot.getKnownTypeInRadius(Monster::class.java, LOGIN_DANGER_RADIUS)
++                .firstOrNull { !it.isDead && it.isAggressive && HuntingSpots.isDeadly(it.level, bot.level) } ?: return
++        val town = MapRegionData.getInstance().getLocationToTeleport(bot, TeleportType.TOWN)
++        println("Autobots session: ${bot.name} lv ${bot.level} logged in next to ${threat.name} lv ${threat.level} at ${bot.x},${bot.y},${bot.z}, back to town")
++        bot.teleportTo(town.x, town.y, town.z, 20)
++    }
++
+     fun onLevelUp() {
+         if (!bot.isInParty) session.onLevelUp(context())
+         dev.l2j.autobots.population.llm.BotChatter.event(bot, "you reached level ${bot.level}")
+@@ -473,6 +498,9 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     companion object {
+         private const val SPOT_RADIUS = 1500
++        private const val LOGIN_DANGER_RADIUS = 2000
++        /** A spot is a 2500 cell; a hunter chasing monsters strays a little beyond it. */
++        private const val DEADLY_SPOT_RADIUS = 5000
+         private const val PARTY_LEG = 2000.0
+         private const val PARTY_LEG_ARRIVAL = 150
+         private const val MAX_PLAYERS_AT_SPOT = 6
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index 9e68eb4..5dfa133 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -180,6 +180,7 @@ internal object PopulationManager {
+         // Like a player: fight back against whoever flags on us, never start PvP on the innocent.
+         bot.combatBehavior.combatPreferences.attackPlayerType = AttackPlayerType.Flagged
+         AutobotsManager.spawnAutobot(bot)
++        bot.life?.escapeDangerOnLogin()
+         Relations.load(bot)
+         GroupFinder.onSessionStart(bot)
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+index a9cef6e..cc4c4ec 100644
+--- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
++++ b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+@@ -466,11 +466,15 @@ internal fun Creature.getKnownTargatablesInRadius(radius: Int, attackPlayerType:
+ // Monsters outside the level window give little or no exp (or are too dangerous), unless they already attack us.
+ private const val TARGET_LEVEL_BELOW = 5
+ private const val TARGET_LEVEL_ABOVE = 3
++// Without potions, shots or decent gear a newbie bot loses to a monster two levels above it as often as it wins.
++private const val NEWBIE_TARGET_LEVEL_ABOVE = 1
++private const val NEWBIE_MAX_LEVEL = 19
+ 
+ private fun Creature.isWorthTargeting(target: Creature): Boolean {
+     if (target !is Monster || target.target === this) return true
+     // A raid boss or its minion is no prey for a bot on its own: a passing hunter would only die to it.
+     if (this is Autobot && target.isRaidRelated) return false
+     (this as? Autobot)?.questTargets?.let { return target.npcId in it }
+-    return target.level in (level - TARGET_LEVEL_BELOW)..(level + TARGET_LEVEL_ABOVE)
++    val above = if (this is Autobot && level <= NEWBIE_MAX_LEVEL) NEWBIE_TARGET_LEVEL_ABOVE else TARGET_LEVEL_ABOVE
++    return target.level in (level - TARGET_LEVEL_BELOW)..(level + above)
+ }
