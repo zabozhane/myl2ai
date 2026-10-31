@@ -326,6 +326,9 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     that had not been to a trainer stood still under attack. Now Soul Cry goes on against a live monster while the bot
     still punches and goes off between fights (`CombatBehavior.stopIdleToggles`, it drains mana every 3 seconds), and
     the bot casts only once it really knows Life Drain.
+  - `Rester` also remembers what the last fights cost in HP and sits down before a fight when HP is below 1.5 times
+    that (at most 90% of the bar), not only below 45%. A newbie loses about half its HP to a monster of its level, so
+    the old threshold let it start the next fight at 50% and die. Bots that kill without a scratch rest as before.
   - Deadly spots: near the Dark Elf village a newbie spot (Balor orcs, levels 8-12, z about -3400) lies right above
     a level 72-75 area of aggressive Tomb Guards, Crypt Preachers and Lesser Ancient Scouts (z -4896, the next
     "floor" of `HuntingSpots`); bots of 7-12 got down there and died again and again (25 of 122 deaths in one log).
