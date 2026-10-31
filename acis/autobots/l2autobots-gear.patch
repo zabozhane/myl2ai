@@ -1,0 +1,124 @@
+diff --git a/data/autobots/equipment.xml b/data/autobots/equipment.xml
+index 3543a99..c60dc95 100644
+--- a/data/autobots/equipment.xml
++++ b/data/autobots/equipment.xml
+@@ -2,7 +2,7 @@
+ 
+ <equipmentSets>
+ 
+-    <equipment classId="HUMAN_FIGHTER" minLevel="1" maxLevel="19" rhand="2501" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="HUMAN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="WARRIOR" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="KNIGHT" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ROGUE" minLevel="20" maxLevel="39" rhand="279" lhand="" head="47" chest="395" legs="417" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+@@ -11,7 +11,7 @@
+     <equipment classId="HUMAN_WIZARD" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="CLERIC" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+-    <equipment classId="ELVEN_FIGHTER" minLevel="1" maxLevel="19" rhand="2501" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="ELVEN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="ELVEN_KNIGHT" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ELVEN_SCOUT" minLevel="20" maxLevel="39" rhand="279" lhand="" head="47" chest="395" legs="417" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+@@ -19,7 +19,7 @@
+     <equipment classId="ELVEN_WIZARD" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ELVEN_ORACLE" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+-    <equipment classId="DARK_FIGHTER" minLevel="1" maxLevel="19" rhand="2501" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="DARK_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="PALUS_KNIGHT" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ASSASSIN" minLevel="20" maxLevel="39" rhand="279" lhand="" head="47" chest="395" legs="417" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+@@ -27,13 +27,13 @@
+     <equipment classId="DARK_WIZARD" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="SHILLIEN_ORACLE" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+-    <equipment classId="ORC_FIGHTER" minLevel="1" maxLevel="19" rhand="2501" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="ORC_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="ORC_RAIDER" minLevel="20" maxLevel="39" rhand="70" lhand="" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+     <equipment classId="ORC_MYSTIC" minLevel="1" maxLevel="19" rhand="177" lhand="" head="44" chest="1101" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="ORC_SHAMAN" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+-    <equipment classId="DWARVEN_FIGHTER" minLevel="1" maxLevel="19" rhand="2501" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="DWARVEN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="ARTISAN" minLevel="20" maxLevel="39" rhand="158" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="SCAVENGER" minLevel="20" maxLevel="39" rhand="158" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index 938cbd7..d8bae3f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -32,6 +32,10 @@ internal object Gear {
+     /** Healing potions town shops sell, best first: starting villages only have the lesser one. */
+     val HEALING_POTIONS = listOf(1061, 1060)
+ 
++    /** A goal piece of the kit is aimed at what a bot of this level can realistically save up for. */
++    private const val GOAL_BUDGET_BASE = 2000
++    private const val GOAL_BUDGET_PER_LEVEL = 3000
++
+     private val POTIONS = setOf(725, 726, 727, 728, 1060, 1061, 1539, 1540, 5592)
+     private val BEGINNER_SHOTS = setOf(5789, 5790)
+     private val SOULSHOTS = mapOf(CrystalType.NONE to 1835, CrystalType.D to 1463, CrystalType.C to 1464, CrystalType.B to 1465, CrystalType.A to 1466, CrystalType.S to 1467)
+@@ -76,7 +80,11 @@ internal object Gear {
+                 Inventory.PAPERDOLL_REAR to kit.rightEar, Inventory.PAPERDOLL_LFINGER to kit.leftRing, Inventory.PAPERDOLL_RFINGER to kit.rightRing)
+         return SLOT_ORDER.mapNotNull { slot ->
+             val itemId = targets[slot] ?: 0
+-            if (itemId <= 0 || ItemTable.getInstance().getTemplate(itemId) == null || isSatisfied(bot, slot, itemId)) null else Wish(slot, itemId)
++            if (itemId <= 0 || ItemTable.getInstance().getTemplate(itemId) == null || isSatisfied(bot, slot, itemId)) return@mapNotNull null
++            // A goal nothing sells is no goal: the bot works toward the best piece the shops really have.
++            val reachable = if (Market.npcPrice(itemId) != null) itemId
++                    else Market.bestAlternative(itemId, GOAL_BUDGET_BASE + GOAL_BUDGET_PER_LEVEL * bot.level)
++            if (reachable <= 0) null else Wish(slot, reachable)
+         }
+     }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+index 1e58189..9bdf3b0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+@@ -50,6 +50,26 @@ internal object Market {
+     /** Market value of one piece: the shop price if shops sell it, otherwise the reference price. */
+     fun fairValue(itemId: Int): Int = npcPrice(itemId) ?: ItemTable.getInstance().getTemplate(itemId)?.referencePrice ?: 0
+ 
++    /** Every item the world's shops sell, lazily. */
++    private val soldItems: List<net.sf.l2j.gameserver.model.item.kind.Item> by lazy {
++        npcPrices.keys.mapNotNull { ItemTable.getInstance().getTemplate(it) }
++    }
++
++    /**
++     * The kit asks for [itemId], but no shop in the world sells it (a GM-shop piece like the Bone Club): the best
++     * piece the shops do sell for the same slot, of the same kind and no higher grade, and not above [maxPrice].
++     * Returns 0 when shops have nothing fitting either.
++     */
++    fun bestAlternative(itemId: Int, maxPrice: Int): Int {
++        val target = ItemTable.getInstance().getTemplate(itemId) ?: return 0
++        val fitting = soldItems.filter { it.bodyPart == target.bodyPart && it.crystalType.id <= target.crystalType.id && it.referencePrice <= maxPrice }
++        if (target is net.sf.l2j.gameserver.model.item.kind.Weapon) {
++            val sameType = fitting.filter { it.itemType == target.itemType }
++            return (sameType.ifEmpty { fitting.filter { it is net.sf.l2j.gameserver.model.item.kind.Weapon } }).maxByOrNull { it.referencePrice }?.itemId ?: 0
++        }
++        return fitting.filter { it is net.sf.l2j.gameserver.model.item.kind.Armor }.maxByOrNull { it.referencePrice }?.itemId ?: 0
++    }
++
+     fun shopsNear(bot: Player): List<Shop> = shops.filter { distance(bot, it.merchant) <= TOWN_RADIUS }
+ 
+     /** The closest shop in town that sells [itemId], with the product. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt
+index 3ba79b1..e80077f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt
+@@ -109,7 +109,12 @@ internal object MarketBook {
+             book + (median - book) * minOf(recent.size, TRUSTED_SALES) / TRUSTED_SALES.toDouble()
+         }
+         val price = anchor * pressure(itemId)
+-        val ceiling = Market.npcPrice(itemId)?.toDouble() ?: book * 4.0
++        // Nothing sold and nothing listed: the demand is a ghost (a GM-shop piece), the price doesn't run away.
++        val ceiling = when {
++            Market.npcPrice(itemId) != null -> Market.npcPrice(itemId)!!.toDouble()
++            recent.isNotEmpty() || (supply[itemId] ?: 0) > 0 -> book * 4.0
++            else -> book.toDouble()
++        }
+         return price.coerceAtMost(ceiling).coerceAtLeast(Market.npcSellPrice(itemId).toDouble()).toInt()
+     }
+ 
