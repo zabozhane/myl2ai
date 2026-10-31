@@ -1,0 +1,186 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index 17fe68f..7aa6184 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -68,9 +68,10 @@ internal object HuntingSpots {
+             spot.monstersFor(level) >= MIN_SUITABLE_MONSTERS && !isDeadly(spot.dangerLevel, level)
+ 
+     /** Picks a spot with monsters for [level], which is below the bot's own when it falls back to easier hunting. */
+-    fun choose(bot: Player, level: Int, excluded: Set<Long>, wanted: WantedLoot? = null): HuntingSpot? {
++    fun choose(bot: Player, level: Int, excluded: Set<Long>, wanted: WantedLoot? = null, maxDistance: Int = Int.MAX_VALUE): HuntingSpot? {
+         val candidates = spots.asSequence()
+                 .filter { it.key !in excluded && isSuitable(it, level) }
++                .filter { maxDistance == Int.MAX_VALUE || distance(bot.location(), it.location) <= maxDistance }
+                 .map { it to score(it, bot, level) * lootBonus(it, level, wanted) }
+                 .sortedByDescending { it.second }
+                 .take(CANDIDATES)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 02ef97c..2c7e503 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -4,6 +4,7 @@ import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.behaviors.sequences.TravelByGatekeeperSequence
+ import dev.l2j.autobots.behaviors.sequences.WalkToSequence
++import dev.l2j.autobots.extensions.getActiveSequence
+ import dev.l2j.autobots.extensions.location
+ import dev.l2j.autobots.population.economy.EconomyLog
+ import dev.l2j.autobots.population.economy.Errands
+@@ -86,10 +87,20 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private var afkRetreats = 0
+     private var spot: HuntingSpot? = null
+     private var spotLevel = 0
+-    private val badSpots = mutableSetOf<Long>()
++    // A spot that turned out empty, crowded or unreachable, with when it was marked: marks fade and the spot is tried again.
++    private val badSpots = mutableMapOf<Long, Long>()
++    private val badSpotTtlMs = Rnd.get(BAD_SPOT_TTL_MIN_MINUTES, BAD_SPOT_TTL_MAX_MINUTES) * 60_000L
+     private var idleTicks = 0
+     private var gatekeeperFailed = false
+ 
++    /** Spots excluded right now; the ones marked long enough ago get another chance, respawns change them. */
++    private val excludedSpots: Set<Long>
++        get() {
++            val now = System.currentTimeMillis()
++            badSpots.entries.removeIf { now - it.value > badSpotTtlMs }
++            return badSpots.keys
++        }
++
+     // Town trips: when the last one ended, and whether this stay in town already had one.
+     private var lastTripAt = System.currentTimeMillis()
+     private var tripDoneInTown = false
+@@ -121,6 +132,9 @@ internal class LifeBehavior(private val bot: Autobot) {
+             return
+         }
+ 
++        // A swimmer out of breath drops everything and heads back to land before it drowns.
++        if (escapeWater()) return
++
+         if (!bot.isInsideZone(ZoneId.TOWN)) tripDoneInTown = false
+ 
+         val wrappingUp = session.activity == SessionPlan.Activity.Home || session.activity == SessionPlan.Activity.Trade
+@@ -180,6 +194,29 @@ internal class LifeBehavior(private val bot: Autobot) {
+         bot.sitDown()
+     }
+ 
++    /**
++     * Swimming costs breath, and a bot that keeps swimming drowns: whatever the plan was, it is dropped and the bot
++     * heads back to land in short legs, like a player who swam too far and turns around.
++     */
++    private suspend fun escapeWater(): Boolean {
++        if (bot.isDead || !bot.isInsideZone(ZoneId.WATER)) return false
++        if (bot.getActiveSequence() != null) {
++            // The sequence that brought the bot here (a walk across the map) is dropped first.
++            bot.cancelSequence()
++            return true
++        }
++        if (bot.isMoving) return true
++        if (bot.target != null) bot.target = null
++        // The spot anchor is a spawn point, so it is known land; without a spot the nearest town is the safe direction.
++        val anchor = spot?.location ?: MapRegionData.getInstance().getLocationToTeleport(bot, TeleportType.TOWN)
++        val remaining = distance(bot.location(), anchor).coerceAtLeast(1.0)
++        val leg = if (remaining <= WATER_ESCAPE_LEG) anchor
++        else Location(bot.x + ((anchor.x - bot.x) * WATER_ESCAPE_LEG / remaining).toInt(),
++                bot.y + ((anchor.y - bot.y) * WATER_ESCAPE_LEG / remaining).toInt(), anchor.z)
++        WalkToSequence(bot, leg, WATER_ESCAPE_ARRIVAL) {}.execute()
++        return true
++    }
++
+     /** The end of a session: back to town, a last visit to the shops, then waiting there for the logout. */
+     private suspend fun goHome() {
+         if (!bot.isInsideZone(ZoneId.TOWN) && !homeUnreachable) {
+@@ -233,10 +270,12 @@ internal class LifeBehavior(private val bot: Autobot) {
+     fun onDeath(killer: net.sf.l2j.gameserver.model.actor.Creature?) {
+         if (AutobotData.settings.economyLog) {
+             val attackers = bot.getKnownTypeInRadius(Monster::class.java, ATTACKER_RADIUS).filter { !it.isDead && it.target === bot }
+-            val by = when (killer) {
+-                is Monster -> "${killer.name} (${killer.npcId}) lv ${killer.level}${if (killer.isAggressive) " aggressive" else ""}"
+-                is Player -> "player ${killer.name} lv ${killer.level}"
+-                null -> "unknown"
++            val by = when {
++                // WaterTaskManager drowns a swimmer with itself as the attacker.
++                killer === bot -> "drowned"
++                killer is Monster -> "${killer.name} (${killer.npcId}) lv ${killer.level}${if (killer.isAggressive) " aggressive" else ""}"
++                killer is Player -> "player ${killer.name} lv ${killer.level}"
++                killer == null -> "unknown"
+                 else -> "${killer.name} lv ${killer.level}"
+             }
+             val potions = dev.l2j.autobots.population.economy.Gear.HEALING_POTIONS.sumOf { dev.l2j.autobots.population.economy.Gear.count(bot, it) }
+@@ -250,7 +289,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         // A raid is a risk the bot took on purpose: it does not make the bot fall back to easier monsters.
+         if (RaidPlanner.isRaiding(bot)) RaidLog.count(RaidLog.Event.Deaths) else fitness.onDeath()
+         if (!bot.isInParty) session.onDeath(context())
+-        dev.l2j.autobots.population.llm.BotChatter.event(bot, "you died, killed by " + when (killer) {
++        dev.l2j.autobots.population.llm.BotChatter.event(bot, if (killer === bot) "you drowned" else "you died, killed by " + when (killer) {
+             null -> "something"
+             is Player -> "player ${killer.name}"
+             else -> "${killer.name} (level ${killer.level})"
+@@ -280,6 +319,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+     }
+ 
+     fun onLevelUp() {
++        // A level stronger, the spots that were deadly or empty are worth another look.
++        badSpots.clear()
+         if (!bot.isInParty) session.onLevelUp(context())
+         dev.l2j.autobots.population.llm.BotChatter.event(bot, "you reached level ${bot.level}")
+     }
+@@ -413,7 +454,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         val group = bot.party?.takeIf { it.leader === bot && AutobotData.settings.groupsEnabled }
+         if (group != null && PartyPlan.state(group).newSpotRequested) {
+             PartyPlan.state(group).newSpotRequested = false
+-            spot?.let { badSpots.add(it.key) }
++            spot?.let { badSpots[it.key] = System.currentTimeMillis() }
+             dropSpot()
+         }
+         val level = if (group != null) PartyPlan.huntLevel(group) else fitness.huntLevel()
+@@ -425,7 +466,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+         current?.let { HuntingSpots.leave(it) }
+         val wanted = if (economy) Prospecting.wantedLoot(bot) else null
+-        val next = HuntingSpots.choose(bot, level, badSpots, wanted)
++        // A bot that can't pay a gatekeeper walks, so its spot must be within reach on foot; a far one means a
++        // walk across the map, which is where newbies drowned. With no free spot nearby a crowded one still beats the walk.
++        val onFoot = !canTeleport()
++        val next = HuntingSpots.choose(bot, level, excludedSpots, wanted, if (onFoot) MAX_TRAVEL_ON_FOOT else Int.MAX_VALUE)
++                ?: if (onFoot) HuntingSpots.choose(bot, level, emptySet(), wanted, MAX_TRAVEL_ON_FOOT) else null
+         if (next != null && wanted != null) EconomyLog.note(bot, "farming for ${if (wanted.spoil) "spoil" else "drops"} " +
+                 "${wanted.items.take(5).joinToString { ItemTable.getInstance().getTemplate(it)?.name ?: "$it" }} at ${next.location}")
+         next?.let { HuntingSpots.join(it) }
+@@ -487,15 +532,19 @@ internal class LifeBehavior(private val bot: Autobot) {
+         return if (walkSaved > MIN_WALK_SAVED_BY_TELEPORT) exit else null
+     }
+ 
+-    /** Forgets a spot that is empty or unreachable, so the next update picks another one. */
++    /** Forgets a spot that is empty or unreachable for a while, so the next update picks another one. */
+     private fun abandon(target: HuntingSpot) {
+-        badSpots.add(target.key)
++        badSpots[target.key] = System.currentTimeMillis()
+         if (spot === target) {
+             HuntingSpots.leave(target)
+             spot = null
+         }
+     }
+ 
++    /** A gatekeeper ride is possible only from town and costs adena a walker may not have. */
++    private fun canTeleport(): Boolean =
++            bot.isInsideZone(ZoneId.TOWN) && !gatekeeperFailed && bot.adena >= cheapestTeleport
++
+     companion object {
+         private const val SPOT_RADIUS = 1500
+         private const val LOGIN_DANGER_RADIUS = 2000
+@@ -522,5 +571,16 @@ internal class LifeBehavior(private val bot: Autobot) {
+         private const val AFK_SAFE_RADIUS = 700
+         private const val AFK_RETREAT = 800
+         private const val MAX_AFK_RETREATS = 3
++        /** Without a gatekeeper ride a spot farther than this is a walk across the map, not a trip to the hunt. */
++        private const val MAX_TRAVEL_ON_FOOT = 15000
++        /** A drowning swimmer turns back to land in short legs, never a new long swim. */
++        private const val WATER_ESCAPE_LEG = 1000.0
++        private const val WATER_ESCAPE_ARRIVAL = 100
++        private const val BAD_SPOT_TTL_MIN_MINUTES = 20
++        private const val BAD_SPOT_TTL_MAX_MINUTES = 30
++        /** The cheapest gatekeeper ride anywhere; adena below this means walking. */
++        private val cheapestTeleport: Int by lazy {
++            TeleportLocationData.getInstance().allTeleportLocations.filter { !it.isNoble }.minOfOrNull { it.price } ?: Int.MAX_VALUE
++        }
+     }
+ }
