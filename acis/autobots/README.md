@@ -340,6 +340,10 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     a level 72-75 area of aggressive Tomb Guards, Crypt Preachers and Lesser Ancient Scouts (z -4896, the next
     "floor" of `HuntingSpots`); bots of 7-12 got down there and died again and again (25 of 122 deaths in one log).
     Now a bot killed at its spot (within 5000) by an aggressive monster more than 5 levels above it marks the spot
-    (`HuntingSpots.reportKiller` raises its `dangerLevel` until the server restarts, logged as `spot ... marked
-    dangerous`) and leaves it, so no bot that weak is sent there again. A bot that logs in next to such monsters goes
+    and leaves it, so no bot that weak is sent there again. A bot that logs in next to such monsters goes
     straight to town (`LifeBehavior.escapeDangerOnLogin`, `Autobots session: ... logged in next to ..., back to town`).
+    The mark goes to every spot within 5000 of the place of death, on any floor (`HuntingSpots.reportKillerAt`), so
+    hunters killed on the way and party members following their leader count too; marks are kept in the
+    `autobot_spot_danger` table (`SpotDangerDao`) and survive restarts. When the spots are built, a cell also counts
+    the aggressive spawns one floor below it and its neighbours, because that is where hunters fall through.
+    Drops of more than 800z in place are logged (`... dropped ...z from ...`) to find how bots get down.
