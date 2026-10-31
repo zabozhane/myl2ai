@@ -1,0 +1,134 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index d6d9019..6e41bc8 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -46,6 +46,9 @@ internal object LootTable {
+     }
+ }
+ 
++/** A ledge someone fell off: kept shared, so one hunter's fall steers everyone around the place. */
++private class Ledge(val location: Location, val expiresAt: Long)
++
+ /**
+  * Hunting spots derived from the server's monster spawns: the map is cut into square cells and each cell
+  * holding monsters becomes a spot. Bots pick spots with monsters of their level, preferring close and less
+@@ -62,9 +65,16 @@ internal object HuntingSpots {
+     private const val DANGER_LEVELS_ABOVE = 5
+     /** Every spot within this radius of a death, on any floor, is marked dangerous. */
+     private const val KILLER_MARK_RADIUS = 5000
++    /** A fall off a ledge is remembered this long and steers hunters around it. */
++    private const val LEDGE_TTL_MS = 60 * 60 * 1000L
++    /** The straight way to a spot passing this close to a known ledge counts as crossing it. */
++    private const val LEDGE_AVOID_RADIUS = 600
++    /** How close in height the bot and the spot must be to the ledge's top for it to matter. */
++    private const val LEDGE_Z_TOLERANCE = 200
+ 
+     private val spots: List<HuntingSpot> by lazy { buildSpots() }
+     private val hunters = ConcurrentHashMap<Long, AtomicInteger>()
++    private val ledges = ConcurrentHashMap<Long, Ledge>()
+ 
+     fun suitableLevels(level: Int): IntRange = (level - 4).coerceAtLeast(1)..(level + 2)
+ 
+@@ -81,6 +91,7 @@ internal object HuntingSpots {
+         val candidates = spots.asSequence()
+                 .filter { it.key !in excluded && isSuitable(it, level) }
+                 .filter { withinReach(bot, it, maxWalk, useExits) }
++                .filter { !crossesLedge(bot, it) }
+                 .map { it to score(it, bot, level) * lootBonus(it, level, wanted) }
+                 .sortedByDescending { it.second }
+                 .take(CANDIDATES)
+@@ -129,6 +140,36 @@ internal object HuntingSpots {
+                 " aggressive monster lv $killerLevel killed a lv $hunterLevel hunter")
+     }
+ 
++    /**
++     * A hunter fell off something at [location] (the top of the fall). The straight way is how bots walk, so a spot
++     * across the ledge is a fall waiting to happen again; one fresh mark is enough to steer everyone around it.
++     */
++    fun reportFallAt(location: Location) {
++        ledges[cellKey(location.x, location.y, location.z)] = Ledge(location, System.currentTimeMillis() + LEDGE_TTL_MS)
++    }
++
++    /**
++     * True when the bot is up where the fall started, the spot is down below and the straight way there passes a
++     * ledge someone recently fell off. A bot that already fell is below the ledge and ignores it: it may hunt in
++     * the ravine it landed in.
++     */
++    private fun crossesLedge(bot: Player, spot: HuntingSpot): Boolean {
++        if (ledges.isEmpty()) return false
++        val now = System.currentTimeMillis()
++        ledges.values.removeIf { it.expiresAt < now }
++        val dx = (spot.location.x - bot.x).toDouble()
++        val dy = (spot.location.y - bot.y).toDouble()
++        val length2 = dx * dx + dy * dy
++        return ledges.values.any { ledge ->
++            if (bot.z < ledge.location.z - LEDGE_Z_TOLERANCE || spot.location.z > ledge.location.z - LEDGE_Z_TOLERANCE) return@any false
++            val t = if (length2 == 0.0) 0.0 else
++                (((ledge.location.x - bot.x) * dx + (ledge.location.y - bot.y) * dy) / length2).coerceIn(0.0, 1.0)
++            val px = bot.x + t * dx - ledge.location.x
++            val py = bot.y + t * dy - ledge.location.y
++            px * px + py * py < LEDGE_AVOID_RADIUS * LEDGE_AVOID_RADIUS
++        }
++    }
++
+     fun join(spot: HuntingSpot) {
+         hunters.computeIfAbsent(spot.key) { AtomicInteger() }.incrementAndGet()
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 3234408..829b494 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -304,12 +304,19 @@ internal class LifeBehavior(private val bot: Autobot) {
+         })
+     }
+ 
+-    /** Logs drops of more than a floor height in place, to find out how bots get to the floor below their spot. */
++    /**
++     * Logs drops of more than a floor height in place, to find out how bots get to the floor below their spot.
++     * The fall itself is acted on: the ledge is reported so everyone steers around it, and the bot drops the plan
++     * that walked it off the cliff and re-picks a spot from where it landed.
++     */
+     private fun checkFall() {
+         val dz = lastZ - bot.z
+         if (lastZ != 0 && dz > FALL_LOG_Z && hypot((bot.x - lastX).toDouble(), (bot.y - lastY).toDouble()) < FALL_LOG_XY) {
+             println("Autobots population: ${bot.name} lv ${bot.level} dropped ${dz}z from $lastX,$lastY,$lastZ to ${bot.x},${bot.y},${bot.z}," +
+                     " activity ${session.activity}, spot ${spot?.key ?: "-"}")
++            HuntingSpots.reportFallAt(Location(lastX, lastY, lastZ))
++            if (bot.getActiveSequence() != null) bot.cancelSequence()
++            dropSpot()
+         }
+         lastX = bot.x
+         lastY = bot.y
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+index bc18c2f..8cfefba 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+@@ -2,6 +2,7 @@ package dev.l2j.autobots.population.economy
+ 
+ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.population.group.GroupFinder
++import net.sf.l2j.gameserver.enums.actors.ClassId
+ 
+ /**
+  * How a bot copes with its hunting: deaths in the last hour and gear against its level decide whether it hunts
+@@ -61,7 +62,12 @@ internal class Fitness(private val bot: Autobot) {
+     }
+ 
+     /** The level the bot picks monsters for. */
+-    fun huntLevel(): Int = (bot.level + mode.levelOffset).coerceAtLeast(1)
++    fun huntLevel(): Int {
++        // An orc mystic punches until Life Drain (learned at a trainer around level 7): even monsters of its own
++        // level are too hard on fists, so it aims a step down until the spell is there.
++        val fistsOnly = bot.classId == ClassId.ORC_MYSTIC && bot.getSkill(LIFE_DRAIN) == null
++        return (bot.level + mode.levelOffset - if (fistsOnly) 1 else 0).coerceAtLeast(1)
++    }
+ 
+     /** Farming bots only take safe enchants: they can't afford to lose an item. */
+     val isSaving get() = mode != Mode.Normal
+@@ -78,5 +84,6 @@ internal class Fitness(private val bot: Autobot) {
+         private const val WINDOW_MS = 60 * 60 * 1000L
+         private const val MAX_DEATHS_PER_HOUR = 3
+         private const val MIN_LEVEL = 10
++        private const val LIFE_DRAIN = 1090
+     }
+ }
