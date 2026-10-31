@@ -334,10 +334,12 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
   - `Rester` also remembers what the last fights cost in HP and sits down before a fight when HP is below 1.5 times
     that (at most 90% of the bar), not only below 45%. A newbie loses about half its HP to a monster of its level, so
     the old threshold let it start the next fight at 50% and die. Bots that kill without a scratch rest as before.
+  - Bots up to level 19 pick monsters at most 1 level above them (was 3): without potions, shots or real gear a
+    newbie loses to a monster 2-3 levels up about as often as it wins. Monsters that attack first are fought anyway.
   - Deadly spots: near the Dark Elf village a newbie spot (Balor orcs, levels 8-12, z about -3400) lies right above
     a level 72-75 area of aggressive Tomb Guards, Crypt Preachers and Lesser Ancient Scouts (z -4896, the next
     "floor" of `HuntingSpots`); bots of 7-12 got down there and died again and again (25 of 122 deaths in one log).
-    Now a bot killed at its spot by an aggressive monster more than 5 levels above it marks the spot
+    Now a bot killed at its spot (within 5000) by an aggressive monster more than 5 levels above it marks the spot
     (`HuntingSpots.reportKiller` raises its `dangerLevel` until the server restarts, logged as `spot ... marked
     dangerous`) and leaves it, so no bot that weak is sent there again. A bot that logs in next to such monsters goes
     straight to town (`LifeBehavior.escapeDangerOnLogin`, `Autobots session: ... logged in next to ..., back to town`).
