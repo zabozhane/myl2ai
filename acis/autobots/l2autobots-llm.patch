@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index 7cdc9fa..fc6cae6 100644
+index 7cdc9fa..2fdec0a 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -73,4 +73,42 @@
+@@ -73,4 +73,47 @@
    <opportunistPercent>10</opportunistPercent>
    <loanMaxDays>3</loanMaxDays>
    <tradeLog>true</tradeLog>
@@ -22,6 +22,9 @@ index 7cdc9fa..fc6cae6 100644
 +  <llmNearMaxRequestsPerMinute>30</llmNearMaxRequestsPerMinute>
 +  <llmNearMaxRequestsPerDay>3000</llmNearMaxRequestsPerDay>
 +  <llmNearParallel>4</llmNearParallel>
++  <!-- Price per 1M tokens in dollars, only for the cost estimate in the summary (gpt-5.4-mini: 0.75 in, 4.50 out). -->
++  <llmNearPriceInputPerMillion>0.75</llmNearPriceInputPerMillion>
++  <llmNearPriceOutputPerMillion>4.5</llmNearPriceOutputPerMillion>
 +  <llmFarProvider>off</llmFarProvider>
 +  <llmFarModel>qwen2.5:7b</llmFarModel>
 +  <llmFarBaseUrl></llmFarBaseUrl>
@@ -29,6 +32,8 @@ index 7cdc9fa..fc6cae6 100644
 +  <llmFarMaxRequestsPerMinute>60</llmFarMaxRequestsPerMinute>
 +  <llmFarMaxRequestsPerDay>0</llmFarMaxRequestsPerDay>
 +  <llmFarParallel>2</llmFarParallel>
++  <llmFarPriceInputPerMillion>0</llmFarPriceInputPerMillion>
++  <llmFarPriceOutputPerMillion>0</llmFarPriceOutputPerMillion>
 +  <llmNearRange>2500</llmNearRange>
 +  <llmMaxReplyTokens>120</llmMaxReplyTokens>
 +  <llmTimeoutSeconds>20</llmTimeoutSeconds>
@@ -38,7 +43,7 @@ index 7cdc9fa..fc6cae6 100644
 +       llmDecisions: bots' own choices go to the model of their tier: the next session segment, accepting a party
 +       invite, a party leader's raid and who leaves an overfull party, staying when a player asks. The code offers
 +       only what is allowed and checks the answer. llmPartyAnswerPercent: how often a bot answers a party line
-+       that names nobody. llmLog prints every answer and decision. -->
++       that names nobody. llmLog prints every answer and decision; the model lines and summaries also go to log/llm.log (logs/game/llm.log on the host). -->
 +  <llmChat>true</llmChat>
 +  <llmUnderstand>true</llmUnderstand>
 +  <llmDecisions>true</llmDecisions>
@@ -86,10 +91,10 @@ index cc77a3c..49d6c65 100644
                  World.getInstance().players.filter { it.isGM }.forEach {
                      it.sendPacket(CreatureSay(0, 15, "${chatter.name} -> ${bot.name}", text))
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index e0fc229..0e06a9e 100644
+index e0fc229..7289027 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -60,7 +60,29 @@ internal data class AutobotSettings(
+@@ -60,7 +60,33 @@ internal data class AutobotSettings(
          @JsonProperty("scammerPercent") var scammerPercent: Int = 5,
          @JsonProperty("opportunistPercent") var opportunistPercent: Int = 10,
          @JsonProperty("loanMaxDays") var loanMaxDays: Int = 3,
@@ -102,6 +107,8 @@ index e0fc229..0e06a9e 100644
 +        @JsonProperty("llmNearMaxRequestsPerMinute") var llmNearMaxRequestsPerMinute: Int = 30,
 +        @JsonProperty("llmNearMaxRequestsPerDay") var llmNearMaxRequestsPerDay: Int = 3000,
 +        @JsonProperty("llmNearParallel") var llmNearParallel: Int = 4,
++        @JsonProperty("llmNearPriceInputPerMillion") var llmNearPriceInputPerMillion: Double = 0.75,
++        @JsonProperty("llmNearPriceOutputPerMillion") var llmNearPriceOutputPerMillion: Double = 4.5,
 +        @JsonProperty("llmFarProvider") var llmFarProvider: String = "off",
 +        @JsonProperty("llmFarModel") var llmFarModel: String = "qwen2.5:7b",
 +        @JsonProperty("llmFarBaseUrl") var llmFarBaseUrl: String = "",
@@ -109,6 +116,8 @@ index e0fc229..0e06a9e 100644
 +        @JsonProperty("llmFarMaxRequestsPerMinute") var llmFarMaxRequestsPerMinute: Int = 60,
 +        @JsonProperty("llmFarMaxRequestsPerDay") var llmFarMaxRequestsPerDay: Int = 0,
 +        @JsonProperty("llmFarParallel") var llmFarParallel: Int = 2,
++        @JsonProperty("llmFarPriceInputPerMillion") var llmFarPriceInputPerMillion: Double = 0.0,
++        @JsonProperty("llmFarPriceOutputPerMillion") var llmFarPriceOutputPerMillion: Double = 0.0,
 +        @JsonProperty("llmNearRange") var llmNearRange: Int = 2500,
 +        @JsonProperty("llmMaxReplyTokens") var llmMaxReplyTokens: Int = 120,
 +        @JsonProperty("llmTimeoutSeconds") var llmTimeoutSeconds: Int = 20,
@@ -419,7 +428,7 @@ index 0000000..e3e6ad2
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
 new file mode 100644
-index 0000000..949669f
+index 0000000..5d8a10f
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
 @@ -0,0 +1,212 @@
@@ -596,7 +605,7 @@ index 0000000..949669f
 +            val started = System.currentTimeMillis()
 +            val system = Persona.system(bot, player, situation) +
 +                    (if (maySkip) " If a real player in your place would not answer this at all, reply with exactly $SILENCE" else "")
-+            val reply = Llm.near.chat(system, history, AutobotData.settings.llmMaxReplyTokens) ?: return@launch
++            val reply = Llm.near.chat(system, history, AutobotData.settings.llmMaxReplyTokens, Llm.Purpose.Talk) ?: return@launch
 +            val answer = clean(reply.text, bot.name) ?: return@launch
 +            if (answer.trim() == SILENCE || answer.trim().trim('.') == SILENCE) return@launch
 +            // Typing takes time: about a second for 15 characters, after reading the line.
@@ -606,7 +615,7 @@ index 0000000..949669f
 +            // In party chat several bots answer; each sees the others' lines as part of the transcript.
 +            remember(key, if (group) LlmMessage("user", "${bot.name}: $answer") else LlmMessage("assistant", answer))
 +            send(answer)
-+            if (AutobotData.settings.llmLog) println("Autobots llm: ${bot.name} -> ${player.name}: $answer")
++            Llm.log("${bot.name} -> ${player.name}: $answer")
 +        }
 +    }
 +
@@ -637,7 +646,7 @@ index 0000000..949669f
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Decisions.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Decisions.kt
 new file mode 100644
-index 0000000..ee05580
+index 0000000..a6c012e
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Decisions.kt
 @@ -0,0 +1,122 @@
@@ -745,7 +754,7 @@ index 0000000..ee05580
 +            }
 +            append("Your choice (key only):")
 +        }
-+        val reply = Llm.tier(tier).chat(system, listOf(LlmMessage("user", question)), 16) ?: return null
++        val reply = Llm.tier(tier).chat(system, listOf(LlmMessage("user", question)), 16, Llm.Purpose.Decision) ?: return null
 +        val key = parseKey(reply.text, choices)
 +        if (key != null) {
 +            chosen.incrementAndGet()
@@ -765,17 +774,20 @@ index 0000000..ee05580
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt
 new file mode 100644
-index 0000000..636679b
+index 0000000..deadeac
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,212 @@
 +package dev.l2j.autobots.population.llm
 +
 +import dev.l2j.autobots.AutobotData
 +import kotlinx.coroutines.sync.Semaphore
 +import kotlinx.coroutines.sync.withPermit
++import java.io.File
 +import java.time.Duration
 +import java.time.LocalDate
++import java.time.LocalDateTime
++import java.time.format.DateTimeFormatter
 +import java.util.ArrayDeque
 +import java.util.concurrent.atomic.AtomicInteger
 +import java.util.concurrent.atomic.AtomicLong
@@ -792,19 +804,35 @@ index 0000000..636679b
 +internal object Llm {
 +    enum class Tier { Near, Far }
 +
++    /** What a call is for, so the summary shows where the tokens go. */
++    enum class Purpose { Talk, Understand, Decision }
++
++    // Container output is lost when the container is re-created; the model's lines are also kept in log/llm.log,
++    // which docker-compose maps to logs/game/llm.log on the host.
++    private val file = File("log/llm.log")
++    private val stamp = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
++
++    private fun write(line: String) {
++        println(line)
++        try {
++            synchronized(file) { file.parentFile?.mkdirs(); file.appendText("${LocalDateTime.now().format(stamp)} $line\n") }
++        } catch (_: Exception) {
++        }
++    }
++
 +    val near = LlmTier("near")
 +    val far = LlmTier("far")
 +
 +    fun tier(tier: Tier) = if (tier == Tier.Near) near else far
 +
 +    fun log(message: String) {
-+        if (AutobotData.settings.llmLog) println("Autobots llm: $message")
++        if (AutobotData.settings.llmLog) write("Autobots llm: $message")
 +    }
 +
 +    /** Every 10 minutes with the other summaries; counters restart after each. */
 +    fun summary() {
 +        val parts = listOfNotNull(near.summary(), far.summary())
-+        if (parts.isNotEmpty()) println("Autobots llm summary: ${parts.joinToString("; ")}; decisions ${Decisions.summary()}")
++        if (parts.isNotEmpty()) write("Autobots llm summary: ${parts.joinToString("; ")}; decisions ${Decisions.summary()}")
 +    }
 +}
 +
@@ -825,6 +853,16 @@ index 0000000..636679b
 +    private val failedInRow = AtomicInteger()
 +    @Volatile private var pausedUntil = 0L
 +
++    /** Requests and tokens per purpose for the 10-minute window, and the day's totals for the cost. */
++    private class Usage {
++        val requests = AtomicInteger()
++        val inputTokens = AtomicLong()
++        val outputTokens = AtomicLong()
++    }
++    private val window = Llm.Purpose.values().associateWith { Usage() }
++    private val todayInput = AtomicLong()
++    private val todayOutput = AtomicLong()
++
 +    private val requests = AtomicInteger()
 +    private val failures = AtomicInteger()
 +    private val dropped = AtomicInteger()
@@ -839,7 +877,7 @@ index 0000000..636679b
 +    val available: Boolean get() = current() != null && System.currentTimeMillis() >= pausedUntil
 +
 +    /** Asks the model; null when it is off, paused, over a limit or failed. Suspends, never blocks a thread. */
-+    suspend fun chat(system: String, messages: List<LlmMessage>, maxTokens: Int): LlmReply? {
++    suspend fun chat(system: String, messages: List<LlmMessage>, maxTokens: Int, purpose: Llm.Purpose): LlmReply? {
 +        val provider = current() ?: return null
 +        if (System.currentTimeMillis() < pausedUntil) return null
 +        if (!takeSlot()) {
@@ -862,6 +900,13 @@ index 0000000..636679b
 +                failedInRow.set(0)
 +                inputTokens.addAndGet(reply.inputTokens.toLong())
 +                outputTokens.addAndGet(reply.outputTokens.toLong())
++                window.getValue(purpose).let {
++                    it.requests.incrementAndGet()
++                    it.inputTokens.addAndGet(reply.inputTokens.toLong())
++                    it.outputTokens.addAndGet(reply.outputTokens.toLong())
++                }
++                todayInput.addAndGet(reply.inputTokens.toLong())
++                todayOutput.addAndGet(reply.outputTokens.toLong())
 +            }
 +            reply
 +        }
@@ -871,7 +916,7 @@ index 0000000..636679b
 +    private fun takeSlot(): Boolean {
 +        val config = config()
 +        val now = System.currentTimeMillis()
-+        if (LocalDate.now() != day) { day = LocalDate.now(); today = 0 }
++        if (LocalDate.now() != day) { day = LocalDate.now(); today = 0; todayInput.set(0); todayOutput.set(0) }
 +        while (recent.isNotEmpty() && recent.peekFirst() < now - 60_000L) recent.pollFirst()
 +        if (config.perMinute > 0 && recent.size >= config.perMinute) return false
 +        if (config.perDay > 0 && today >= config.perDay) return false
@@ -881,13 +926,15 @@ index 0000000..636679b
 +    }
 +
 +    private class Config(val provider: String, val model: String, val baseUrl: String, val reasoningEffort: String,
-+                         val perMinute: Int, val perDay: Int, val parallel: Int)
++                         val perMinute: Int, val perDay: Int, val parallel: Int, val priceIn: Double, val priceOut: Double)
 +
 +    private fun config(): Config = AutobotData.settings.let {
 +        if (name == "near") Config(it.llmNearProvider, it.llmNearModel, it.llmNearBaseUrl, it.llmNearReasoningEffort,
-+                it.llmNearMaxRequestsPerMinute, it.llmNearMaxRequestsPerDay, it.llmNearParallel)
++                it.llmNearMaxRequestsPerMinute, it.llmNearMaxRequestsPerDay, it.llmNearParallel,
++                it.llmNearPriceInputPerMillion, it.llmNearPriceOutputPerMillion)
 +        else Config(it.llmFarProvider, it.llmFarModel, it.llmFarBaseUrl, it.llmFarReasoningEffort,
-+                it.llmFarMaxRequestsPerMinute, it.llmFarMaxRequestsPerDay, it.llmFarParallel)
++                it.llmFarMaxRequestsPerMinute, it.llmFarMaxRequestsPerDay, it.llmFarParallel,
++                it.llmFarPriceInputPerMillion, it.llmFarPriceOutputPerMillion)
 +    }
 +
 +    private fun current(): LlmProvider? {
@@ -927,7 +974,17 @@ index 0000000..636679b
 +        if (current() == null) return null
 +        val count = requests.getAndSet(0)
 +        val latency = latencyMs.getAndSet(0)
-+        return "$name: requests $count, failed ${failures.getAndSet(0)}, dropped by limits ${dropped.getAndSet(0)}, " +
++        val config = config()
++        fun cost(input: Long, output: Long) = (input * config.priceIn + output * config.priceOut) / 1_000_000.0
++        val byPurpose = window.entries.filter { it.value.requests.get() > 0 }.joinToString(", ") { (purpose, usage) ->
++            val input = usage.inputTokens.getAndSet(0)
++            val output = usage.outputTokens.getAndSet(0)
++            "${purpose.name.lowercase()} ${usage.requests.getAndSet(0)} req $input/$output tok"
++        }.ifEmpty { "nothing" }
++        val todayCost = cost(todayInput.get(), todayOutput.get())
++        return "$name [$byPurpose] " +
++                (if (config.priceIn > 0 || config.priceOut > 0) "today tokens ${todayInput.get()}/${todayOutput.get()} ~$${"%.4f".format(java.util.Locale.ROOT, todayCost)}, " else "") +
++                "requests $count, failed ${failures.getAndSet(0)}, dropped by limits ${dropped.getAndSet(0)}, " +
 +                "tokens in ${inputTokens.getAndSet(0)} out ${outputTokens.getAndSet(0)}, avg ${if (count > 0) latency / count else 0} ms, " +
 +                (if (System.currentTimeMillis() < pausedUntil) "PAUSED after errors, " else "") +
 +                "today ${synchronized(this) { today }}" + config().perDay.let { if (it > 0) "/$it" else "" }
@@ -1152,7 +1209,7 @@ index 0000000..3e252e2
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Persuasion.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Persuasion.kt
 new file mode 100644
-index 0000000..2cc9cdf
+index 0000000..eedcedf
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Persuasion.kt
 @@ -0,0 +1,100 @@
@@ -1242,7 +1299,7 @@ index 0000000..2cc9cdf
 +                val minutes = Rnd.get(EXTEND_MIN, EXTEND_MAX)
 +                life.persuaded(minutes)
 +                say((if (russian) stayRu else stayEn).random())
-+                if (AutobotData.settings.llmLog) println("Autobots llm: ${player.name} talked ${bot.name} into $minutes more min")
++                Llm.log("${player.name} talked ${bot.name} into $minutes more min")
 +            } else say((if (russian) leaveRu else leaveEn).random())
 +        }
 +    }
@@ -1258,7 +1315,7 @@ index 0000000..2cc9cdf
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Understand.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Understand.kt
 new file mode 100644
-index 0000000..28ab55a
+index 0000000..457dc44
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Understand.kt
 @@ -0,0 +1,48 @@
@@ -1302,7 +1359,7 @@ index 0000000..28ab55a
 +        val system = "You map a Lineage 2 player's chat message to a game command. Commands:\n${channel.commands}\n" +
 +                "Answer with one command exactly as written, filling <...> from the message (item names in English, short), " +
 +                "or $NONE if the message is small talk, a question or anything else. Nothing more."
-+        val reply = Llm.near.chat(system, listOf(LlmMessage("user", text.take(300))), 24) ?: return null
++        val reply = Llm.near.chat(system, listOf(LlmMessage("user", text.take(300))), 24, Llm.Purpose.Understand) ?: return null
 +        val line = reply.text.lineSequence().firstOrNull()?.trim()?.trim('"', '.', '\'')?.lowercase() ?: return null
 +        if (line.isEmpty() || line.uppercase() == NONE) return null
 +        // Only a command from the list is passed on.
