@@ -325,6 +325,18 @@
    Запуск ночью или вручную. Геодаты нет в репо: обойтись без неё или кэшировать. ~1–2 дня.
 Большие прогоны стенда остаются для баланса и поведения.
 
+## Инструкция по развёртыванию (31.10)
+
+- `docs/setup.md`: пошагово для нового человека на macOS и Windows — Docker Desktop с памятью ≥ 7,5 ГБ
+  (на Windows через `.wslconfig`), клон, `docker compose up -d --build`, геодата из ChaosPaladin `97332edd`
+  через `geodata-download/` и `GeoDataConverter`, ключ OpenAI в `llm.env`, клиент (Мак — winemac с `server attach`,
+  Windows — `data/system/L2.exe` напрямую), GM, частые проблемы. Ссылка из README.
+- README: устаревшие цифры памяти (game 4 ГБ / heap 3 ГБ) заменены на текущие 6 ГБ / 5 ГБ.
+- `.gitattributes` (`* text=auto eol=lf`): на Windows Git с `autocrlf` превращал бы `*.sh` и патчи в CRLF,
+  и контейнеры с патчами ломались бы.
+- Открыто: клиент Interlude и утилита перепатчивания `client/tools/l2rekey.py` в git не лежат — новый человек берёт
+  готовую папку `client/` у владельца.
+
 ## Решения
 
 - aCis ревизия **382**, **JDK 11** — под неё написан L2Autobots, порт на свежую ревизию не делаем.
