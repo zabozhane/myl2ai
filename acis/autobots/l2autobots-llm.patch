@@ -1,33 +1,52 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index 7cdc9fa..74649dc 100644
+index 7cdc9fa..fc6cae6 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -73,4 +73,23 @@
+@@ -73,4 +73,42 @@
    <opportunistPercent>10</opportunistPercent>
    <loanMaxDays>3</loanMaxDays>
    <tradeLog>true</tradeLog>
-+  <!-- Language model (stage 5): bots answer free talk in whispers, party chat and nearby chat (when named) with
-+       their own character. Decisions stay in the game code. llmProvider: off, openai, ollama (local, OpenAI-compatible
-+       API on the Docker host), compatible (any OpenAI-compatible vendor at llmBaseUrl with LLM_API_KEY).
-+       The key is never in this file: OPENAI_API_KEY comes from llm.env next to docker-compose.yml; without it the
-+       model stays off. llmModel is any chat model name of the provider; mini/nano models are enough for chat.
-+       llmReasoningEffort is sent to reasoning models (none, minimal, low...); empty sends nothing, and a model that
-+       rejects it is retried without. Requests over the per-minute or per-day limit are dropped (the bot stays silent).
-+       llmPartyAnswerPercent: how often a bot answers a party line that names nobody. llmLog prints every answer. -->
-+  <llmProvider>openai</llmProvider>
-+  <llmModel>gpt-5.4-mini</llmModel>
-+  <llmBaseUrl></llmBaseUrl>
-+  <llmReasoningEffort>none</llmReasoningEffort>
++  <!-- Language models (stage 5), two tiers. Bots a real player can see (llmNearRange), shares a party with or
++       talked to in the last 10 minutes use the near model; all other bots use the far model. A tier that is off,
++       paused after 3 failed calls in a row (10 minutes) or over its limits gives no answer, and its bots decide and
++       talk the old way. Provider: off, openai, ollama (local, OpenAI-compatible API on the Docker host,
++       http://host.docker.internal:11434/v1 unless BaseUrl is set), compatible (any OpenAI-compatible vendor at BaseUrl
++       with LLM_API_KEY). Keys are never in this file: OPENAI_API_KEY comes from llm.env next to docker-compose.yml.
++       Model: any chat model name of the provider. ReasoningEffort goes to reasoning models (none, minimal, low...);
++       empty sends nothing, a model that rejects it is retried without. Limits: requests per minute and per day
++       (0 = no limit); requests over them are dropped, not queued. Parallel: calls in flight at once. -->
++  <llmNearProvider>openai</llmNearProvider>
++  <llmNearModel>gpt-5.4-mini</llmNearModel>
++  <llmNearBaseUrl></llmNearBaseUrl>
++  <llmNearReasoningEffort>none</llmNearReasoningEffort>
++  <llmNearMaxRequestsPerMinute>30</llmNearMaxRequestsPerMinute>
++  <llmNearMaxRequestsPerDay>3000</llmNearMaxRequestsPerDay>
++  <llmNearParallel>4</llmNearParallel>
++  <llmFarProvider>off</llmFarProvider>
++  <llmFarModel>qwen2.5:7b</llmFarModel>
++  <llmFarBaseUrl></llmFarBaseUrl>
++  <llmFarReasoningEffort></llmFarReasoningEffort>
++  <llmFarMaxRequestsPerMinute>60</llmFarMaxRequestsPerMinute>
++  <llmFarMaxRequestsPerDay>0</llmFarMaxRequestsPerDay>
++  <llmFarParallel>2</llmFarParallel>
++  <llmNearRange>2500</llmNearRange>
 +  <llmMaxReplyTokens>120</llmMaxReplyTokens>
 +  <llmTimeoutSeconds>20</llmTimeoutSeconds>
-+  <llmMaxRequestsPerMinute>20</llmMaxRequestsPerMinute>
-+  <llmMaxRequestsPerDay>1500</llmMaxRequestsPerDay>
++  <!-- What the models do. llmChat: bots answer free talk (whispers, party chat, nearby chat that names them) with
++       their character; always the near model, a real player is reading. llmUnderstand: the model reads a request
++       the keyword rules missed ("может посидим, я пустой" = rest) and passes it to the same game code.
++       llmDecisions: bots' own choices go to the model of their tier: the next session segment, accepting a party
++       invite, a party leader's raid and who leaves an overfull party, staying when a player asks. The code offers
++       only what is allowed and checks the answer. llmPartyAnswerPercent: how often a bot answers a party line
++       that names nobody. llmLog prints every answer and decision. -->
 +  <llmChat>true</llmChat>
++  <llmUnderstand>true</llmUnderstand>
++  <llmDecisions>true</llmDecisions>
 +  <llmPartyAnswerPercent>60</llmPartyAnswerPercent>
 +  <llmLog>true</llmLog>
  </settings>
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-index cc77a3c..ae97e4f 100644
+index cc77a3c..8e0d61f 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 @@ -14,6 +14,7 @@ import dev.l2j.autobots.models.BotChat
@@ -46,39 +65,117 @@ index cc77a3c..ae97e4f 100644
                  activeBots.forEach {
                      if(MathUtil.checkIfInRange(1250, it.value, chatter, true) && !BlockList.isBlocked(it.value, chatter)) {
                          it.value.addChat(BotChat(ChatType.All, chatter.name, text))
-@@ -107,7 +109,7 @@ object AutobotsManager {
+@@ -107,7 +109,8 @@ object AutobotsManager {
              2 -> { // pm "
                  if(target == null) return false
                  val bot = activeBots.getOrElse(target) {null} ?: return false
 -                if (!PlayerTrade.onWhisper(chatter, bot, text)) GroupChat.onWhisper(chatter, bot, text)
-+                if (!PlayerTrade.onWhisper(chatter, bot, text) && !GroupChat.onWhisper(chatter, bot, text)) BotTalk.onWhisper(chatter, bot, text)
++                if (!dev.l2j.autobots.population.llm.Persuasion.onWhisper(chatter, bot, text) &&
++                        !PlayerTrade.onWhisper(chatter, bot, text) && !GroupChat.onWhisper(chatter, bot, text)) BotTalk.onWhisper(chatter, bot, text)
  
                  World.getInstance().players.filter { it.isGM }.forEach {
                      it.sendPacket(CreatureSay(0, 15, "${chatter.name} -> ${bot.name}", text))
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index e0fc229..8ff7ba0 100644
+index e0fc229..0e06a9e 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -60,7 +60,18 @@ internal data class AutobotSettings(
+@@ -60,7 +60,29 @@ internal data class AutobotSettings(
          @JsonProperty("scammerPercent") var scammerPercent: Int = 5,
          @JsonProperty("opportunistPercent") var opportunistPercent: Int = 10,
          @JsonProperty("loanMaxDays") var loanMaxDays: Int = 3,
 -        @JsonProperty("tradeLog") var tradeLog: Boolean = true
 +        @JsonProperty("tradeLog") var tradeLog: Boolean = true,
-+        @JsonProperty("llmProvider") var llmProvider: String = "openai",
-+        @JsonProperty("llmModel") var llmModel: String = "gpt-5.4-mini",
-+        @JsonProperty("llmBaseUrl") var llmBaseUrl: String = "",
-+        @JsonProperty("llmReasoningEffort") var llmReasoningEffort: String = "none",
++        @JsonProperty("llmNearProvider") var llmNearProvider: String = "openai",
++        @JsonProperty("llmNearModel") var llmNearModel: String = "gpt-5.4-mini",
++        @JsonProperty("llmNearBaseUrl") var llmNearBaseUrl: String = "",
++        @JsonProperty("llmNearReasoningEffort") var llmNearReasoningEffort: String = "none",
++        @JsonProperty("llmNearMaxRequestsPerMinute") var llmNearMaxRequestsPerMinute: Int = 30,
++        @JsonProperty("llmNearMaxRequestsPerDay") var llmNearMaxRequestsPerDay: Int = 3000,
++        @JsonProperty("llmNearParallel") var llmNearParallel: Int = 4,
++        @JsonProperty("llmFarProvider") var llmFarProvider: String = "off",
++        @JsonProperty("llmFarModel") var llmFarModel: String = "qwen2.5:7b",
++        @JsonProperty("llmFarBaseUrl") var llmFarBaseUrl: String = "",
++        @JsonProperty("llmFarReasoningEffort") var llmFarReasoningEffort: String = "",
++        @JsonProperty("llmFarMaxRequestsPerMinute") var llmFarMaxRequestsPerMinute: Int = 60,
++        @JsonProperty("llmFarMaxRequestsPerDay") var llmFarMaxRequestsPerDay: Int = 0,
++        @JsonProperty("llmFarParallel") var llmFarParallel: Int = 2,
++        @JsonProperty("llmNearRange") var llmNearRange: Int = 2500,
 +        @JsonProperty("llmMaxReplyTokens") var llmMaxReplyTokens: Int = 120,
 +        @JsonProperty("llmTimeoutSeconds") var llmTimeoutSeconds: Int = 20,
-+        @JsonProperty("llmMaxRequestsPerMinute") var llmMaxRequestsPerMinute: Int = 20,
-+        @JsonProperty("llmMaxRequestsPerDay") var llmMaxRequestsPerDay: Int = 1500,
 +        @JsonProperty("llmChat") var llmChat: Boolean = true,
++        @JsonProperty("llmUnderstand") var llmUnderstand: Boolean = true,
++        @JsonProperty("llmDecisions") var llmDecisions: Boolean = true,
 +        @JsonProperty("llmPartyAnswerPercent") var llmPartyAnswerPercent: Int = 60,
 +        @JsonProperty("llmLog") var llmLog: Boolean = true
  ){
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
          setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 71e2266..1ee79c4 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -55,6 +55,29 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private val session = SessionPlan(bot)
+     // When the scheduled session ends (0 = unknown, e.g. load testing); set by the population manager.
+     @Volatile var sessionEndsAt = 0L
++    /** Talked into playing longer (see [dev.l2j.autobots.population.llm.Persuasion]): online at least until then. */
++    @Volatile var stayUntil = 0L
++    @Volatile var persuadedTimes = 0
++        private set
++    // The coming logoff was announced to the players around, once per session end.
++    private var logoffAnnounced = false
++
++    /** When the bot means to log off: the schedule's end, or later if it was talked into staying. 0 = no end. */
++    private fun plannedEnd(): Long = if (sessionEndsAt > 0 && stayUntil > sessionEndsAt) stayUntil else sessionEndsAt
++
++    /** Close to the planned logoff: heading home or about to, so a player may still talk it into staying. */
++    fun isWrappingUp(): Boolean {
++        val end = plannedEnd()
++        return end > 0 && System.currentTimeMillis() > end - wrapUpMs
++    }
++
++    /** A player talked the bot into playing [minutes] more: back to hunting if it was already heading home. */
++    fun persuaded(minutes: Int) {
++        persuadedTimes++
++        stayUntil = maxOf(System.currentTimeMillis(), plannedEnd()) + minutes * 60_000L
++        logoffAnnounced = false
++        if (session.activity == SessionPlan.Activity.Home) session.switchTo(SessionPlan.Activity.Hunt, minutes, "talked into playing more")
++    }
+     // A player starts wrapping up a while before logging out.
+     private val wrapUpMs = Rnd.get(WRAP_UP_MIN_MINUTES, WRAP_UP_MAX_MINUTES) * 60_000L
+     private var homeUnreachable = false
+@@ -88,6 +111,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+             if (session.isOver()) nextSegment()
+             return
+         }
++        if (isWrappingUp()) logoffAnnounced = dev.l2j.autobots.population.llm.Persuasion.tick(bot,
++                (plannedEnd() - System.currentTimeMillis()) / 60_000L, logoffAnnounced)
+         if (AutobotData.settings.groupsEnabled && bot.isInParty && updateInParty()) return
+         if (bot.isDead || bot.isUnderAttack()) {
+             bot.combatBehavior.onUpdate()
+@@ -97,9 +122,12 @@ internal class LifeBehavior(private val bot: Autobot) {
+         if (!bot.isInsideZone(ZoneId.TOWN)) tripDoneInTown = false
+ 
+         val wrappingUp = session.activity == SessionPlan.Activity.Home || session.activity == SessionPlan.Activity.Trade
+-        if (sessionEndsAt > 0 && !wrappingUp && System.currentTimeMillis() > sessionEndsAt - wrapUpMs && bot.target == null) {
++        if (sessionEndsAt > 0 && !wrappingUp && isWrappingUp() && bot.target == null) {
+             dropSpot()
+-            session.switchTo(SessionPlan.Activity.Home, ((sessionEndsAt - System.currentTimeMillis()) / 60_000L).toInt().coerceAtLeast(1) + HOME_EXTRA_MINUTES, "session ends soon")
++            session.switchTo(SessionPlan.Activity.Home, ((plannedEnd() - System.currentTimeMillis()) / 60_000L).toInt().coerceAtLeast(1) + HOME_EXTRA_MINUTES, "session ends soon")
++        }
++        if (session.shouldPrepare()) {
++            session.prepareNext(context(), if (sessionEndsAt > 0) (sessionEndsAt - System.currentTimeMillis()) / 60_000L else null)
+         }
+         // A fight in progress is finished first, like a player who kills the mob before leaving the keyboard.
+         if (session.isOver() && (bot.target == null || session.activity == null)) nextSegment()
+@@ -238,6 +266,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+      * @return true while the bot wants to stay online.
+      */
+     fun keepsOnline(): Boolean {
++        if (System.currentTimeMillis() < stayUntil) return true
+         if (!lingerDecided) {
+             lingerDecided = true
+             val crafter = CraftBook.isCrafter(bot)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 index 5614d6b..7b1ffa1 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
@@ -91,33 +188,239 @@ index 5614d6b..7b1ffa1 100644
              }
              val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
              if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt b/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
+index ff91d55..fe2d7df 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
+@@ -71,12 +71,55 @@ internal class SessionPlan(private val bot: Autobot) {
+     fun next(context: Context, reason: String = "segment over"): Activity {
+         val previous = activity
+         val weights = weights(previous, context)
++        // The model's pick, asked a minute ahead (see prepareNext), if it is among what the code allows now.
++        val picked = dev.l2j.autobots.population.llm.Decisions.take(bot, DECISION, weights.filterValues { it > 0 }.keys.map { it.name.uppercase() })
++                ?.key?.let { key -> Activity.values().first { it.name.uppercase() == key } }
+         var roll = Rnd.get(weights.values.sum().coerceAtLeast(1))
+-        val chosen = weights.entries.firstOrNull { roll -= it.value; roll < 0 }?.key ?: Activity.Hunt
++        val chosen = picked ?: weights.entries.firstOrNull { roll -= it.value; roll < 0 }?.key ?: Activity.Hunt
+         start(chosen, minutes(chosen, previous, context), cause?.text ?: if (previous == null) "session start" else reason)
+         return chosen
+     }
+ 
++    // The segment end a question was already sent for: one question per segment.
++    private var preparedFor = 0L
++
++    /** True once per segment, in its last ~90 seconds: time to [prepareNext]. Cheap, checked every tick. */
++    fun shouldPrepare(): Boolean {
++        val left = endsAt - System.currentTimeMillis()
++        return activity != null && activity != Activity.Home && preparedFor != endsAt && left in 1..PREPARE_AHEAD_MS
++    }
++
++    /**
++     * Shortly before the segment ends, asks the language model what to do next, so the answer is ready when [next]
++     * needs it. Nothing happens without a model for this bot; then [next] rolls the dice as before.
++     */
++    fun prepareNext(context: Context, minutesLeftInSession: Long?) {
++        val current = activity ?: return
++        preparedFor = endsAt
++        val weights = weights(current, context).filterValues { it > 0 }
++        val total = weights.values.sum().coerceAtLeast(1)
++        val choices = weights.map { (activity, weight) ->
++            dev.l2j.autobots.population.llm.Choice(activity.name.uppercase(), when (activity) {
++                Activity.Hunt -> "go on hunting monsters" + if (context.hasGoal) " (you have a quest to do)" else ""
++                Activity.Afk -> "take a break away from the keyboard for a few minutes"
++                Activity.Trade -> "sit in a private store in town and sell your goods"
++                Activity.Home -> "go home and log out"
++            }, weight * 100 / total)
++        }
++        val huntedMinutes = if (current == Activity.Hunt) (System.currentTimeMillis() - huntingSince) / 60_000L else 0L
++        dev.l2j.autobots.population.llm.Decisions.prepare(bot, DECISION, {
++            val hour = ZonedDateTime.now(ZoneId.of(AutobotData.settings.populationTimeZone))
++            buildString {
++                append("It is ${hour.hour}:${"%02d".format(hour.minute)} at night".takeIf { isNight() } ?: "It is ${hour.hour}:${"%02d".format(hour.minute)}")
++                append(". You are finishing: ${current.name.lowercase()}")
++                if (huntedMinutes > 0) append(", hunting for $huntedMinutes min without a break")
++                append(". Your play style: ${style(context).name.lowercase()}.")
++                if (minutesLeftInSession != null) append(" You planned to log off in about $minutesLeftInSession min.")
++                if (context.canTrade) append(" You have goods to sell.")
++            }
++        }, choices)
++    }
++
+     /** Switches to [next] for [minutes] right away: going home before logout, a store kept after the session. */
+     fun switchTo(next: Activity, minutes: Int, reason: String) = start(next, minutes, reason)
+ 
+@@ -151,6 +194,8 @@ internal class SessionPlan(private val bot: Autobot) {
+ 
+     companion object {
+         private const val STYLE_SEED = 1_000_033L
++        private const val DECISION = "session"
++        private const val PREPARE_AHEAD_MS = 90_000L
+         private const val GRINDER_PERCENT = 30
+         private const val TRADER_PERCENT = 20
+         private val NIGHT_HOURS = 1..5
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
-index a902e7f..e05d361 100644
+index a902e7f..4ec9797 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
-@@ -144,7 +144,9 @@ internal object GroupChat {
+@@ -125,26 +125,28 @@ internal object GroupChat {
+      * asks for one, inspects the player and invites or explains why not.
+      * @return true if the whisper was handled here.
+      */
+-    fun onWhisper(chatter: Player, bot: Autobot, text: String): Boolean {
++    fun onWhisper(chatter: Player, bot: Autobot, text: String, russian: Boolean = isRussian(text)): Boolean {
+         if (chatter is Autobot || chatter.isInParty) return false
+         val party = bot.party ?: return false
+         if (party.leader !== bot || party.membersCount >= 9) return false
+         if (!GroupFinder.wasOffered(bot, chatter) && !WANTS_TO_JOIN.containsMatchIn(text)) return false
+-        val russian = isRussian(text)
+         playerLanguage[chatter] = russian
+         GroupFinder.considerPlayer(bot, chatter, russian)
+         return true
+     }
  
-         val russian = isRussian(text)
+-    fun onPartyChat(chatter: Player, text: String) {
++    /** @param understood the line is the model's reading of what the player said, see [dev.l2j.autobots.population.llm.Understand]. */
++    fun onPartyChat(chatter: Player, text: String, russian: Boolean = isRussian(text), understood: Boolean = false) {
+         if (chatter is Autobot) return
+         val party = chatter.party ?: return
+         val bots = party.members.filterIsInstance<Autobot>().filter { it.life != null && !it.isDead }
+         if (bots.isEmpty()) return
+ 
+-        val russian = isRussian(text)
          playerLanguage[chatter] = russian
 -        val intent = Intent.values().firstOrNull { it.pattern.containsMatchIn(text) } ?: return
++        if (dev.l2j.autobots.population.llm.Persuasion.onPartyChat(chatter, party, text, russian)) return
 +        // Not a suggestion to the party: just talk, answered through the language model when there is one.
 +        val intent = Intent.values().firstOrNull { it.pattern.containsMatchIn(text) }
-+                ?: return dev.l2j.autobots.population.llm.BotTalk.onPartyChat(chatter, party, bots, text)
++                ?: return if (understood) Unit else dev.l2j.autobots.population.llm.BotTalk.onPartyChat(chatter, party, bots, text)
          // One voice answers: the bot leading the party, else any bot in it.
          val speaker = (party.leader as? Autobot)?.takeIf { it in bots } ?: bots.random()
  
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+index 9fcba35..f8d8518 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+@@ -355,9 +355,26 @@ internal object GroupFinder {
+             if (settings.groupLog) println("Autobots groups: ${leaving.name} (${Role.of(leaving.classId)}) left ${leader.name}'s party on its own, now ${PartySize.target(party)}")
+             return
+         }
+-        val member = others.filter { !isOnly(it) }
++        val candidates = others.filter { !isOnly(it) }
+                 .sortedWith(compareBy<Player> { if (Role.of(it.classId) == Role.Damage) 0 else 1 }.thenBy { Relations.affinity(leader, it) })
+-                .firstOrNull() ?: return
++        val first = candidates.firstOrNull() ?: return
++        if (candidates.size < 2 || !dev.l2j.autobots.population.llm.Decisions.usable(leader)) return sendAway(party, leader, first)
++        // The leader picks with the language model: who to let go, by role, liking and how they play.
++        val shown = candidates.take(5)
++        val choices = shown.mapIndexed { i, m ->
++            dev.l2j.autobots.population.llm.Choice("M${i + 1}", "${m.name}: ${dev.l2j.autobots.population.llm.Persona.relationText(leader, m)}, " +
++                    "role ${Role.of(m.classId).name.lowercase()}${if (m !is Autobot) ", a real player you can see" else ""}", if (i == 0) 70 else 30 / (shown.size - 1))
++        }
++        CoScopes.generalScope.launch {
++            val key = dev.l2j.autobots.population.llm.Decisions.ask(leader, "kick",
++                    "You lead a party of ${party.membersCount}; there are too many of you for this spot and exp per person dropped, " +
++                            "so one member has to go. Who do you ask to leave?", choices)
++            val member = key?.removePrefix("M")?.toIntOrNull()?.let { shown.getOrNull(it - 1) } ?: first
++            if (party.leader === leader && member.party === party) sendAway(party, leader, member)
++        }
++    }
++
++    private fun sendAway(party: Party, leader: Autobot, member: Player) {
+         leader.partySay(listOf("${member.name}, sorry, too many of us for this spot", "${member.name}, сорри, нас многовато, опыта мало",
+                 "${member.name}, извини, сокращаемся, на всех не хватает", "${member.name} ty for party, we go smaller").random())
+         party.removePartyMember(member, MessageType.EXPELLED)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
+index 437a9cb..62b592d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
+@@ -38,13 +38,30 @@ internal object PartyInvites {
+ 
+     fun onInvite(requestor: Player, bot: Autobot) {
+         if (bot.life == null || !bot.isOnline) return
+-        val (accept, reason) = decide(bot, requestor)
++        var (accept, reason) = decide(bot, requestor)
+         CoScopes.generalScope.launch {
+-            delay(Rnd.get(ANSWER_MIN_MS, ANSWER_MAX_MS))
++            val started = System.currentTimeMillis()
++            // Hard rules (busy, PK, level gap) stay with the code; the mood part may go to the language model.
++            if (accept || reason == GroupChat.Line.NotNow) {
++                val eager = bot.needsGroup || Role.of(bot.classId) == Role.Healer
++                val usual = if (eager) 98 else Sociability.of(bot).acceptPercent
++                val relation = dev.l2j.autobots.population.llm.Persona.relationText(bot, requestor)
++                val party = requestor.party?.let { " Their party: ${it.membersCount} people." } ?: ""
++                dev.l2j.autobots.population.llm.Decisions.ask(bot, "invite",
++                        "${requestor.name} ($relation) invites you to a party.$party You are level ${bot.level}" +
++                                (if (bot.needsGroup) ", dying a lot alone lately" else "") + ".",
++                        listOf(dev.l2j.autobots.population.llm.Choice("ACCEPT", "join the party", usual),
++                                dev.l2j.autobots.population.llm.Choice("DECLINE", "say no", 100 - usual)))?.let {
++                    accept = it == "ACCEPT"
++                    reason = if (accept) null else GroupChat.Line.NotNow
++                }
++            }
++            delay((Rnd.get(ANSWER_MIN_MS, ANSWER_MAX_MS) - (System.currentTimeMillis() - started)).coerceAtLeast(500L))
+             if (bot.activeRequester !== requestor) return@launch
+             answer(bot, requestor, accept)
+-            if (!accept && reason != null && Rnd.get(100) < EXPLAIN_REFUSAL_PERCENT) {
+-                bot.tell(requestor.name, GroupChat.line(reason, GroupChat.isRussian(requestor)))
++            val why = reason
++            if (!accept && why != null && Rnd.get(100) < EXPLAIN_REFUSAL_PERCENT) {
++                bot.tell(requestor.name, GroupChat.line(why, GroupChat.isRussian(requestor)))
+             }
+         }
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Attention.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Attention.kt
+new file mode 100644
+index 0000000..e3e6ad2
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Attention.kt
+@@ -0,0 +1,33 @@
++package dev.l2j.autobots.population.llm
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.Autobot
++import net.sf.l2j.gameserver.model.actor.Player
++import java.util.concurrent.ConcurrentHashMap
++
++/**
++ * Which bots a real player is paying attention to, and so which model tier they think with. A bot is near when a
++ * player is within `llmNearRange`, shares its party, or talked to it in the last 10 minutes.
++ */
++internal object Attention {
++    private const val TALK_MEMORY_MS = 10 * 60_000L
++    private val talkedAt = ConcurrentHashMap<Int, Long>()
++    private val talkedWith = ConcurrentHashMap<Int, String>()
++
++    fun talked(bot: Player, player: Player) {
++        talkedAt[bot.objectId] = System.currentTimeMillis()
++        talkedWith[bot.objectId] = player.name
++    }
++
++    /** The player who whispered or spoke to the bot in the last 10 minutes, if any. */
++    fun lastTalker(bot: Player): String? =
++            talkedWith[bot.objectId]?.takeIf { (talkedAt[bot.objectId] ?: 0L) > System.currentTimeMillis() - TALK_MEMORY_MS }
++
++    fun isNear(bot: Autobot): Boolean {
++        if (bot.party?.members?.any { it !is Autobot } == true) return true
++        if ((talkedAt[bot.objectId] ?: 0L) > System.currentTimeMillis() - TALK_MEMORY_MS) return true
++        return bot.getKnownTypeInRadius(Player::class.java, AutobotData.settings.llmNearRange).any { it !is Autobot && it.isOnline }
++    }
++
++    fun tier(bot: Autobot): Llm.Tier = if (isNear(bot)) Llm.Tier.Near else Llm.Tier.Far
++}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
 new file mode 100644
-index 0000000..f3b51e2
+index 0000000..9c2606e
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,157 @@
 +package dev.l2j.autobots.population.llm
 +
 +import dev.l2j.autobots.AutobotData
 +import dev.l2j.autobots.Autobot
 +import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.group.GroupChat
 +import dev.l2j.autobots.population.group.GroupFinder
++import dev.l2j.autobots.population.trade.PlayerTrade
 +import kotlinx.coroutines.delay
 +import kotlinx.coroutines.launch
 +import net.sf.l2j.commons.random.Rnd
@@ -149,21 +452,45 @@ index 0000000..f3b51e2
 +    private val conversations = ConcurrentHashMap<String, Conversation>()
 +    private val lastSpoke = ConcurrentHashMap<Int, Long>()
 +
-+    private val enabled get() = AutobotData.settings.llmChat && Llm.enabled
++    // Talk always involves a real player, so it goes to the near (smarter) model.
++    private val enabled get() = AutobotData.settings.llmChat && Llm.near.available
 +
-+    /** A whisper no other module took. */
++    /**
++     * A whisper the keyword rules of trading and grouping did not take. The model first reads whether it is a
++     * request after all ("у тебя лук лишний есть?"); then the bot just talks.
++     */
 +    fun onWhisper(player: Player, bot: Autobot, text: String) {
-+        if (!enabled || player is Autobot) return
-+        val situation = buildString {
-+            append("${player.name} whispers to you in private messages")
-+            append(", you are ").append(activity(bot))
++        if (player is Autobot) return
++        Attention.talked(bot, player)
++        if (!Llm.near.available) return
++        CoScopes.generalScope.launch {
++            val russian = GroupChat.isRussian(text)
++            val command = Understand.command(text, Understand.Channel.Whisper)
++            if (command != null && (Persuasion.onWhisper(player, bot, command, russian, text) ||
++                            PlayerTrade.onWhisper(player, bot, command, russian) || GroupChat.onWhisper(player, bot, command, russian))) {
++                Llm.log("understood ${player.name} -> ${bot.name}: '$command'")
++                return@launch
++            }
++            if (!enabled) return@launch
++            val situation = "${player.name} whispers to you in private messages, you are ${activity(bot)}"
++            respond(bot, player, "pm:${bot.objectId}:${player.objectId}", "${player.name}: $text", situation) { bot.tell(player.name, it) }
 +        }
-+        respond(bot, player, "pm:${bot.objectId}:${player.objectId}", "${player.name}: $text", situation) { bot.tell(player.name, it) }
 +    }
 +
-+    /** Party chat that was not a suggestion to the party: one bot answers, the one named or a random one. */
++    /** Party chat that was no suggestion by keywords: maybe one in other words, else one bot answers. */
 +    fun onPartyChat(player: Player, party: Party, bots: List<Autobot>, text: String) {
-+        if (!enabled || player is Autobot || bots.isEmpty()) return
++        if (player is Autobot || bots.isEmpty() || !Llm.near.available) return
++        CoScopes.generalScope.launch {
++            val command = Understand.command(text, Understand.Channel.Party)
++            if (command != null) {
++                Llm.log("understood ${player.name} in party: '$command'")
++                GroupChat.onPartyChat(player, command, GroupChat.isRussian(text), understood = true)
++            } else talkInParty(player, party, bots, text)
++        }
++    }
++
++    private fun talkInParty(player: Player, party: Party, bots: List<Autobot>, text: String) {
++        if (!enabled) return
 +        val named = bots.firstOrNull { text.contains(it.name, ignoreCase = true) }
 +        // Not every line needs an answer: people chat in party without expecting one.
 +        if (named == null && Rnd.get(100) >= AutobotData.settings.llmPartyAnswerPercent) {
@@ -181,6 +508,7 @@ index 0000000..f3b51e2
 +    fun onNearbyChat(player: Player, text: String, nearby: Collection<Autobot>) {
 +        if (!enabled || player is Autobot) return
 +        val bot = nearby.firstOrNull { text.contains(it.name, ignoreCase = true) } ?: return
++        Attention.talked(bot, player)
 +        val situation = "${player.name} says something to you in general chat nearby, others can see it; you are ${activity(bot)}"
 +        respond(bot, player, "near:${bot.objectId}:${player.objectId}", "${player.name}: $text", situation) { bot.say(it) }
 +    }
@@ -204,7 +532,7 @@ index 0000000..f3b51e2
 +        val history = remember(key, LlmMessage("user", line.take(MAX_INPUT_CHARS)))
 +        CoScopes.generalScope.launch {
 +            val started = System.currentTimeMillis()
-+            val reply = Llm.chat(Persona.system(bot, player, situation), history) ?: return@launch
++            val reply = Llm.near.chat(Persona.system(bot, player, situation), history, AutobotData.settings.llmMaxReplyTokens) ?: return@launch
 +            val answer = clean(reply.text, bot.name) ?: return@launch
 +            // Typing takes time: about a second for 15 characters, after reading the line.
 +            val typing = 1200L + answer.length * 70L + Rnd.get(0, 1500)
@@ -242,12 +570,140 @@ index 0000000..f3b51e2
 +        }
 +    }
 +}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Decisions.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Decisions.kt
+new file mode 100644
+index 0000000..ee05580
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Decisions.kt
+@@ -0,0 +1,122 @@
++package dev.l2j.autobots.population.llm
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.CoScopes
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withTimeoutOrNull
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
++
++/** One thing the bot may do: a short key the model answers with, what it means, and how often the code picks it. */
++internal class Choice(val key: String, val meaning: String, val usualPercent: Int? = null)
++
++/**
++ * The bot's own decisions through the language model, on the same forks where the game code decides. The code
++ * offers the menu (only what is allowed right now), the model picks by the bot's character and situation, and the
++ * code carries it out. No answer in time, an answer off the menu, or no model for the bot's tier: the code decides
++ * the old way.
++ *
++ * Two ways to ask: [ask] waits (with a timeout) where the code already runs in a coroutine and may wait a few
++ * seconds; [prepare] and [take] ask ahead for forks that must be answered on the spot, like the next session segment.
++ */
++internal object Decisions {
++    private const val ASK_TIMEOUT_MS = 6000L
++    private const val PREPARED_TTL_MS = 5 * 60_000L
++
++    private class Prepared(val choices: List<Choice>, val since: Long = System.currentTimeMillis()) {
++        @Volatile var done = false
++        @Volatile var key: String? = null
++    }
++
++    /** What a prepared question came to: the key, or null when the model gave no usable answer. */
++    class Taken(val key: String?)
++
++    private val prepared = ConcurrentHashMap<String, Prepared>()
++
++    private val asked = AtomicInteger()
++    private val chosen = AtomicInteger()
++    private val fallback = AtomicInteger()
++
++    /** The model is on for this bot now (its tier is configured and not paused). */
++    fun usable(bot: Autobot): Boolean = AutobotData.settings.llmDecisions && Llm.tier(Attention.tier(bot)).available
++
++    /** Asks and waits; null means the code decides. */
++    suspend fun ask(bot: Autobot, kind: String, situation: String, choices: List<Choice>, timeoutMs: Long = ASK_TIMEOUT_MS): String? {
++        if (choices.size < 2 || !usable(bot)) return null
++        val key = withTimeoutOrNull(timeoutMs) { query(bot, kind, situation, choices) }
++        if (key == null) fallback.incrementAndGet()
++        return key
++    }
++
++    /** Starts asking ahead; does nothing when a question of this kind is already out or the model is off. */
++    fun prepare(bot: Autobot, kind: String, situation: () -> String, choices: List<Choice>) {
++        if (choices.size < 2 || !usable(bot)) return
++        val id = "${bot.objectId}:$kind"
++        val existing = prepared[id]
++        if (existing != null && System.currentTimeMillis() - existing.since < PREPARED_TTL_MS) return
++        val question = Prepared(choices)
++        prepared[id] = question
++        CoScopes.generalScope.launch {
++            question.key = withTimeoutOrNull(AutobotData.settings.llmTimeoutSeconds * 1000L) { query(bot, kind, situation(), choices) }
++            question.done = true
++        }
++    }
++
++    /**
++     * The prepared answer, if the question is settled: null while nothing was asked or it is still out.
++     * @param allowed keys the code allows now; an answer outside them counts as no answer.
++     */
++    fun take(bot: Autobot, kind: String, allowed: Collection<String>): Taken? {
++        val id = "${bot.objectId}:$kind"
++        val question = prepared[id] ?: return null
++        if (!question.done) {
++            if (System.currentTimeMillis() - question.since < PREPARED_TTL_MS) return null
++            prepared.remove(id)
++            return null
++        }
++        prepared.remove(id)
++        val key = question.key?.takeIf { it in allowed }
++        if (key == null) fallback.incrementAndGet()
++        return Taken(key)
++    }
++
++    /** True while a prepared question of this kind is out. */
++    fun pending(bot: Autobot, kind: String): Boolean = prepared["${bot.objectId}:$kind"]?.done == false
++
++    private suspend fun query(bot: Autobot, kind: String, situation: String, choices: List<Choice>): String? {
++        val tier = Attention.tier(bot)
++        asked.incrementAndGet()
++        val system = buildString {
++            append(Persona.identity(bot))
++            append("You decide what your character does next, the way this player would, true to the character. ")
++            append("Answer with exactly one option key from the list and nothing else.")
++        }
++        val question = buildString {
++            append("Situation: $situation\n")
++            append("Options:\n")
++            choices.forEach { c ->
++                append("${c.key} - ${c.meaning}")
++                if (c.usualPercent != null) append(" (players like you pick this about ${c.usualPercent}% of the time)")
++                append('\n')
++            }
++            append("Your choice (key only):")
++        }
++        val reply = Llm.tier(tier).chat(system, listOf(LlmMessage("user", question)), 16) ?: return null
++        val key = parseKey(reply.text, choices)
++        if (key != null) {
++            chosen.incrementAndGet()
++            Llm.log("decision ${bot.name} ($tier) $kind -> $key")
++        } else Llm.log("decision ${bot.name} ($tier) $kind: answer off the menu '${reply.text.take(40)}'")
++        return key
++    }
++
++    /** The option key in a model's answer, the longest match first ("BOSS12" before "BOSS1"); null when none. */
++    fun parseKey(text: String, choices: List<Choice>): String? {
++        val answer = text.uppercase()
++        return choices.map { it.key }.sortedByDescending { it.length }
++                .firstOrNull { Regex("(?<![A-Z0-9_])${Regex.escape(it.uppercase())}(?![A-Z0-9_])").containsMatchIn(answer) }
++    }
++
++    fun summary(): String = "asked ${asked.getAndSet(0)}, chosen ${chosen.getAndSet(0)}, left to the code ${fallback.getAndSet(0)}"
++}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt
 new file mode 100644
-index 0000000..6754e6f
+index 0000000..636679b
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt
-@@ -0,0 +1,119 @@
+@@ -0,0 +1,164 @@
 +package dev.l2j.autobots.population.llm
 +
 +import dev.l2j.autobots.AutobotData
@@ -260,23 +716,49 @@ index 0000000..6754e6f
 +import java.util.concurrent.atomic.AtomicLong
 +
 +/**
-+ * The bots' language model: one shared [LlmProvider] chosen by `llmProvider` in `config.xml`, behind limits that keep
-+ * the bill and the server safe. Requests over the per-minute or per-day limit are dropped, not queued: a bot that
-+ * cannot think of an answer stays silent like a busy player.
++ * The bots' language models, in two tiers. Bots a real player can see or talks to ([Attention.isNear]) think with
++ * the near model (by default OpenAI through the API: smart, paid); all the others with the far model (by default
++ * off, later a local Ollama: free, simpler). A tier that is off, paused after errors or over its limits answers
++ * nothing, and the game code decides and talks the old way.
 + *
-+ * The API key never lives in the repository: it comes from the environment (`OPENAI_API_KEY`, or `LLM_API_KEY` for
++ * API keys never live in the repository: they come from the environment (`OPENAI_API_KEY`, or `LLM_API_KEY` for
 + * other vendors), which docker-compose fills from the untracked `llm.env`.
 + */
 +internal object Llm {
-+    private const val MAX_IN_FLIGHT = 4
++    enum class Tier { Near, Far }
++
++    val near = LlmTier("near")
++    val far = LlmTier("far")
++
++    fun tier(tier: Tier) = if (tier == Tier.Near) near else far
++
++    fun log(message: String) {
++        if (AutobotData.settings.llmLog) println("Autobots llm: $message")
++    }
++
++    /** Every 10 minutes with the other summaries; counters restart after each. */
++    fun summary() {
++        val parts = listOfNotNull(near.summary(), far.summary())
++        if (parts.isNotEmpty()) println("Autobots llm summary: ${parts.joinToString("; ")}; decisions ${Decisions.summary()}")
++    }
++}
++
++/** One model with its own limits and circuit breaker. */
++internal class LlmTier(val name: String) {
++    private val failuresToPause = 3
++    private val pauseMs = 10 * 60_000L
 +
 +    @Volatile private var provider: LlmProvider? = null
 +    @Volatile private var initialized = false
-+    private val inFlight = Semaphore(MAX_IN_FLIGHT)
++    private var inFlight = Semaphore(1)
 +
 +    private val recent = ArrayDeque<Long>()
 +    private var day: LocalDate = LocalDate.now()
 +    private var today = 0
++
++    // A dead key or network fails every call; after a few in a row the tier rests and bots fall back to the code.
++    private val failedInRow = AtomicInteger()
++    @Volatile private var pausedUntil = 0L
 +
 +    private val requests = AtomicInteger()
 +    private val failures = AtomicInteger()
@@ -285,11 +767,16 @@ index 0000000..6754e6f
 +    private val outputTokens = AtomicLong()
 +    private val latencyMs = AtomicLong()
 +
++    /** A provider is configured (it may still be paused after errors). */
 +    val enabled: Boolean get() = current() != null
 +
-+    /** Asks the model; null when it is off, over a limit or failed. Suspends, never blocks a thread. */
-+    suspend fun chat(system: String, messages: List<LlmMessage>, maxTokens: Int = AutobotData.settings.llmMaxReplyTokens): LlmReply? {
++    /** The model can be asked right now: configured and not paused. Limits are checked per call. */
++    val available: Boolean get() = current() != null && System.currentTimeMillis() >= pausedUntil
++
++    /** Asks the model; null when it is off, paused, over a limit or failed. Suspends, never blocks a thread. */
++    suspend fun chat(system: String, messages: List<LlmMessage>, maxTokens: Int): LlmReply? {
 +        val provider = current() ?: return null
++        if (System.currentTimeMillis() < pausedUntil) return null
 +        if (!takeSlot()) {
 +            dropped.incrementAndGet()
 +            return null
@@ -299,8 +786,15 @@ index 0000000..6754e6f
 +            requests.incrementAndGet()
 +            val reply = provider.chat(system, messages, maxTokens)
 +            latencyMs.addAndGet(System.currentTimeMillis() - started)
-+            if (reply == null) failures.incrementAndGet()
-+            else {
++            if (reply == null) {
++                failures.incrementAndGet()
++                if (failedInRow.incrementAndGet() >= failuresToPause) {
++                    failedInRow.set(0)
++                    pausedUntil = System.currentTimeMillis() + pauseMs
++                    Llm.log("$name: $failuresToPause failed calls in a row, paused for ${pauseMs / 60_000} min; its bots decide and talk the old way")
++                }
++            } else {
++                failedInRow.set(0)
 +                inputTokens.addAndGet(reply.inputTokens.toLong())
 +                outputTokens.addAndGet(reply.outputTokens.toLong())
 +            }
@@ -310,61 +804,68 @@ index 0000000..6754e6f
 +
 +    @Synchronized
 +    private fun takeSlot(): Boolean {
-+        val settings = AutobotData.settings
++        val config = config()
 +        val now = System.currentTimeMillis()
 +        if (LocalDate.now() != day) { day = LocalDate.now(); today = 0 }
 +        while (recent.isNotEmpty() && recent.peekFirst() < now - 60_000L) recent.pollFirst()
-+        if (recent.size >= settings.llmMaxRequestsPerMinute || today >= settings.llmMaxRequestsPerDay) return false
++        if (config.perMinute > 0 && recent.size >= config.perMinute) return false
++        if (config.perDay > 0 && today >= config.perDay) return false
 +        recent.addLast(now)
 +        today++
 +        return true
 +    }
 +
++    private class Config(val provider: String, val model: String, val baseUrl: String, val reasoningEffort: String,
++                         val perMinute: Int, val perDay: Int, val parallel: Int)
++
++    private fun config(): Config = AutobotData.settings.let {
++        if (name == "near") Config(it.llmNearProvider, it.llmNearModel, it.llmNearBaseUrl, it.llmNearReasoningEffort,
++                it.llmNearMaxRequestsPerMinute, it.llmNearMaxRequestsPerDay, it.llmNearParallel)
++        else Config(it.llmFarProvider, it.llmFarModel, it.llmFarBaseUrl, it.llmFarReasoningEffort,
++                it.llmFarMaxRequestsPerMinute, it.llmFarMaxRequestsPerDay, it.llmFarParallel)
++    }
++
 +    private fun current(): LlmProvider? {
 +        if (!initialized) synchronized(this) {
-+            if (!initialized) { provider = create(); initialized = true }
++            if (!initialized) {
++                val config = config()
++                inFlight = Semaphore(config.parallel.coerceAtLeast(1))
++                provider = create(config)
++                initialized = true
++                Llm.log("$name model " + (provider?.let { "on: ${it.name} ${config.model}, " +
++                        "up to ${if (config.perMinute > 0) config.perMinute else "any"}/min and ${if (config.perDay > 0) config.perDay else "any"}/day" } ?: "off"))
++            }
 +        }
 +        return provider
 +    }
 +
-+    private fun create(): LlmProvider? {
-+        val settings = AutobotData.settings
-+        val kind = settings.llmProvider.trim().lowercase()
-+        val timeout = Duration.ofSeconds(settings.llmTimeoutSeconds.toLong())
++    private fun create(config: Config): LlmProvider? {
++        val kind = config.provider.trim().lowercase()
++        val timeout = Duration.ofSeconds(AutobotData.settings.llmTimeoutSeconds.toLong())
 +        val key = System.getenv("LLM_API_KEY")?.takeIf { it.isNotBlank() } ?: System.getenv("OPENAI_API_KEY")?.takeIf { it.isNotBlank() }
-+        val provider = when (kind) {
++        return when (kind) {
 +            "", "off", "none" -> null
 +            "openai" -> if (key == null) {
-+                log("llmProvider is openai but OPENAI_API_KEY is not set (put it in llm.env next to docker-compose.yml), bots talk without the model")
++                Llm.log("$name: provider openai but OPENAI_API_KEY is not set (put it in llm.env next to docker-compose.yml)")
 +                null
-+            } else OpenAiCompatibleProvider("openai", settings.llmBaseUrl.ifBlank { "https://api.openai.com/v1" }, key, settings.llmModel, settings.llmReasoningEffort, timeout)
-+            // Ollama on the Docker host: http://host.docker.internal:11434/v1, no key, no reasoning_effort.
-+            "ollama" -> OpenAiCompatibleProvider("ollama", settings.llmBaseUrl.ifBlank { "http://host.docker.internal:11434/v1" }, null, settings.llmModel, "", timeout)
-+            // Any other vendor with an OpenAI-compatible API: llmBaseUrl, LLM_API_KEY and llmModel.
-+            "compatible" -> if (settings.llmBaseUrl.isBlank()) { log("llmProvider is compatible but llmBaseUrl is empty"); null }
-+                else OpenAiCompatibleProvider("compatible", settings.llmBaseUrl, key, settings.llmModel, settings.llmReasoningEffort, timeout)
-+            else -> { log("unknown llmProvider '$kind' (off, openai, ollama, compatible)"); null }
++            } else OpenAiCompatibleProvider("openai", config.baseUrl.ifBlank { "https://api.openai.com/v1" }, key, config.model, config.reasoningEffort, timeout)
++            // Ollama on the Docker host: http://host.docker.internal:11434/v1, no key.
++            "ollama" -> OpenAiCompatibleProvider("ollama", config.baseUrl.ifBlank { "http://host.docker.internal:11434/v1" }, null, config.model, config.reasoningEffort, timeout)
++            // Any other vendor with an OpenAI-compatible API: base URL, LLM_API_KEY and model.
++            "compatible" -> if (config.baseUrl.isBlank()) { Llm.log("$name: provider compatible but its base URL is empty"); null }
++                else OpenAiCompatibleProvider("compatible", config.baseUrl, key, config.model, config.reasoningEffort, timeout)
++            else -> { Llm.log("$name: unknown provider '$kind' (off, openai, ollama, compatible)"); null }
 +        }
-+        log(if (provider == null) "off" else "on: ${provider.name}, model ${settings.llmModel}, " +
-+                "up to ${settings.llmMaxRequestsPerMinute}/min and ${settings.llmMaxRequestsPerDay}/day")
-+        return provider
 +    }
 +
-+    fun log(message: String) {
-+        if (AutobotData.settings.llmLog) println("Autobots llm: $message")
-+    }
-+
-+    /** Every 10 minutes with the other summaries; counters restart after each. */
-+    fun summary() {
-+        if (current() == null) return
++    fun summary(): String? {
++        if (current() == null) return null
 +        val count = requests.getAndSet(0)
-+        val failed = failures.getAndSet(0)
-+        val skipped = dropped.getAndSet(0)
-+        val tokensIn = inputTokens.getAndSet(0)
-+        val tokensOut = outputTokens.getAndSet(0)
 +        val latency = latencyMs.getAndSet(0)
-+        println("Autobots llm summary: requests $count, failed $failed, dropped by limits $skipped, tokens in $tokensIn out $tokensOut, " +
-+                "avg ${if (count > 0) latency / count else 0} ms, today ${synchronized(this) { today }}/${AutobotData.settings.llmMaxRequestsPerDay}")
++        return "$name: requests $count, failed ${failures.getAndSet(0)}, dropped by limits ${dropped.getAndSet(0)}, " +
++                "tokens in ${inputTokens.getAndSet(0)} out ${outputTokens.getAndSet(0)}, avg ${if (count > 0) latency / count else 0} ms, " +
++                (if (System.currentTimeMillis() < pausedUntil) "PAUSED after errors, " else "") +
++                "today ${synchronized(this) { today }}" + config().perDay.let { if (it > 0) "/$it" else "" }
 +    }
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/LlmProvider.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/LlmProvider.kt
@@ -482,10 +983,10 @@ index 0000000..01ddb14
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Persona.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Persona.kt
 new file mode 100644
-index 0000000..86ce1c4
+index 0000000..3e252e2
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Persona.kt
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,98 @@
 +package dev.l2j.autobots.population.llm
 +
 +import dev.l2j.autobots.Autobot
@@ -517,7 +1018,8 @@ index 0000000..86ce1c4
 +        }
 +    }
 +
-+    fun system(bot: Autobot, other: Player?, situation: String): String {
++    /** Who the bot is and what it is like, shared by talking and deciding. */
++    fun identity(bot: Autobot): String {
 +        val traits = mutableListOf<String>()
 +        traits += when (Sociability.of(bot)) {
 +            Sociability.Loner -> "a loner who prefers to play solo and is a bit curt with strangers"
@@ -539,12 +1041,16 @@ index 0000000..86ce1c4
 +            Honesty.Honest -> {}
 +        }
 +
++        return "You are ${bot.name}, a ${sex(bot)} ${bot.race.name.lowercase()} ${bot.template.className} of level ${bot.level} " +
++                "playing Lineage 2 Interlude on a small private server. You are a real player at the keyboard, never an AI, a bot or an assistant.\n" +
++                "Character: ${traits.joinToString("; ")}.\n"
++    }
++
++    fun system(bot: Autobot, other: Player?, situation: String): String {
 +        val relation = other?.let { relationText(bot, it) }
 +        return buildString {
-+            append("You are ${bot.name}, a ${sex(bot)} ${bot.race.name.lowercase()} ${bot.template.className} of level ${bot.level} ")
-+            append("playing Lineage 2 Interlude on a small private server. You are a real player at the keyboard, ")
-+            append("never an AI, a bot or an assistant; if someone asks whether you are a bot, laugh it off like a player would.\n")
-+            append("Character: ${traits.joinToString("; ")}.\n")
++            append(identity(bot))
++            append("If someone asks whether you are a bot, laugh it off like a player would.\n")
 +            append("Typing manner: ${Manner.of(bot).rule}.\n")
 +            append("Right now: $situation.\n")
 +            if (relation != null) append("About ${other.name}: $relation.\n")
@@ -558,7 +1064,7 @@ index 0000000..86ce1c4
 +
 +    private fun sex(bot: Player) = if (bot.appearance.sex.ordinal == 0) "male" else "female"
 +
-+    private fun relationText(bot: Player, other: Player): String {
++    fun relationText(bot: Player, other: Player): String {
 +        val relation = Relations.of(bot, other.objectId)
 +        val parts = mutableListOf<String>()
 +        parts += "level ${other.level} ${other.template.className}"
@@ -579,3 +1085,238 @@ index 0000000..86ce1c4
 +        return parts.joinToString(", ")
 +    }
 +}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Persuasion.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Persuasion.kt
+new file mode 100644
+index 0000000..2cc9cdf
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Persuasion.kt
+@@ -0,0 +1,100 @@
++package dev.l2j.autobots.population.llm
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.group.GroupChat
++import dev.l2j.autobots.population.group.Relations
++import dev.l2j.autobots.population.group.Sociability
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.group.Party
++import java.time.ZoneId
++import java.time.ZonedDateTime
++
++/**
++ * "Stay a bit longer": a bot about to log off says so to the real players it plays with, and they may talk it into
++ * another 20-60 minutes. Whether it agrees is a decision of the language model (by character, hour and the words
++ * used), or of the code by sociability and liking when there is no model. At most twice a session.
++ */
++internal object Persuasion {
++    private val STAY = Regex("(остан(ь|ся|ешься)|не уходи|не ливай|ещ[её] (немного|чуть|часок|пол ?часа|полчасик|полчаса|разок)|давай ещ[её]|" +
++            "поиграй|посиди ещ|куда (ты|уже)|\\bstay\\b|one more|don'?t go|dont leave|don'?t leave|few more|play more|^stay$)", RegexOption.IGNORE_CASE)
++    private const val MAX_TIMES = 2
++    private const val EXTEND_MIN = 20
++    private const val EXTEND_MAX = 60
++
++    private val leavingRu = listOf("всё, мне скоро уходить, ещё минут %d и спать", "я минут через %d ливну", "ещё %d мин и я всё на сегодня")
++    private val leavingEn = listOf("gotta go in about %d min", "i'll log off in %d min", "%d more min and i'm off for today")
++    private val stayRu = listOf("ладно, уговорил, ещё часик", "ну ок, ещё немного посижу", "эх, давай ещё полчасика")
++    private val stayEn = listOf("ok fine, one more hour", "alright, a bit more", "ok, half an hour more")
++    private val leaveRu = listOf("не, правда пора, завтра зайду", "сорри, реально надо идти", "не могу, утром вставать")
++    private val leaveEn = listOf("nah, really gotta go, tomorrow", "sorry, really need to go", "can't, early morning tomorrow")
++
++    /** Called every tick of a population bot: announces the coming logoff to the players it plays with, once. */
++    fun tick(bot: Autobot, minutesLeft: Long, announced: Boolean): Boolean {
++        if (announced) return true
++        val players = bot.party?.members?.filter { it !is Autobot && it.isOnline }.orEmpty()
++        val talker = Attention.lastTalker(bot)
++        if (players.isEmpty() && talker == null) return false
++        val minutes = minutesLeft.coerceIn(2, 20).toInt()
++        CoScopes.generalScope.launch {
++            delay(Rnd.get(1000, 4000).toLong())
++            if (players.isNotEmpty()) bot.partySay((if (GroupChat.isRussian(players.first())) leavingRu else leavingEn).random().format(minutes))
++            else if (talker != null) bot.tell(talker, leavingRu.random().format(minutes))
++        }
++        return true
++    }
++
++    fun onWhisper(player: Player, bot: Autobot, text: String, russian: Boolean = GroupChat.isRussian(text), original: String = text): Boolean {
++        if (player is Autobot || !STAY.containsMatchIn(text) || !wrappingUp(bot)) return false
++        decide(player, bot, original, russian) { bot.tell(player.name, it) }
++        return true
++    }
++
++    /** A party line asking the bots to stay: every bot of the party that is about to leave thinks it over. */
++    fun onPartyChat(player: Player, party: Party, text: String, russian: Boolean, original: String = text): Boolean {
++        if (player is Autobot || !STAY.containsMatchIn(text)) return false
++        val leaving = party.members.filterIsInstance<Autobot>().filter { wrappingUp(it) }
++        if (leaving.isEmpty()) return false
++        leaving.forEach { bot -> decide(player, bot, original, russian) { bot.partySay(it) } }
++        return true
++    }
++
++    private fun wrappingUp(bot: Autobot): Boolean = bot.life?.isWrappingUp() == true
++
++    private fun decide(player: Player, bot: Autobot, words: String, russian: Boolean, say: (String) -> Unit) {
++        val life = bot.life ?: return
++        Attention.talked(bot, player)
++        CoScopes.generalScope.launch {
++            val hour = ZonedDateTime.now(ZoneId.of(AutobotData.settings.populationTimeZone)).hour
++            val night = hour in 0..5
++            val usual = usualPercent(bot, player, night, life.persuadedTimes)
++            val stay = if (life.persuadedTimes >= MAX_TIMES) false else Decisions.ask(bot, "stay",
++                    "It is $hour:00${if (night) " at night" else ""}. You were about to log off for today " +
++                            "(asked to stay ${life.persuadedTimes} times already this session). " +
++                            "${player.name} (${Persona.relationText(bot, player)}) writes: \"${words.take(200)}\"",
++                    listOf(Choice("STAY", "play another 20-60 minutes", usual), Choice("LEAVE", "log off as planned", 100 - usual)))
++                    ?.let { it == "STAY" } ?: (Rnd.get(100) < usual)
++            delay(Rnd.get(1500, 4000).toLong())
++            if (!bot.isOnline) return@launch
++            if (stay) {
++                val minutes = Rnd.get(EXTEND_MIN, EXTEND_MAX)
++                life.persuaded(minutes)
++                say((if (russian) stayRu else stayEn).random())
++                if (AutobotData.settings.llmLog) println("Autobots llm: ${player.name} talked ${bot.name} into $minutes more min")
++            } else say((if (russian) leaveRu else leaveEn).random())
++        }
++    }
++
++    private fun usualPercent(bot: Autobot, player: Player, night: Boolean, times: Int): Int {
++        val base = when (Sociability.of(bot)) {
++            Sociability.Loner -> 15
++            Sociability.Regular -> 40
++            Sociability.TeamPlayer -> 65
++        }
++        return (base + Relations.affinity(bot, player) / 2 - (if (night) 20 else 0) - times * 20).coerceIn(5, 90)
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Understand.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Understand.kt
+new file mode 100644
+index 0000000..28ab55a
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Understand.kt
+@@ -0,0 +1,48 @@
++package dev.l2j.autobots.population.llm
++
++import dev.l2j.autobots.AutobotData
++
++/**
++ * Reads what a player meant when the keyword rules found nothing: the model rewrites free text ("может посидим, я
++ * пустой", "у тебя лук лишний есть?") into one of the short commands the game code already understands ("rest",
++ * "sell bow"), or says it is just talk. The command then goes through the same code as typed keywords, with all its
++ * checks; the model never acts by itself.
++ */
++internal object Understand {
++    enum class Channel(val commands: String) {
++        Whisper("""
++            sell <item in English> - they want to buy an item from you or ask if you have it (e.g. "sell bow", "sell armor")
++            lend me <item in English or adena amount like 5k> - they ask to borrow from you
++            lend you <item in English> - they offer to lend you their item
++            give back - they want back what they lent you
++            invite - they want to join your party
++            stay - they ask you to keep playing, not to log off yet
++        """.trimIndent()),
++        Party("""
++            assist me - they want the party to attack their target
++            rest - they want the party to sit and recover HP/MP
++            buff - they ask for buffs
++            raid - they suggest going for a raid boss
++            change spot - they want to hunt somewhere else
++            brb - they step away for a moment
++            bye - they are leaving the party
++            stay - they ask you to keep playing, not to log off yet
++        """.trimIndent());
++    }
++
++    private const val NONE = "NONE"
++
++    /** @return the command, or null when the line is just talk, the model is off for chat, or it failed. */
++    suspend fun command(text: String, channel: Channel): String? {
++        if (!AutobotData.settings.llmUnderstand || !Llm.near.available) return null
++        val system = "You map a Lineage 2 player's chat message to a game command. Commands:\n${channel.commands}\n" +
++                "Answer with one command exactly as written, filling <...> from the message (item names in English, short), " +
++                "or $NONE if the message is small talk, a question or anything else. Nothing more."
++        val reply = Llm.near.chat(system, listOf(LlmMessage("user", text.take(300))), 24) ?: return null
++        val line = reply.text.lineSequence().firstOrNull()?.trim()?.trim('"', '.', '\'')?.lowercase() ?: return null
++        if (line.isEmpty() || line.uppercase() == NONE) return null
++        // Only a command from the list is passed on.
++        val verbs = channel.commands.lines().map { it.substringBefore(" -").substringBefore(" <").trim() }
++        return line.takeIf { l -> verbs.any { l == it || l.startsWith("$it ") } }?.take(80)
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidPlanner.kt b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidPlanner.kt
+index 93dc1e2..075cb7a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidPlanner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidPlanner.kt
+@@ -8,6 +8,8 @@ import dev.l2j.autobots.population.group.PartyPlan
+ import dev.l2j.autobots.population.group.Role
+ import dev.l2j.autobots.utils.distance
+ import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.CoScopes
++import kotlinx.coroutines.launch
+ import net.sf.l2j.commons.random.Rnd
+ import net.sf.l2j.gameserver.model.actor.Player
+ import net.sf.l2j.gameserver.model.group.Party
+@@ -107,11 +109,44 @@ internal object RaidPlanner {
+             Temper.Normal -> 30
+             Temper.Gambler -> 50
+         } * settings.raidChancePercent / 100
++        if (dev.l2j.autobots.population.llm.Decisions.usable(leader)) {
++            askModel(leader, party, chance)
++            return
++        }
+         if (Rnd.get(100) >= chance) return
+         val boss = choose(leader, party) ?: return
+         start(leader, party, boss, russian = Rnd.get(100) < 50)
+     }
+ 
++    /** The leader thinks it over with the language model: which of the bosses that fit, or none now. */
++    private fun askModel(leader: Autobot, party: Party, chance: Int) {
++        val bosses = RaidBosses.all.asSequence()
++                .filter { fits(party, it) && RaidBosses.mayBeAlive(it) && calls.values.none { (raid, _) -> raid.boss === it } }
++                .map { it to distance(leader.location(), it.location) }
++                .filter { it.second < MAX_TRIP }
++                .sortedBy { it.second }
++                .take(3).toList()
++        if (bosses.isEmpty()) return
++        val roles = party.members.groupingBy { Role.of(it.classId) }.eachCount().entries.joinToString { "${it.value} ${it.key.name.lowercase()}" }
++        val choices = bosses.mapIndexed { i, (boss, distance) ->
++            dev.l2j.autobots.population.llm.Choice("BOSS${i + 1}", "go for ${boss.name}, level ${boss.level}, ${(distance / 1000).toInt()}k away", chance / bosses.size)
++        } + dev.l2j.autobots.population.llm.Choice("NOT_NOW", "keep hunting, no raid now", 100 - chance)
++        val levels = "${party.members.minOf { it.level }}-${party.members.maxOf { it.level }}"
++        CoScopes.generalScope.launch {
++            val key = dev.l2j.autobots.population.llm.Decisions.ask(leader, "raid",
++                    "You lead a party of ${party.membersCount} ($roles), levels $levels, everyone alive and rested. " +
++                            "A raid boss gives good drops but can wipe the party.", choices)
++            val boss = when {
++                key == null -> if (Rnd.get(100) < chance) choose(leader, party) else null
++                key.startsWith("BOSS") -> bosses.getOrNull(key.removePrefix("BOSS").toInt() - 1)?.first
++                else -> null
++            } ?: return@launch
++            // The party may have changed while the leader was thinking.
++            if (leader.party !== party || party.leader !== leader || raidOf(party) != null || !ready(party, leader)) return@launch
++            start(leader, party, boss, russian = Rnd.get(100) < 50)
++        }
++    }
++
+     /** A player in the party suggests a raid: the leader agrees if a boss fits, else says why not. */
+     fun proposedByPlayer(party: Party, russian: Boolean): GroupChat.Line {
+         val leader = party.leader as? Autobot ?: return GroupChat.Line.RaidNotLeader
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
+index 9f8e5ca..11056cb 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
+@@ -68,10 +68,10 @@ internal object PlayerTrade {
+     // ---- Whispers ----
+ 
+     /** A whisper from a player to a population bot. @return true if it was about trading. */
+-    fun onWhisper(player: Player, bot: Autobot, text: String): Boolean {
++    fun onWhisper(player: Player, bot: Autobot, text: String, russian: Boolean = RUSSIAN.containsMatchIn(text)): Boolean {
+         // A bot behind a store haggles over its store (economy); the trade window is for bots out of a store.
+         if (!SocialTrade.enabled || !SocialTrade.isPopulation(bot) || player is Autobot || bot.isInStoreMode) return false
+-        language[player.objectId] = RUSSIAN.containsMatchIn(text)
++        language[player.objectId] = russian
+         when {
+             RETURN.containsMatchIn(text) -> onReturnAsked(player, bot)
+             LEND_TO_BOT.containsMatchIn(text) -> onLendOffered(player, bot, text)

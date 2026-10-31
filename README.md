@@ -61,7 +61,8 @@ docker compose exec db mariadb -ul2_game -pl2ai-game l2_game \
 
 ## LLM для ботов (по желанию)
 
-Боты отвечают на свободный разговор (ПМ, пати-чат, общий чат по имени) через языковую модель. Ключ в git не попадает:
+Боты рядом с игроком думают и разговаривают через языковую модель (OpenAI по ключу), остальные — по-старому
+(позже — на локальной Ollama). Без ключа или при сбое всё работает как раньше. Ключ в git не попадает:
 
 ```sh
 cp llm.env.example llm.env       # llm.env в .gitignore
@@ -70,8 +71,8 @@ docker compose up -d --build     # пересобрать с новым кодо
 docker compose logs game | grep "Autobots llm"   # "on: openai, model ..."
 ```
 
-Без `llm.env` модель выключена, боты ведут себя как раньше. Провайдер, модель и лимиты запросов — `llm*` в
-`data/autobots/config.xml` (подробно в `acis/autobots/README.md`); локальная Ollama — `llmProvider` = `ollama`.
+Провайдер, модель и лимиты запросов — `llmNear*` и `llmFar*` в `data/autobots/config.xml` (подробно в
+`acis/autobots/README.md`); локальная Ollama для дальних ботов — `llmFarProvider` = `ollama`.
 
 ## Геодата
 
