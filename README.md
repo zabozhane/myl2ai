@@ -59,6 +59,21 @@ docker compose exec db mariadb -ul2_game -pl2ai-game l2_game \
 
 Остановить: `docker compose down`. Полный сброс: `docker compose down -v && rm -rf logs`.
 
+## LLM для ботов (по желанию)
+
+Боты рядом с игроком думают и разговаривают через языковую модель (OpenAI по ключу), остальные — по-старому
+(позже — на локальной Ollama). Без ключа или при сбое всё работает как раньше. Ключ в git не попадает:
+
+```sh
+cp llm.env.example llm.env       # llm.env в .gitignore
+open -e llm.env                  # вписать OPENAI_API_KEY=sk-... и сохранить
+docker compose up -d --build     # пересобрать с новым кодом; потом при смене ключа хватит docker compose up -d game
+docker compose logs game | grep "Autobots llm"   # "on: openai, model ..."
+```
+
+Провайдер, модель и лимиты запросов — `llmNear*` и `llmFar*` в `data/autobots/config.xml` (подробно в
+`acis/autobots/README.md`); локальная Ollama для дальних ботов — `llmFarProvider` = `ollama`.
+
 ## Геодата
 
 aCis 382 загружает только формат `.l2d` (`XX_YY.l2d`), форматы L2J (`.l2j`) и L2OFF (`_conv.dat`) нужно конвертировать штатным `GeoDataConverter`. Геодата в git не хранится и лежит в `./geodata/`; без неё сервер стартует (entrypoint отключает список регионов), но без коллизий и линии видимости.

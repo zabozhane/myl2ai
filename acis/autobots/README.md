@@ -276,3 +276,36 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     and waits for the logout there (or keeps a store, as before). AFK and going-home bots do not join parties.
   - `populationSessionLog` prints every switch with its reason (`Autobots session: <name> lv N Hunt -> Afk for 12 min
     (died)`); `Autobots session summary:` every 10 minutes counts hunting, trading, AFK, going home and party bots.
+- `l2autobots-llm.patch` - the bots' language models (stage 5, `population/llm/`), applied last.
+  - `LlmProvider` is the one interface the rest of the code talks to; `OpenAiCompatibleProvider` speaks the OpenAI
+    Chat Completions API, which OpenAI, Ollama and most vendors share. Provider and model are strings in `config.xml`.
+  - Two tiers (`Llm.near`, `Llm.far`, settings `llmNear*` / `llmFar*`). `Attention` puts a bot in the near tier when a
+    real player is within `llmNearRange`, in its party, or talked to it in the last 10 minutes. Defaults: near = OpenAI
+    `gpt-5.4-mini`, far = off (bots far from players run on the code as before); later far = `ollama`.
+  - Each tier has its own limits (per minute, per day, in flight; requests over them are dropped, not queued) and a
+    circuit breaker: 3 failed calls in a row pause the tier for 10 minutes. Off, paused, over a limit or no answer in
+    time: the game code decides and talks the old way. Calls run in coroutines on Java's async HTTP client and never
+    block a game thread. `llmReasoningEffort` goes to reasoning models; one that rejects it is retried without it.
+  - Key from the environment (`OPENAI_API_KEY`, or `LLM_API_KEY` for `compatible`), filled by docker-compose from the
+    untracked `llm.env` (template `llm.env.example`).
+  - `Decisions` (`llmDecisions`): the code offers a menu of what is allowed now, with how often the code itself picks
+    each option, and the model answers with a key; anything else falls back to the code. `ask` waits up to 6 s where
+    the code already runs in a coroutine; `prepare`/`take` ask ahead where the answer is needed on the spot. Forks:
+    the next session segment (asked 90 s before the segment ends, `SessionPlan.prepareNext`), accepting a party invite
+    after the hard rules (busy, PK, level gap), a bot party leader's raid (one of the 3 closest bosses that fit, or not
+    now), who leaves an overfull party, and staying longer when asked.
+  - `Persuasion`: 10-20 minutes before logoff a bot tells the real players it plays or talks with that it is leaving
+    soon; "останься / ещё часик / stay" (or the same in other words, via `Understand`) makes it decide to play 20-60
+    minutes more (`LifeBehavior.stayUntil`, at most twice a session). Without a model the code decides by
+    sociability, liking and the hour.
+  - `Understand` (`llmUnderstand`): a whisper or party line the keyword rules missed goes to the near model, which
+    rewrites it into one of the commands the code already knows ("rest", "sell bow", "lend me 5k", "invite", "stay")
+    or NONE; the command runs through the same code with all its checks.
+  - `BotTalk` (`llmChat`, always the near model): free talk the code has no answer for, in whispers, party chat
+    (the bot named, otherwise a random one with `llmPartyAnswerPercent` chance) and nearby chat that names a bot.
+    Each conversation keeps its last 10 lines for 30 minutes; a bot speaks at most once per 4 s, after a typing delay.
+  - `Persona`: the system prompt from traits the bot already has (sociability, enchant temper, greed, manners,
+    honesty, relation and trust to the speaker, PK) and a typing manner of its own; talking it promises nothing.
+  - Log: `Autobots llm:` on start (each tier on/off and why), errors, pauses, every answer, reading and decision with
+    `llmLog`; `Autobots llm summary:` every 10 minutes per tier (requests, failures, dropped, tokens, latency) and
+    decisions (asked, chosen by the model, left to the code).

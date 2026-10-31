@@ -3,3 +3,4 @@
 !/geodata/.gitkeep
 /client/*
 !/client/.gitkeep
+/llm.env

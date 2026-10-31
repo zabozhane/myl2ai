@@ -63,6 +63,10 @@ services:
   game:
     <<: *acis-image
     command: ["game"]
+    # The bots' language model key (OPENAI_API_KEY) lives in llm.env, which is not in git; see llm.env.example.
+    env_file:
+      - path: ./llm.env
+        required: false
     environment:
       <<: *db-credentials
       GAME_JAVA_OPTS: ${GAME_JAVA_OPTS}
