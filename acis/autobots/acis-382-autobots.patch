@@ -96,7 +96,21 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/handler/AdminCommandHa
 diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java work/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java
 --- a/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java
 +++ b/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.java
-@@ -226,11 +226,11 @@
+@@ -73,6 +73,13 @@
+ 						usedObjectIds.add(rs.getInt(1));
+ 				}
+ 				
++				// Bots live in their own table: without it, a new object can take the id of an offline bot.
++				try (ResultSet rs = st.executeQuery("SELECT obj_Id FROM autobots"))
++				{
++					while (rs.next())
++						usedObjectIds.add(rs.getInt(1));
++				}
++				
+ 				try (ResultSet rs = st.executeQuery("SELECT object_id FROM items"))
+ 				{
+ 					while (rs.next())
+@@ -226,11 +233,11 @@
  				cleanCount += stmt.executeUpdate("DELETE FROM character_hennas WHERE character_hennas.char_obj_id NOT IN (SELECT obj_Id FROM characters);");
  				cleanCount += stmt.executeUpdate("DELETE FROM character_macroses WHERE character_macroses.char_obj_id NOT IN (SELECT obj_Id FROM characters);");
  				cleanCount += stmt.executeUpdate("DELETE FROM character_memo WHERE character_memo.charId NOT IN (SELECT obj_Id FROM characters);");
@@ -110,7 +124,7 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.ja
  				cleanCount += stmt.executeUpdate("DELETE FROM character_skills_save WHERE character_skills_save.char_obj_id NOT IN (SELECT obj_Id FROM characters);");
  				cleanCount += stmt.executeUpdate("DELETE FROM character_subclasses WHERE character_subclasses.char_obj_id NOT IN (SELECT obj_Id FROM characters);");
  				cleanCount += stmt.executeUpdate("DELETE FROM cursed_weapons WHERE cursed_weapons.playerId NOT IN (SELECT obj_Id FROM characters);");
-@@ -249,7 +249,7 @@
+@@ -249,7 +256,7 @@
  				cleanCount += stmt.executeUpdate("DELETE FROM auction_bid WHERE auctionId IN (SELECT id FROM clanhall WHERE ownerId <> 0 AND sellerClanName='');");
  				
  				// Clan related
@@ -119,7 +133,7 @@ diff -ruN base/aCis_gameserver/java/net/sf/l2j/gameserver/idfactory/IdFactory.ja
  				cleanCount += stmt.executeUpdate("DELETE FROM auction_bid WHERE auction_bid.bidderId NOT IN (SELECT clan_id FROM clan_data);");
  				cleanCount += stmt.executeUpdate("DELETE FROM clanhall_functions WHERE clanhall_functions.hall_id NOT IN (SELECT id FROM clanhall WHERE ownerId <> 0);");
  				cleanCount += stmt.executeUpdate("DELETE FROM clan_privs WHERE clan_privs.clan_id NOT IN (SELECT clan_id FROM clan_data);");
-@@ -260,7 +260,7 @@
+@@ -260,7 +267,7 @@
  				cleanCount += stmt.executeUpdate("DELETE FROM siege_clans WHERE siege_clans.clan_id NOT IN (SELECT clan_id FROM clan_data);");
  				
  				// Items
