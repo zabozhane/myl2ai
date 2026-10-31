@@ -4,3 +4,8 @@
 /client/*
 !/client/.gitkeep
 /llm.env
+
+# Local downloads and macOS junk
+geodata-download/
+backups/
+.DS_Store
