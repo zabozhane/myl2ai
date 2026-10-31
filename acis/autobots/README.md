@@ -276,3 +276,23 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     and waits for the logout there (or keeps a store, as before). AFK and going-home bots do not join parties.
   - `populationSessionLog` prints every switch with its reason (`Autobots session: <name> lv N Hunt -> Afk for 12 min
     (died)`); `Autobots session summary:` every 10 minutes counts hunting, trading, AFK, going home and party bots.
+- `l2autobots-llm.patch` - the bots' language model (stage 5, `population/llm/`), applied last.
+  - `LlmProvider` is the one interface the rest of the code talks to; `OpenAiCompatibleProvider` speaks the OpenAI
+    Chat Completions API, which OpenAI, Ollama and most vendors share. `llmProvider` in `config.xml` picks `openai`,
+    `ollama` (host Ollama at `http://host.docker.internal:11434/v1`), `compatible` (`llmBaseUrl` + `LLM_API_KEY`) or `off`;
+    `llmModel` is any model name of that provider. Switching provider or model is a config change, not code.
+  - The key is read from the environment (`OPENAI_API_KEY`), which docker-compose fills from the untracked `llm.env`
+    (template `llm.env.example`). No key: the model stays off and bots behave as before.
+  - Calls run in coroutines on Java's async HTTP client and never block a game thread. `Llm` keeps at most 4 calls in
+    flight and drops (does not queue) requests over `llmMaxRequestsPerMinute` / `llmMaxRequestsPerDay`, so the bill has
+    a ceiling; a dropped or failed call means the bot just stays silent. `llmReasoningEffort` is sent to reasoning
+    models; a model that rejects it is retried once without it and never sent it again.
+  - `BotTalk`: free talk the game code has no answer for. A whisper that is not about trading or joining a party, a
+    party line that is not a suggestion (answered by the bot it names, otherwise by a random bot with
+    `llmPartyAnswerPercent` chance), a line in general chat nearby that names a bot. Each conversation keeps its last
+    10 lines for 30 minutes; a bot speaks at most once per 4 s and waits a typing delay before sending.
+  - `Persona`: the system prompt is built from traits the bot already has (sociability, enchant temper, greed, manners,
+    honesty, relation and trust to the speaker, PK) plus a typing manner of its own. The bot is told it is a player,
+    answers in the speaker's language in one short line and promises nothing: actions stay in the game code.
+  - Log: `Autobots llm:` on start (on/off and why), errors, and every answer with `llmLog`; `Autobots llm summary:` every
+    10 minutes with requests, failures, dropped, tokens and latency.

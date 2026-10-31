@@ -1,0 +1,581 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 7cdc9fa..74649dc 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -73,4 +73,23 @@
+   <opportunistPercent>10</opportunistPercent>
+   <loanMaxDays>3</loanMaxDays>
+   <tradeLog>true</tradeLog>
++  <!-- Language model (stage 5): bots answer free talk in whispers, party chat and nearby chat (when named) with
++       their own character. Decisions stay in the game code. llmProvider: off, openai, ollama (local, OpenAI-compatible
++       API on the Docker host), compatible (any OpenAI-compatible vendor at llmBaseUrl with LLM_API_KEY).
++       The key is never in this file: OPENAI_API_KEY comes from llm.env next to docker-compose.yml; without it the
++       model stays off. llmModel is any chat model name of the provider; mini/nano models are enough for chat.
++       llmReasoningEffort is sent to reasoning models (none, minimal, low...); empty sends nothing, and a model that
++       rejects it is retried without. Requests over the per-minute or per-day limit are dropped (the bot stays silent).
++       llmPartyAnswerPercent: how often a bot answers a party line that names nobody. llmLog prints every answer. -->
++  <llmProvider>openai</llmProvider>
++  <llmModel>gpt-5.4-mini</llmModel>
++  <llmBaseUrl></llmBaseUrl>
++  <llmReasoningEffort>none</llmReasoningEffort>
++  <llmMaxReplyTokens>120</llmMaxReplyTokens>
++  <llmTimeoutSeconds>20</llmTimeoutSeconds>
++  <llmMaxRequestsPerMinute>20</llmMaxRequestsPerMinute>
++  <llmMaxRequestsPerDay>1500</llmMaxRequestsPerDay>
++  <llmChat>true</llmChat>
++  <llmPartyAnswerPercent>60</llmPartyAnswerPercent>
++  <llmLog>true</llmLog>
+ </settings>
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index cc77a3c..ae97e4f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -14,6 +14,7 @@ import dev.l2j.autobots.models.BotChat
+ import dev.l2j.autobots.models.ChatType
+ import dev.l2j.autobots.population.PopulationManager
+ import dev.l2j.autobots.population.group.GroupChat
++import dev.l2j.autobots.population.llm.BotTalk
+ import dev.l2j.autobots.population.group.PartyInvites
+ import dev.l2j.autobots.ui.AutobotsUi
+ import dev.l2j.autobots.utils.*
+@@ -90,6 +91,7 @@ object AutobotsManager {
+         }
+         when(type){
+             0 -> { // chat all
++                BotTalk.onNearbyChat(chatter, text, activeBots.values.filter { MathUtil.checkIfInRange(1250, it, chatter, true) && !BlockList.isBlocked(it, chatter) })
+                 activeBots.forEach {
+                     if(MathUtil.checkIfInRange(1250, it.value, chatter, true) && !BlockList.isBlocked(it.value, chatter)) {
+                         it.value.addChat(BotChat(ChatType.All, chatter.name, text))
+@@ -107,7 +109,7 @@ object AutobotsManager {
+             2 -> { // pm "
+                 if(target == null) return false
+                 val bot = activeBots.getOrElse(target) {null} ?: return false
+-                if (!PlayerTrade.onWhisper(chatter, bot, text)) GroupChat.onWhisper(chatter, bot, text)
++                if (!PlayerTrade.onWhisper(chatter, bot, text) && !GroupChat.onWhisper(chatter, bot, text)) BotTalk.onWhisper(chatter, bot, text)
+ 
+                 World.getInstance().players.filter { it.isGM }.forEach {
+                     it.sendPacket(CreatureSay(0, 15, "${chatter.name} -> ${bot.name}", text))
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index e0fc229..8ff7ba0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -60,7 +60,18 @@ internal data class AutobotSettings(
+         @JsonProperty("scammerPercent") var scammerPercent: Int = 5,
+         @JsonProperty("opportunistPercent") var opportunistPercent: Int = 10,
+         @JsonProperty("loanMaxDays") var loanMaxDays: Int = 3,
+-        @JsonProperty("tradeLog") var tradeLog: Boolean = true
++        @JsonProperty("tradeLog") var tradeLog: Boolean = true,
++        @JsonProperty("llmProvider") var llmProvider: String = "openai",
++        @JsonProperty("llmModel") var llmModel: String = "gpt-5.4-mini",
++        @JsonProperty("llmBaseUrl") var llmBaseUrl: String = "",
++        @JsonProperty("llmReasoningEffort") var llmReasoningEffort: String = "none",
++        @JsonProperty("llmMaxReplyTokens") var llmMaxReplyTokens: Int = 120,
++        @JsonProperty("llmTimeoutSeconds") var llmTimeoutSeconds: Int = 20,
++        @JsonProperty("llmMaxRequestsPerMinute") var llmMaxRequestsPerMinute: Int = 20,
++        @JsonProperty("llmMaxRequestsPerDay") var llmMaxRequestsPerDay: Int = 1500,
++        @JsonProperty("llmChat") var llmChat: Boolean = true,
++        @JsonProperty("llmPartyAnswerPercent") var llmPartyAnswerPercent: Int = 60,
++        @JsonProperty("llmLog") var llmLog: Boolean = true
+ ){
+     @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
+         setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index 5614d6b..7b1ffa1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -107,6 +107,7 @@ internal object PopulationManager {
+                 GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
+                 SessionPlan.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
+                 RaidLog.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
++                dev.l2j.autobots.population.llm.Llm.summary()
+             }
+             val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
+             if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
+index a902e7f..e05d361 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
+@@ -144,7 +144,9 @@ internal object GroupChat {
+ 
+         val russian = isRussian(text)
+         playerLanguage[chatter] = russian
+-        val intent = Intent.values().firstOrNull { it.pattern.containsMatchIn(text) } ?: return
++        // Not a suggestion to the party: just talk, answered through the language model when there is one.
++        val intent = Intent.values().firstOrNull { it.pattern.containsMatchIn(text) }
++                ?: return dev.l2j.autobots.population.llm.BotTalk.onPartyChat(chatter, party, bots, text)
+         // One voice answers: the bot leading the party, else any bot in it.
+         val speaker = (party.leader as? Autobot)?.takeIf { it in bots } ?: bots.random()
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
+new file mode 100644
+index 0000000..f3b51e2
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
+@@ -0,0 +1,130 @@
++package dev.l2j.autobots.population.llm
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.group.GroupFinder
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.group.Party
++import java.util.concurrent.ConcurrentHashMap
++
++/**
++ * Free talk through the language model: whatever a player says to a bot that the game code has no answer for
++ * (a whisper that is not about trading or joining, party chat that is not a suggestion, a nearby line that
++ * names the bot). Decisions stay in the game code; this only gives the bot a voice. Without a model it does
++ * nothing and the bots stay silent as before.
++ *
++ * Each conversation (bot and player in whispers or nearby, the whole party in party chat) keeps its last lines
++ * for half an hour, so the bot remembers what was just said.
++ */
++internal object BotTalk {
++    private const val HISTORY_LINES = 10
++    private const val HISTORY_TTL_MS = 30 * 60_000L
++    private const val BOT_COOLDOWN_MS = 4000L
++    private const val MAX_INPUT_CHARS = 300
++    private const val MAX_LINE_CHARS = 120
++
++    private class Conversation {
++        val lines = ArrayList<LlmMessage>()
++        var touched = System.currentTimeMillis()
++    }
++
++    private val conversations = ConcurrentHashMap<String, Conversation>()
++    private val lastSpoke = ConcurrentHashMap<Int, Long>()
++
++    private val enabled get() = AutobotData.settings.llmChat && Llm.enabled
++
++    /** A whisper no other module took. */
++    fun onWhisper(player: Player, bot: Autobot, text: String) {
++        if (!enabled || player is Autobot) return
++        val situation = buildString {
++            append("${player.name} whispers to you in private messages")
++            append(", you are ").append(activity(bot))
++        }
++        respond(bot, player, "pm:${bot.objectId}:${player.objectId}", "${player.name}: $text", situation) { bot.tell(player.name, it) }
++    }
++
++    /** Party chat that was not a suggestion to the party: one bot answers, the one named or a random one. */
++    fun onPartyChat(player: Player, party: Party, bots: List<Autobot>, text: String) {
++        if (!enabled || player is Autobot || bots.isEmpty()) return
++        val named = bots.firstOrNull { text.contains(it.name, ignoreCase = true) }
++        // Not every line needs an answer: people chat in party without expecting one.
++        if (named == null && Rnd.get(100) >= AutobotData.settings.llmPartyAnswerPercent) {
++            remember("party:${System.identityHashCode(party)}", LlmMessage("user", "${player.name}: $text"))
++            return
++        }
++        val speaker = named ?: bots.random()
++        val members = party.members.joinToString(", ") { "${it.name} (${it.level} ${it.template.className})" }
++        val situation = "party chat; you hunt together with $members near ${GroupFinder.placeName(speaker)}" +
++                (if (party.leader === speaker) ", you lead the party" else "")
++        respond(speaker, player, "party:${System.identityHashCode(party)}", "${player.name}: $text", situation, group = true) { speaker.partySay(it) }
++    }
++
++    /** Normal chat nearby: only a bot addressed by name answers. */
++    fun onNearbyChat(player: Player, text: String, nearby: Collection<Autobot>) {
++        if (!enabled || player is Autobot) return
++        val bot = nearby.firstOrNull { text.contains(it.name, ignoreCase = true) } ?: return
++        val situation = "${player.name} says something to you in general chat nearby, others can see it; you are ${activity(bot)}"
++        respond(bot, player, "near:${bot.objectId}:${player.objectId}", "${player.name}: $text", situation) { bot.say(it) }
++    }
++
++    private fun activity(bot: Autobot): String = when {
++        bot.isInStoreMode -> "sitting in your private store in ${GroupFinder.placeName(bot)}"
++        bot.isInParty -> "hunting in a party near ${GroupFinder.placeName(bot)}"
++        bot.isInCombat -> "fighting monsters near ${GroupFinder.placeName(bot)}"
++        else -> "near ${GroupFinder.placeName(bot)}"
++    }
++
++    private fun respond(bot: Autobot, player: Player, key: String, line: String, situation: String,
++                        group: Boolean = false, send: (String) -> Unit) {
++        val now = System.currentTimeMillis()
++        val previous = lastSpoke[bot.objectId]
++        if (previous != null && now - previous < BOT_COOLDOWN_MS) {
++            remember(key, LlmMessage("user", line.take(MAX_INPUT_CHARS)))
++            return
++        }
++        lastSpoke[bot.objectId] = now
++        val history = remember(key, LlmMessage("user", line.take(MAX_INPUT_CHARS)))
++        CoScopes.generalScope.launch {
++            val started = System.currentTimeMillis()
++            val reply = Llm.chat(Persona.system(bot, player, situation), history) ?: return@launch
++            val answer = clean(reply.text, bot.name) ?: return@launch
++            // Typing takes time: about a second for 15 characters, after reading the line.
++            val typing = 1200L + answer.length * 70L + Rnd.get(0, 1500)
++            delay((typing - (System.currentTimeMillis() - started)).coerceAtLeast(300L))
++            if (!bot.isOnline || !player.isOnline) return@launch
++            // In party chat several bots answer; each sees the others' lines as part of the transcript.
++            remember(key, if (group) LlmMessage("user", "${bot.name}: $answer") else LlmMessage("assistant", answer))
++            send(answer)
++            if (AutobotData.settings.llmLog) println("Autobots llm: ${bot.name} -> ${player.name}: $answer")
++        }
++    }
++
++    /** Models sometimes quote the line or sign it with the name; chat wants one bare line. */
++    private fun clean(text: String, name: String): String? {
++        var line = text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() } ?: return null
++        if (line.startsWith("$name:", ignoreCase = true)) line = line.substring(name.length + 1).trim()
++        line = line.trim('"', '«', '»', '“', '”')
++        return line.take(MAX_LINE_CHARS).ifBlank { null }
++    }
++
++    /** Adds a line and returns a copy of the conversation to send. */
++    private fun remember(key: String, message: LlmMessage): List<LlmMessage> {
++        val now = System.currentTimeMillis()
++        if (conversations.size > 500) conversations.entries.removeIf { now - it.value.touched > HISTORY_TTL_MS }
++        val conversation = conversations.compute(key) { _, old -> if (old == null || now - old.touched > HISTORY_TTL_MS) Conversation() else old }!!
++        synchronized(conversation) {
++            conversation.touched = now
++            // Chat models want user and assistant turns; several player lines in a row are merged into one turn.
++            val last = conversation.lines.lastOrNull()
++            if (last != null && last.role == message.role) conversation.lines[conversation.lines.size - 1] = LlmMessage(message.role, last.content + "\n" + message.content)
++            else conversation.lines += message
++            while (conversation.lines.size > HISTORY_LINES) conversation.lines.removeAt(0)
++            while (conversation.lines.firstOrNull()?.role == "assistant") conversation.lines.removeAt(0)
++            return conversation.lines.toList()
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt
+new file mode 100644
+index 0000000..6754e6f
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt
+@@ -0,0 +1,119 @@
++package dev.l2j.autobots.population.llm
++
++import dev.l2j.autobots.AutobotData
++import kotlinx.coroutines.sync.Semaphore
++import kotlinx.coroutines.sync.withPermit
++import java.time.Duration
++import java.time.LocalDate
++import java.util.ArrayDeque
++import java.util.concurrent.atomic.AtomicInteger
++import java.util.concurrent.atomic.AtomicLong
++
++/**
++ * The bots' language model: one shared [LlmProvider] chosen by `llmProvider` in `config.xml`, behind limits that keep
++ * the bill and the server safe. Requests over the per-minute or per-day limit are dropped, not queued: a bot that
++ * cannot think of an answer stays silent like a busy player.
++ *
++ * The API key never lives in the repository: it comes from the environment (`OPENAI_API_KEY`, or `LLM_API_KEY` for
++ * other vendors), which docker-compose fills from the untracked `llm.env`.
++ */
++internal object Llm {
++    private const val MAX_IN_FLIGHT = 4
++
++    @Volatile private var provider: LlmProvider? = null
++    @Volatile private var initialized = false
++    private val inFlight = Semaphore(MAX_IN_FLIGHT)
++
++    private val recent = ArrayDeque<Long>()
++    private var day: LocalDate = LocalDate.now()
++    private var today = 0
++
++    private val requests = AtomicInteger()
++    private val failures = AtomicInteger()
++    private val dropped = AtomicInteger()
++    private val inputTokens = AtomicLong()
++    private val outputTokens = AtomicLong()
++    private val latencyMs = AtomicLong()
++
++    val enabled: Boolean get() = current() != null
++
++    /** Asks the model; null when it is off, over a limit or failed. Suspends, never blocks a thread. */
++    suspend fun chat(system: String, messages: List<LlmMessage>, maxTokens: Int = AutobotData.settings.llmMaxReplyTokens): LlmReply? {
++        val provider = current() ?: return null
++        if (!takeSlot()) {
++            dropped.incrementAndGet()
++            return null
++        }
++        return inFlight.withPermit {
++            val started = System.currentTimeMillis()
++            requests.incrementAndGet()
++            val reply = provider.chat(system, messages, maxTokens)
++            latencyMs.addAndGet(System.currentTimeMillis() - started)
++            if (reply == null) failures.incrementAndGet()
++            else {
++                inputTokens.addAndGet(reply.inputTokens.toLong())
++                outputTokens.addAndGet(reply.outputTokens.toLong())
++            }
++            reply
++        }
++    }
++
++    @Synchronized
++    private fun takeSlot(): Boolean {
++        val settings = AutobotData.settings
++        val now = System.currentTimeMillis()
++        if (LocalDate.now() != day) { day = LocalDate.now(); today = 0 }
++        while (recent.isNotEmpty() && recent.peekFirst() < now - 60_000L) recent.pollFirst()
++        if (recent.size >= settings.llmMaxRequestsPerMinute || today >= settings.llmMaxRequestsPerDay) return false
++        recent.addLast(now)
++        today++
++        return true
++    }
++
++    private fun current(): LlmProvider? {
++        if (!initialized) synchronized(this) {
++            if (!initialized) { provider = create(); initialized = true }
++        }
++        return provider
++    }
++
++    private fun create(): LlmProvider? {
++        val settings = AutobotData.settings
++        val kind = settings.llmProvider.trim().lowercase()
++        val timeout = Duration.ofSeconds(settings.llmTimeoutSeconds.toLong())
++        val key = System.getenv("LLM_API_KEY")?.takeIf { it.isNotBlank() } ?: System.getenv("OPENAI_API_KEY")?.takeIf { it.isNotBlank() }
++        val provider = when (kind) {
++            "", "off", "none" -> null
++            "openai" -> if (key == null) {
++                log("llmProvider is openai but OPENAI_API_KEY is not set (put it in llm.env next to docker-compose.yml), bots talk without the model")
++                null
++            } else OpenAiCompatibleProvider("openai", settings.llmBaseUrl.ifBlank { "https://api.openai.com/v1" }, key, settings.llmModel, settings.llmReasoningEffort, timeout)
++            // Ollama on the Docker host: http://host.docker.internal:11434/v1, no key, no reasoning_effort.
++            "ollama" -> OpenAiCompatibleProvider("ollama", settings.llmBaseUrl.ifBlank { "http://host.docker.internal:11434/v1" }, null, settings.llmModel, "", timeout)
++            // Any other vendor with an OpenAI-compatible API: llmBaseUrl, LLM_API_KEY and llmModel.
++            "compatible" -> if (settings.llmBaseUrl.isBlank()) { log("llmProvider is compatible but llmBaseUrl is empty"); null }
++                else OpenAiCompatibleProvider("compatible", settings.llmBaseUrl, key, settings.llmModel, settings.llmReasoningEffort, timeout)
++            else -> { log("unknown llmProvider '$kind' (off, openai, ollama, compatible)"); null }
++        }
++        log(if (provider == null) "off" else "on: ${provider.name}, model ${settings.llmModel}, " +
++                "up to ${settings.llmMaxRequestsPerMinute}/min and ${settings.llmMaxRequestsPerDay}/day")
++        return provider
++    }
++
++    fun log(message: String) {
++        if (AutobotData.settings.llmLog) println("Autobots llm: $message")
++    }
++
++    /** Every 10 minutes with the other summaries; counters restart after each. */
++    fun summary() {
++        if (current() == null) return
++        val count = requests.getAndSet(0)
++        val failed = failures.getAndSet(0)
++        val skipped = dropped.getAndSet(0)
++        val tokensIn = inputTokens.getAndSet(0)
++        val tokensOut = outputTokens.getAndSet(0)
++        val latency = latencyMs.getAndSet(0)
++        println("Autobots llm summary: requests $count, failed $failed, dropped by limits $skipped, tokens in $tokensIn out $tokensOut, " +
++                "avg ${if (count > 0) latency / count else 0} ms, today ${synchronized(this) { today }}/${AutobotData.settings.llmMaxRequestsPerDay}")
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/LlmProvider.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/LlmProvider.kt
+new file mode 100644
+index 0000000..8294509
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/LlmProvider.kt
+@@ -0,0 +1,19 @@
++package dev.l2j.autobots.population.llm
++
++/** One line of a conversation as chat models take it: role is "user" or "assistant". */
++internal data class LlmMessage(val role: String, val content: String)
++
++/** What a model answered and what it cost in tokens. */
++internal class LlmReply(val text: String, val inputTokens: Int, val outputTokens: Int)
++
++/**
++ * A language model behind the bots' heads. Swapping OpenAI for a local model (Ollama) or another vendor is a new
++ * implementation and a line in `config.xml`; nothing that talks through [Llm] knows which one answers.
++ * Implementations never block a game thread: [chat] suspends on the network call.
++ */
++internal interface LlmProvider {
++    val name: String
++
++    /** @return the model's answer, or null when the call failed (the reason is logged). */
++    suspend fun chat(system: String, messages: List<LlmMessage>, maxTokens: Int): LlmReply?
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/OpenAiCompatibleProvider.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/OpenAiCompatibleProvider.kt
+new file mode 100644
+index 0000000..01ddb14
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/OpenAiCompatibleProvider.kt
+@@ -0,0 +1,82 @@
++package dev.l2j.autobots.population.llm
++
++import com.fasterxml.jackson.databind.ObjectMapper
++import com.fasterxml.jackson.databind.node.ObjectNode
++import kotlinx.coroutines.future.await
++import java.net.URI
++import java.net.http.HttpClient
++import java.net.http.HttpRequest
++import java.net.http.HttpResponse
++import java.time.Duration
++
++/**
++ * The OpenAI Chat Completions API. Ollama, LM Studio, vLLM and most vendors speak the same protocol at their own
++ * base URL, so one class covers them; only the URL, the key and the model differ.
++ * @param reasoningEffort sent as `reasoning_effort` for reasoning models (GPT-5 family); empty sends nothing.
++ */
++internal class OpenAiCompatibleProvider(
++        override val name: String,
++        baseUrl: String,
++        private val apiKey: String?,
++        private val model: String,
++        reasoningEffort: String,
++        private val timeout: Duration
++) : LlmProvider {
++    private val endpoint = URI.create(baseUrl.trimEnd('/') + "/chat/completions")
++    private val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build()
++    private val json = ObjectMapper()
++    // A model that rejects reasoning_effort (gpt-4.1, most local models) is retried without it, once for good.
++    @Volatile private var reasoningEffort = reasoningEffort.trim()
++
++    override suspend fun chat(system: String, messages: List<LlmMessage>, maxTokens: Int): LlmReply? {
++        val response = post(body(system, messages, maxTokens)) ?: return null
++        if (response.statusCode() == 400 && reasoningEffort.isNotEmpty() && response.body().contains("reasoning")) {
++            Llm.log("model $model does not take reasoning_effort=$reasoningEffort, sending without it")
++            reasoningEffort = ""
++            return chat(system, messages, maxTokens)
++        }
++        if (response.statusCode() != 200) {
++            Llm.log("$name answered HTTP ${response.statusCode()}: ${response.body().take(300).replace('\n', ' ')}")
++            return null
++        }
++        return try {
++            val root = json.readTree(response.body())
++            val text = root.path("choices").path(0).path("message").path("content").asText("").trim()
++            val usage = root.path("usage")
++            if (text.isEmpty()) {
++                Llm.log("$name returned an empty answer (finish_reason=${root.path("choices").path(0).path("finish_reason").asText()})")
++                null
++            } else LlmReply(text, usage.path("prompt_tokens").asInt(0), usage.path("completion_tokens").asInt(0))
++        } catch (e: Exception) {
++            Llm.log("$name answer is not JSON: ${e.message}")
++            null
++        }
++    }
++
++    private fun body(system: String, messages: List<LlmMessage>, maxTokens: Int): String {
++        val root: ObjectNode = json.createObjectNode()
++        root.put("model", model)
++        val list = root.putArray("messages")
++        list.addObject().put("role", "system").put("content", system)
++        messages.forEach { list.addObject().put("role", it.role).put("content", it.content) }
++        // Reasoning models spend part of the budget thinking even at low effort; leave them room.
++        root.put("max_completion_tokens", if (reasoningEffort.isEmpty() || reasoningEffort == "none" || reasoningEffort == "minimal") maxTokens else maxTokens + 1000)
++        if (reasoningEffort.isNotEmpty()) root.put("reasoning_effort", reasoningEffort)
++        return json.writeValueAsString(root)
++    }
++
++    private suspend fun post(body: String): HttpResponse<String>? {
++        val request = HttpRequest.newBuilder(endpoint)
++                .timeout(timeout)
++                .header("Content-Type", "application/json")
++                .apply { if (!apiKey.isNullOrBlank()) header("Authorization", "Bearer $apiKey") }
++                .POST(HttpRequest.BodyPublishers.ofString(body))
++                .build()
++        return try {
++            client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
++        } catch (e: Exception) {
++            Llm.log("$name is unreachable at $endpoint: ${e.javaClass.simpleName} ${e.message ?: ""}")
++            null
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Persona.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Persona.kt
+new file mode 100644
+index 0000000..86ce1c4
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Persona.kt
+@@ -0,0 +1,93 @@
++package dev.l2j.autobots.population.llm
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.population.economy.Temper
++import dev.l2j.autobots.population.economy.TradeTemper
++import dev.l2j.autobots.population.group.Relations
++import dev.l2j.autobots.population.group.Sociability
++import dev.l2j.autobots.population.raid.Manners
++import dev.l2j.autobots.population.trade.Honesty
++import net.sf.l2j.gameserver.model.actor.Player
++
++/**
++ * Who a bot is when it talks: its character traits (fixed by the object id, the same ones that drive its trading,
++ * grouping and enchanting) turned into a short system prompt, plus a typing manner of its own. The model only
++ * gives the bot a voice; what the bot does is still decided by the game code, so the prompt forbids promises.
++ */
++internal object Persona {
++
++    /** How a bot types; fixed per bot so it is recognisable. */
++    private enum class Manner(val rule: String) {
++        Lazy("you type all lowercase, no punctuation, drop words, like 'да норм ща'"),
++        Sloppy("you type fast with occasional typos and no capital letters"),
++        Smiley("you type casually and often end with ')' or ':D'"),
++        Proper("you type in short normal sentences, still informal"),
++        Terse("you answer with one to three words when you can");
++
++        companion object {
++            fun of(bot: Player): Manner = values()[Math.floorMod(bot.objectId * 40503 + 5, values().size)]
++        }
++    }
++
++    fun system(bot: Autobot, other: Player?, situation: String): String {
++        val traits = mutableListOf<String>()
++        traits += when (Sociability.of(bot)) {
++            Sociability.Loner -> "a loner who prefers to play solo and is a bit curt with strangers"
++            Sociability.Regular -> "friendly enough, chats when there is time"
++            Sociability.TeamPlayer -> "sociable, likes parties and small talk"
++        }
++        traits += when (Temper.of(bot.objectId)) {
++            Temper.Cautious -> "cautious, never risks gear on enchanting"
++            Temper.Normal -> "takes reasonable risks"
++            Temper.Gambler -> "a gambler who loves enchanting and risky plays"
++        }
++        val greed = TradeTemper.greed(bot)
++        if (greed > 0.7) traits += "greedy about adena and prices"
++        else if (greed < 0.3) traits += "easy-going about money"
++        if (Manners.of(bot) == Manners.Rude) traits += "rude and cocky, teases people"
++        when (Honesty.of(bot)) {
++            Honesty.Scammer -> traits += "secretly a scammer: you talk smoothly and sweet, and like to sound generous"
++            Honesty.Opportunist -> traits += "looks after yourself first"
++            Honesty.Honest -> {}
++        }
++
++        val relation = other?.let { relationText(bot, it) }
++        return buildString {
++            append("You are ${bot.name}, a ${sex(bot)} ${bot.race.name.lowercase()} ${bot.template.className} of level ${bot.level} ")
++            append("playing Lineage 2 Interlude on a small private server. You are a real player at the keyboard, ")
++            append("never an AI, a bot or an assistant; if someone asks whether you are a bot, laugh it off like a player would.\n")
++            append("Character: ${traits.joinToString("; ")}.\n")
++            append("Typing manner: ${Manner.of(bot).rule}.\n")
++            append("Right now: $situation.\n")
++            if (relation != null) append("About ${other.name}: $relation.\n")
++            append("Rules: answer in the language you were written to (Russian by default), in MMO chat slang. ")
++            append("One short chat line, under 100 characters, no quotes, no emoji pictures, no name prefix. ")
++            append("Do not promise to do anything (follow, give items, go somewhere, invite): ")
++            append("you only chat, your actions happen in the game separately, so answer vaguely if asked. ")
++            append("Don't invent server facts you don't know; say you don't know. Stay in character and in the game world.")
++        }
++    }
++
++    private fun sex(bot: Player) = if (bot.appearance.sex.ordinal == 0) "male" else "female"
++
++    private fun relationText(bot: Player, other: Player): String {
++        val relation = Relations.of(bot, other.objectId)
++        val parts = mutableListOf<String>()
++        parts += "level ${other.level} ${other.template.className}"
++        if (relation == null) parts += "you don't know them"
++        else {
++            val affinity = relation.affinity
++            val trust = relation.trust
++            parts += when {
++                affinity >= 30 -> "a friend you often play with"
++                affinity > 0 -> "someone you partied with before"
++                affinity < -20 -> "you dislike them"
++                else -> "you barely know them"
++            }
++            if (trust <= -30) parts += "they cheated you, you don't trust them at all"
++            else if (trust >= 30) parts += "they kept their word in trades"
++        }
++        if (other.karma > 0) parts += "they are a PK (red name)"
++        return parts.joinToString(", ")
++    }
++}
