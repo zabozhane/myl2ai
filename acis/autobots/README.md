@@ -310,5 +310,7 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
   - `Persona`: the system prompt from traits the bot already has (sociability, enchant temper, greed, manners,
     honesty, relation and trust to the speaker, PK) and a typing manner of its own; talking it promises nothing.
   - Log: `Autobots llm:` on start (each tier on/off and why), errors, pauses, every answer, reading and decision with
-    `llmLog`; `Autobots llm summary:` every 10 minutes per tier (requests, failures, dropped, tokens, latency) and
-    decisions (asked, chosen by the model, left to the code).
+    `llmLog`; `Autobots llm summary:` every 10 minutes per tier: requests and tokens split by purpose (talk, understand,
+    decision), the day's tokens and cost estimate (`llm*PriceInputPerMillion` / `OutputPerMillion`, gpt-5.4-mini by
+    default), failures, dropped, latency, and decisions (asked, chosen by the model, left to the code). The same lines go
+    to `log/llm.log` (`logs/game/llm.log` on the host), which survives container re-creation.
