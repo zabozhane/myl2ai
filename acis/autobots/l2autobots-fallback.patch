@@ -1,0 +1,104 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+index 03db812..bc18c2f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+@@ -5,11 +5,12 @@ import dev.l2j.autobots.population.group.GroupFinder
+ 
+ /**
+  * How a bot copes with its hunting: deaths in the last hour and gear against its level decide whether it hunts
+- * normally, falls back to easier monsters to farm adena and gear, or gives up soloing and needs a group.
++ * normally, falls back to easier monsters to farm adena and gear, or gives up soloing and needs a group. A bot under
++ * level 10 only steps a little down ([Mode.Careful]): for a newbie, dying is part of learning.
+  */
+ internal class Fitness(private val bot: Autobot) {
+ 
+-    enum class Mode(val levelOffset: Int) { Normal(0), Farm(-5), NeedsGroup(-8) }
++    enum class Mode(val levelOffset: Int) { Normal(0), Careful(-2), Farm(-5), NeedsGroup(-8) }
+ 
+     var mode = Mode.Normal
+         private set
+@@ -21,12 +22,17 @@ internal class Fitness(private val bot: Autobot) {
+         val now = System.currentTimeMillis()
+         deaths.addLast(now)
+         while (deaths.isNotEmpty() && now - deaths.first() > WINDOW_MS) deaths.removeFirst()
+-        // Newbies have nothing easier to fall back to: dying is part of learning there.
+-        if (deaths.size < MAX_DEATHS_PER_HOUR || bot.level < MIN_LEVEL) return
++        if (deaths.size < MAX_DEATHS_PER_HOUR) return
+ 
+         deaths.clear()
++        // A newbie has nothing far easier to fall back to: dying is part of learning there, so it only
++        // steps one or two levels down and keeps going.
++        if (bot.level < MIN_LEVEL) {
++            switchTo(Mode.Careful, "died $MAX_DEATHS_PER_HOUR times in an hour")
++            return
++        }
+         when (mode) {
+-            Mode.Normal -> {
++            Mode.Normal, Mode.Careful -> {
+                 // A player who keeps dying first looks around for a group, and farms easier monsters meanwhile.
+                 GroupFinder.wantGroup(bot)
+                 switchTo(Mode.Farm, "died $MAX_DEATHS_PER_HOUR times in an hour")
+@@ -44,7 +50,8 @@ internal class Fitness(private val bot: Autobot) {
+         val now = System.currentTimeMillis()
+         val weak = Gear.isWeak(bot)
+         return when {
+-            mode == Mode.Normal && weak -> switchTo(Mode.Farm, "gear is weak for level ${bot.level}")
++            mode == Mode.Normal && weak ->
++                switchTo(if (bot.level < MIN_LEVEL) Mode.Careful else Mode.Farm, "gear is weak for level ${bot.level}")
+             mode != Mode.Normal && !weak && deaths.isEmpty() && now - modeSince > WINDOW_MS -> {
+                 bot.needsGroup = false
+                 switchTo(Mode.Normal, "geared up and an hour without deaths")
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+index 1eb92e9..c2dbafb 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+@@ -99,7 +99,7 @@ internal class PartyBehavior(private val bot: Autobot) {
+             }
+             return true
+         }
+-        if ((tired || state.restUntilFull) && !hasLiveTarget()) {
++        if ((tired || state.restUntilFull) && !hasLiveTarget() && !nearbyMemberFighting(party)) {
+             if (Rnd.get(100) < REST_SAY_PERCENT) bot.partySay(listOf("rest", "sit for mp", "lets rest a bit", "med").random())
+             bot.sitDown()
+             return true
+@@ -184,6 +184,10 @@ internal class PartyBehavior(private val bot: Autobot) {
+ 
+     private fun hasLiveTarget() = (bot.target as? Creature)?.let { !it.isDead && it !== bot } ?: false
+ 
++    /** Someone close is still in a fight: the leader doesn't sit down and leave them to it. */
++    private fun nearbyMemberFighting(party: Party): Boolean =
++        party.members.any { it !== bot && !it.isDead && distance(bot, it) < PartyPlan.RANGE && (it.isInCombat || it.isUnderAttack()) }
++
+     companion object {
+         private const val FOLLOW_DISTANCE = 300
+         private const val FOLLOW_DISTANCE_CASTER = 500
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
+index 9deb240..a463443 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
+@@ -14,12 +14,15 @@ internal class Relation(var minutesTogether: Int = 0, var affinity: Int = 0, var
+ /**
+  * Each bot's memory of the characters it played with: time in the same party and a liking from -100 to 100 that
+  * grows with play and help and drops with wipes. Groups prefer friends and avoid people they dislike; clans
+- * (stage 4a) and pooling resources (4b) build on it, and trust is filled in by the trading stage (2g).
++ * (stage 4a) and pooling resources (4b) build on it. Trust starts growing from playing together and is filled in by
++ * the trading stage (2g).
+  * Kept in memory for bots online, stored in `autobot_relations`.
+  */
+ internal object Relations {
+     const val AVOID = -30
+     const val FRIEND = 60
++    /** How much party time alone can add to trust: "kept their word" (30 and up) still takes a real deal. */
++    private const val ACQUAINTED_TRUST = 15
+     private const val MAX_PER_BOT = 50
+     private const val MAX_AFFINITY = 100
+ 
+@@ -52,6 +55,8 @@ internal object Relations {
+                 relation.minutesTogether += kotlin.math.ceil(minutes).toInt()
+                 // Liking grows slower the more there is of it: an hour together is about +10.
+                 if (relation.affinity < MAX_AFFINITY && Math.random() < minutes / 6) relation.affinity++
++                // Playing together makes someone "not a stranger"; deeper trust is only earned in deals (stage 2g).
++                if (relation.trust < ACQUAINTED_TRUST && Math.random() < minutes / 6) relation.trust++
+                 relation.lastSeen = now
+                 relation.dirty = true
+             }
