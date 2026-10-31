@@ -18,7 +18,7 @@ index ef03838..0d7d68d 100644
 +  <!-- Living population: bots that play on human-like schedules, take breaks, quit and get replaced by newbies.
 +       populationSize is how many of them are active (not on a break, not quit); about half of them are online at the evening peak.
 +       0 disables it. -->
-+  <populationSize>500</populationSize>
++  <populationSize>1110</populationSize>
 +  <populationNewbiesPerDay>40</populationNewbiesPerDay>
 +  <populationLoginsPerTick>10</populationLoginsPerTick>
 +  <populationTimeZone>Europe/Moscow</populationTimeZone>
@@ -2102,8 +2102,8 @@ index 0000000..37ee210
 +            AutobotsDao.loadPopulationMembers().forEach {
 +                addMember(it.objectId, it.name, Instant.ofEpochMilli(it.creationTime).atZone(zone).toLocalDate())
 +            }
-+            // A fresh server opens with a crowd of newbies; later on they only trickle in.
-+            if (members.isEmpty()) repeat(settings.populationSize) { createNewbie() }
++            // A fresh server (or a raised populationSize) opens with a crowd of newbies; later on they only trickle in.
++            repeat(settings.populationSize - members.values.count { it.career.isActiveOn(LocalDate.now(zone)) }) { createNewbie() }
 +            println("Autobots population: ${members.size} members.")
 +            Klock.start("population", 0, TICK_MS, CoScopes.generalScope) { tick() }
 +        }
