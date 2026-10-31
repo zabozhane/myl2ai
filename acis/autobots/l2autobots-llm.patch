@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index 7cdc9fa..a6e3ad6 100644
+index 7cdc9fa..6d8f006 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -73,4 +73,55 @@
+@@ -73,4 +73,59 @@
    <opportunistPercent>10</opportunistPercent>
    <loanMaxDays>3</loanMaxDays>
    <tradeLog>true</tradeLog>
@@ -47,6 +47,10 @@ index 7cdc9fa..a6e3ad6 100644
 +  <llmChat>true</llmChat>
 +  <llmUnderstand>true</llmUnderstand>
 +  <llmDecisions>true</llmDecisions>
++  <!-- Bots remember talks with players: when a chat goes quiet for 3 minutes, the near model rates it as the bot
++       (-2..+2, 3 affinity per point, at most +-10 a day per player) and writes a one-line note to autobot_chat_notes;
++       the last 3 notes about the player go into the bot's prompt the next time they talk. -->
++  <llmChatMemory>true</llmChatMemory>
 +  <!-- Bots chatting among themselves where a real player hears it (party with the player, clan, next to the player,
 +       shout of the player's region for raids and scams): a death, a new level, a raid, a scam or small talk in a party
 +       (llmBotSmallTalkPercent chance every 30 s per party with a player) starts it, 1-3 bots pick it up. At most one
@@ -58,6 +62,22 @@ index 7cdc9fa..a6e3ad6 100644
 +  <llmPartyAnswerPercent>60</llmPartyAnswerPercent>
 +  <llmLog>true</llmLog>
  </settings>
+diff --git a/sql/autobot_chat_notes.sql b/sql/autobot_chat_notes.sql
+new file mode 100644
+index 0000000..be3e225
+--- /dev/null
++++ b/sql/autobot_chat_notes.sql
+@@ -0,0 +1,10 @@
++CREATE TABLE IF NOT EXISTS autobot_chat_notes (
++  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
++  `bot_id` INT UNSIGNED NOT NULL,
++  `other_id` INT UNSIGNED NOT NULL,
++  `created` BIGINT UNSIGNED NOT NULL,
++  `mood` TINYINT NOT NULL DEFAULT 0,
++  `note` VARCHAR(200) NOT NULL,
++  PRIMARY KEY (`id`),
++  KEY `pair` (`bot_id`, `other_id`)
++) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 index cc77a3c..49d6c65 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
@@ -99,10 +119,10 @@ index cc77a3c..49d6c65 100644
                  World.getInstance().players.filter { it.isGM }.forEach {
                      it.sendPacket(CreatureSay(0, 15, "${chatter.name} -> ${bot.name}", text))
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index e0fc229..17801ec 100644
+index e0fc229..d16d8e7 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -60,7 +60,37 @@ internal data class AutobotSettings(
+@@ -60,7 +60,38 @@ internal data class AutobotSettings(
          @JsonProperty("scammerPercent") var scammerPercent: Int = 5,
          @JsonProperty("opportunistPercent") var opportunistPercent: Int = 10,
          @JsonProperty("loanMaxDays") var loanMaxDays: Int = 3,
@@ -132,6 +152,7 @@ index e0fc229..17801ec 100644
 +        @JsonProperty("llmChat") var llmChat: Boolean = true,
 +        @JsonProperty("llmUnderstand") var llmUnderstand: Boolean = true,
 +        @JsonProperty("llmDecisions") var llmDecisions: Boolean = true,
++        @JsonProperty("llmChatMemory") var llmChatMemory: Boolean = true,
 +        @JsonProperty("llmBotChatter") var llmBotChatter: Boolean = true,
 +        @JsonProperty("llmBotChatMinutes") var llmBotChatMinutes: Int = 3,
 +        @JsonProperty("llmBotChatPerHour") var llmBotChatPerHour: Int = 40,
@@ -225,10 +246,10 @@ index 71e2266..c28836c 100644
              lingerDecided = true
              val crafter = CraftBook.isCrafter(bot)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-index 5614d6b..9e68eb4 100644
+index 5614d6b..6459a95 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-@@ -107,10 +107,12 @@ internal object PopulationManager {
+@@ -107,10 +107,13 @@ internal object PopulationManager {
                  GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
                  SessionPlan.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
                  RaidLog.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
@@ -238,6 +259,7 @@ index 5614d6b..9e68eb4 100644
              if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
              if (ticks % GROUPS_EVERY_TICKS == 1) SocialTrade.tick(online)
 +            if (ticks % GROUPS_EVERY_TICKS == 0) dev.l2j.autobots.population.llm.BotChatter.tick(online)
++            dev.l2j.autobots.population.llm.ChatMemory.tick()
              if (++ticks % SAVE_EVERY_TICKS == 0) {
                  online.forEach {
                      AutobotsDao.saveAutobot(it)
@@ -619,10 +641,10 @@ index 0000000..e95cc43
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
 new file mode 100644
-index 0000000..5d8a10f
+index 0000000..e89e2b6
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,216 @@
 +package dev.l2j.autobots.population.llm
 +
 +import dev.l2j.autobots.AutobotData
@@ -792,6 +814,8 @@ index 0000000..5d8a10f
 +        }
 +        lastSpoke[bot.objectId] = now
 +        val history = remember(key, LlmMessage("user", line.take(MAX_INPUT_CHARS)))
++        // Lines meant for the bot are remembered for its opinion of the player; a line to everyone only if it answers.
++        if (!maySkip) ChatMemory.heard(bot, player, line.take(MAX_INPUT_CHARS))
 +        CoScopes.generalScope.launch {
 +            val started = System.currentTimeMillis()
 +            val system = Persona.system(bot, player, situation) +
@@ -806,6 +830,8 @@ index 0000000..5d8a10f
 +            // In party chat several bots answer; each sees the others' lines as part of the transcript.
 +            remember(key, if (group) LlmMessage("user", "${bot.name}: $answer") else LlmMessage("assistant", answer))
 +            send(answer)
++            if (maySkip) ChatMemory.heard(bot, player, line.take(MAX_INPUT_CHARS))
++            ChatMemory.said(bot, player, answer)
 +            Llm.log("${bot.name} -> ${player.name}: $answer")
 +        }
 +    }
@@ -832,6 +858,192 @@ index 0000000..5d8a10f
 +            while (conversation.lines.size > HISTORY_LINES) conversation.lines.removeAt(0)
 +            while (conversation.lines.firstOrNull()?.role == "assistant") conversation.lines.removeAt(0)
 +            return conversation.lines.toList()
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/ChatMemory.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/ChatMemory.kt
+new file mode 100644
+index 0000000..d2b43e1
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/ChatMemory.kt
+@@ -0,0 +1,180 @@
++package dev.l2j.autobots.population.llm
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.group.Relations
++import kotlinx.coroutines.launch
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.model.actor.Player
++import java.time.LocalDate
++import java.util.concurrent.ConcurrentHashMap
++
++/**
++ * A bot remembers its talks with real players. When a conversation goes quiet the model, as the bot, rates how it
++ * felt (-2..+2) and writes a one-line note. The rating moves the bot's liking of the player (the same affinity
++ * that drives party invites, kicks, staying when asked and loans), the note is stored in `autobot_chat_notes`
++ * and the last few notes go into the bot's prompt the next time it talks to that player, even weeks later.
++ */
++internal object ChatMemory {
++    private const val QUIET_MS = 3 * 60_000L
++    private const val FORGET_MS = 30 * 60_000L
++    private const val MAX_LINES = 16
++    private const val NOTES_KEPT = 5
++    private const val NOTES_IN_PROMPT = 3
++    private const val AFFINITY_PER_POINT = 3
++    private const val DAILY_CAP = 10
++    private const val NOTE_CHARS = 150
++
++    class Note(val created: Long, val mood: Int, val text: String)
++
++    private class Talk(val bot: Autobot, val player: Player) {
++        val lines = ArrayList<String>()
++        var playerLines = 0
++        var botLines = 0
++        var touched = System.currentTimeMillis()
++    }
++
++    private val talks = ConcurrentHashMap<String, Talk>()
++    private val notes = ConcurrentHashMap<String, List<Note>>()
++    private val today = ConcurrentHashMap<String, Pair<LocalDate, Int>>()
++
++    private val enabled get() = AutobotData.settings.llmChatMemory
++
++    private fun key(botId: Int, playerId: Int) = "$botId:$playerId"
++
++    /** A line the player said to (or in front of) the bot that the bot took part in. */
++    fun heard(bot: Autobot, player: Player, line: String) = add(bot, player, line, fromPlayer = true)
++
++    /** The bot's own answer in that conversation. */
++    fun said(bot: Autobot, player: Player, line: String) = add(bot, player, "${bot.name}: $line", fromPlayer = false)
++
++    private fun add(bot: Autobot, player: Player, line: String, fromPlayer: Boolean) {
++        if (!enabled || player is Autobot) return
++        val talk = talks.computeIfAbsent(key(bot.objectId, player.objectId)) { Talk(bot, player) }
++        synchronized(talk) {
++            talk.lines += line
++            while (talk.lines.size > MAX_LINES) talk.lines.removeAt(0)
++            if (fromPlayer) talk.playerLines++ else talk.botLines++
++            talk.touched = System.currentTimeMillis()
++        }
++    }
++
++    /** Called every population tick: conversations quiet for a few minutes get rated once. */
++    fun tick() {
++        if (talks.isEmpty()) return
++        val now = System.currentTimeMillis()
++        for ((key, talk) in talks) {
++            if (now - talk.touched < QUIET_MS) continue
++            talks.remove(key)
++            if (!enabled || now - talk.touched > FORGET_MS) continue
++            val transcript = synchronized(talk) {
++                if (talk.playerLines < 2 || talk.botLines < 1) null else talk.lines.joinToString("\n")
++            } ?: continue
++            if (!talk.bot.isOnline || !Llm.near.available) continue
++            CoScopes.generalScope.launch { assess(talk.bot, talk.player, transcript) }
++        }
++    }
++
++    private suspend fun assess(bot: Autobot, player: Player, transcript: String) {
++        val system = Persona.identity(bot) +
++                "Below is a chat you just had with ${player.name}, a level ${player.level} ${player.template.className}. " +
++                "How did it feel to you, as this character? Answer with exactly one line: SCORE|NOTE. " +
++                "SCORE is a whole number from -2 to 2: -2 insulting, hostile or a scam attempt, -1 unpleasant or annoying, " +
++                "0 neutral, 1 pleasant, 2 really nice, fun or helpful. NOTE is what you will remember about this chat, " +
++                "from your point of view, in English, under 100 characters, e.g. 'asked about spots near Gludio, polite, I gave tips'."
++        val reply = Llm.near.chat(system, listOf(LlmMessage("user", transcript)), AutobotData.settings.llmMaxReplyTokens, Llm.Purpose.Memory)
++                ?: return
++        val match = Regex("""([+-]?\d)\s*\|\s*(.+)""").find(reply.text.lineSequence().firstOrNull { it.isNotBlank() } ?: return) ?: return
++        val score = match.groupValues[1].toIntOrNull()?.coerceIn(-2, 2) ?: return
++        val text = match.groupValues[2].trim().trim('"', '\'').replace(Regex("\\s+"), " ").take(NOTE_CHARS).ifBlank { return }
++        val shift = capped(bot, player, score * AFFINITY_PER_POINT)
++        if (shift != 0 && bot.isOnline) Relations.adjust(bot, player.objectId, 0, shift)
++        save(bot.objectId, player.objectId, Note(System.currentTimeMillis(), score, text))
++        Llm.log("memory ${bot.name} about ${player.name}: ${if (score > 0) "+" else ""}$score ($text), affinity ${if (shift >= 0) "+" else ""}$shift")
++    }
++
++    /** One player can't farm (or ruin) a bot's liking in a day: at most [DAILY_CAP] either way. */
++    private fun capped(bot: Player, player: Player, wanted: Int): Int {
++        val key = key(bot.objectId, player.objectId)
++        val date = LocalDate.now()
++        var result = 0
++        today.compute(key) { _, old ->
++            val sum = if (old == null || old.first != date) 0 else old.second
++            result = (sum + wanted).coerceIn(-DAILY_CAP, DAILY_CAP) - sum
++            date to (sum + result)
++        }
++        if (today.size > 5000) today.entries.removeIf { it.value.first != date }
++        return result
++    }
++
++    /** What the bot remembers from earlier chats with [player], for its prompt; null when nothing. */
++    fun recall(bot: Player, player: Player): String? {
++        if (!enabled || player is Autobot) return null
++        val list = load(bot.objectId, player.objectId).takeLast(NOTES_IN_PROMPT)
++        if (list.isEmpty()) return null
++        val now = System.currentTimeMillis()
++        return list.joinToString("; ") { "${ago(now - it.created)}: ${it.text} (${mood(it.mood)})" }
++    }
++
++    private fun ago(ms: Long): String {
++        val minutes = ms / 60_000
++        return when {
++            minutes < 60 -> "just now"
++            minutes < 24 * 60 -> "${minutes / 60} h ago"
++            else -> "${minutes / (24 * 60)} days ago"
++        }
++    }
++
++    private fun mood(score: Int) = when (score) {
++        -2 -> "it made you angry"
++        -1 -> "you didn't like it"
++        1 -> "you liked it"
++        2 -> "you really liked it"
++        else -> "nothing special"
++    }
++
++    private fun load(botId: Int, playerId: Int): List<Note> = notes.getOrPut(key(botId, playerId)) {
++        if (notes.size > 2000) notes.clear()
++        val list = ArrayList<Note>()
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("SELECT created, mood, note FROM autobot_chat_notes WHERE bot_id=? AND other_id=? ORDER BY created DESC LIMIT $NOTES_KEPT").use { ps ->
++                    ps.setInt(1, botId)
++                    ps.setInt(2, playerId)
++                    ps.executeQuery().use { rs -> while (rs.next()) list += Note(rs.getLong(1), rs.getInt(2), rs.getString(3)) }
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++        list.reversed()
++    }
++
++    private fun save(botId: Int, playerId: Int, note: Note) {
++        val key = key(botId, playerId)
++        notes[key] = (load(botId, playerId) + note).takeLast(NOTES_KEPT)
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("INSERT INTO autobot_chat_notes (bot_id, other_id, created, mood, note) VALUES (?,?,?,?,?)").use { ps ->
++                    ps.setInt(1, botId)
++                    ps.setInt(2, playerId)
++                    ps.setLong(3, note.created)
++                    ps.setInt(4, note.mood)
++                    ps.setString(5, note.text)
++                    ps.executeUpdate()
++                }
++                // Only the newest few notes per pair are kept.
++                val old = ArrayList<Int>()
++                con.prepareStatement("SELECT id FROM autobot_chat_notes WHERE bot_id=? AND other_id=? ORDER BY created DESC").use { ps ->
++                    ps.setInt(1, botId)
++                    ps.setInt(2, playerId)
++                    ps.executeQuery().use { rs -> var n = 0; while (rs.next()) if (++n > NOTES_KEPT) old += rs.getInt(1) }
++                }
++                if (old.isNotEmpty()) con.prepareStatement("DELETE FROM autobot_chat_notes WHERE id IN (${old.joinToString(",")})").use { it.executeUpdate() }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
 +        }
 +    }
 +}
@@ -965,7 +1177,7 @@ index 0000000..a6c012e
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt
 new file mode 100644
-index 0000000..deadeac
+index 0000000..e1a4ec6
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Llm.kt
 @@ -0,0 +1,212 @@
@@ -996,7 +1208,7 @@ index 0000000..deadeac
 +    enum class Tier { Near, Far }
 +
 +    /** What a call is for, so the summary shows where the tokens go. */
-+    enum class Purpose { Talk, Understand, Decision }
++    enum class Purpose { Talk, Understand, Decision, Memory }
 +
 +    // Container output is lost when the container is re-created; the model's lines are also kept in log/llm.log,
 +    // which docker-compose maps to logs/game/llm.log on the host.
@@ -1296,10 +1508,10 @@ index 0000000..01ddb14
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Persona.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Persona.kt
 new file mode 100644
-index 0000000..3e252e2
+index 0000000..7f941e5
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Persona.kt
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,100 @@
 +package dev.l2j.autobots.population.llm
 +
 +import dev.l2j.autobots.Autobot
@@ -1367,6 +1579,7 @@ index 0000000..3e252e2
 +            append("Typing manner: ${Manner.of(bot).rule}.\n")
 +            append("Right now: $situation.\n")
 +            if (relation != null) append("About ${other.name}: $relation.\n")
++            if (other != null) ChatMemory.recall(bot, other)?.let { append("What you remember from earlier chats with ${other.name}: $it.\n") }
 +            append("Rules: answer in the language you were written to (Russian by default), in MMO chat slang. ")
 +            append("One short chat line, under 100 characters, no quotes, no emoji pictures, no name prefix. ")
 +            append("Do not promise to do anything (follow, give items, go somewhere, invite): ")
@@ -1385,9 +1598,10 @@ index 0000000..3e252e2
 +        else {
 +            val affinity = relation.affinity
 +            val trust = relation.trust
++            val partied = relation.minutesTogether > 0
 +            parts += when {
-+                affinity >= 30 -> "a friend you often play with"
-+                affinity > 0 -> "someone you partied with before"
++                affinity >= 30 -> if (partied) "a friend you often play with" else "someone you really like talking to"
++                affinity > 0 -> if (partied) "someone you partied with before" else "you chatted before and liked it"
 +                affinity < -20 -> "you dislike them"
 +                else -> "you barely know them"
 +            }

@@ -312,10 +312,15 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     level, the end of a raid, a scam (`TradeEvents`) or small talk in a party with a player (`llmBotSmallTalkPercent`
     every 30 s) starts it; the bot says a line and 1-3 others may pick it up, each seeing the transcript and free to stay
     silent. At most one conversation per place every `llmBotChatMinutes` and `llmBotChatPerHour` in total.
+  - `ChatMemory` (`llmChatMemory`): a bot remembers its talks with real players. When a conversation is quiet for
+    3 minutes (at least 2 player lines and 1 answer), the near model rates it as the bot (-2..+2) and writes a one-line
+    note; each point moves the bot's affinity to the player by 3 (at most +-10 a day per pair), which drives invites,
+    kicks, staying when asked and loans. The last 5 notes per pair are kept in `autobot_chat_notes`; the newest 3 go
+    into the prompt the next time the bot talks to that player, with how long ago and how it felt.
   - `Persona`: the system prompt from traits the bot already has (sociability, enchant temper, greed, manners,
     honesty, relation and trust to the speaker, PK) and a typing manner of its own; talking it promises nothing.
   - Log: `Autobots llm:` on start (each tier on/off and why), errors, pauses, every answer, reading and decision with
     `llmLog`; `Autobots llm summary:` every 10 minutes per tier: requests and tokens split by purpose (talk, understand,
-    decision), the day's tokens and cost estimate (`llm*PriceInputPerMillion` / `OutputPerMillion`, gpt-5.4-mini by
+    decision, memory), the day's tokens and cost estimate (`llm*PriceInputPerMillion` / `OutputPerMillion`, gpt-5.4-mini by
     default), failures, dropped, latency, and decisions (asked, chosen by the model, left to the code). The same lines go
     to `log/llm.log` (`logs/game/llm.log` on the host), which survives container re-creation.
