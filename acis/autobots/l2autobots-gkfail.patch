@@ -1,0 +1,13 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index aedb56a..3234408 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -522,6 +522,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+             WalkToSequence(bot, target.location, SPOT_RADIUS) { abandon(target) }
+         }
+         sequence.execute()
++        // A failed ride must not turn into a walk across the map: the spot was only reachable by the teleport.
++        if (gatekeeperFailed && distance(bot.location(), target.location) > MAX_TRAVEL_ON_FOOT) abandon(target)
+     }
+ 
+     /** The leader on its way to a raid boss: a gatekeeper from town, then on foot, one leg at a time. */
