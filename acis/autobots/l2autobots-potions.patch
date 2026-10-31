@@ -1,0 +1,38 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index 66e384a..c0d0d71 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -214,19 +214,25 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+     }
+ 
+     private suspend fun buySupplies() {
+-        // Shares of what the bot can spend now: a scroll home comes first, potions are cheap insurance,
+-        // and the rest stays for gear. The reserve is travel money, and a scroll or a potion is exactly what it is
+-        // kept for, so essentials may use all of the adena.
+-        buy(Gear.SCROLL_OF_ESCAPE, target = 2, budgetShare = 1.0, onlyBelow = 1, essential = true)
++        // Shares of what the bot can spend now: a scroll home and potions are cheap insurance, and the rest stays
++        // for gear. The reserve is travel money, and a scroll or a potion is exactly what it is kept for, so
++        // essentials may use all of the adena. No town shop sells mana potions in Interlude: mages rest, as players did.
++        val potions = Gear.HEALING_POTIONS.sumOf { Gear.count(bot, it) }
++        val potion = Gear.HEALING_POTIONS.firstOrNull { Market.findProduct(bot, it) != null }
++        if (bot.level < 20) {
++            // A newbie fights next to the village and walks home in minutes, so the potions that keep it alive
++            // come first; the scroll is one at most, and only with adena left after the potions.
++            if (potion != null) buy(potion, target = 10, budgetShare = 1.0, onlyBelow = 3, have = potions, essential = true)
++            buy(Gear.SCROLL_OF_ESCAPE, target = 1, budgetShare = 1.0, onlyBelow = 1, essential = true)
++        } else {
++            buy(Gear.SCROLL_OF_ESCAPE, target = 2, budgetShare = 1.0, onlyBelow = 1, essential = true)
++            if (potion != null) buy(potion, target = 10, budgetShare = 0.5, onlyBelow = 3, have = potions, essential = true)
++        }
+         if (bot.level >= 20 || Errands.spendable(bot) >= 5000) {
+             buy(Gear.shotId(bot), target = shotsFor(bot.level), budgetShare = 0.4, onlyBelow = shotsFor(bot.level) / 3)
+         }
+         // A bow without arrows can't hunt at all.
+         if (Gear.isArcher(bot)) buy(Gear.arrowId(bot), target = 1500, budgetShare = 0.6, onlyBelow = 500, essential = true)
+-        // No town shop sells mana potions in Interlude: mages rest, as players did.
+-        val potions = Gear.HEALING_POTIONS.sumOf { Gear.count(bot, it) }
+-        val potion = Gear.HEALING_POTIONS.firstOrNull { Market.findProduct(bot, it) != null }
+-        if (potion != null) buy(potion, target = 10, budgetShare = 0.5, onlyBelow = 3, have = potions, essential = true)
+     }
+ 
+     /** Buys up to [target] pieces when the bot has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */
