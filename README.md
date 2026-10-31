@@ -1,10 +1,12 @@
 # l2aiserver
 
-Локальный приватный сервер Lineage 2 Interlude (C6, протокол 746) на aCis с ботами. Всё серверное работает в Docker (OrbStack), Java на Mac не ставится.
+Локальный приватный сервер Lineage 2 Interlude (C6, протокол 746) на aCis с ботами. Всё серверное работает в Docker (Docker Desktop или OrbStack), Java на компьютер не ставится.
 
-Текущий этап: **1. MariaDB + сборка и запуск чистого aCis 382.**
+**Развернуть у себя на macOS или Windows — пошаговая инструкция в [docs/setup.md](docs/setup.md).**
 
-## Схема этапа 1
+Этапы, решения и текущий шаг — в [PROGRESS.md](PROGRESS.md).
+
+## Схема
 
 ```
 Mac (winemac, клиент C6 / 746)
@@ -13,7 +15,7 @@ Mac (winemac, клиент C6 / 746)
 ┌──────────────┐  9014 (внутр.) ┌──────────────┐
 │ login        │◄──────────────►│ game         │
 │ aCis 382     │ регистрация GS │ aCis 382     │
-│ JRE 11, 64 МБ│                │ JRE 11, 2 ГБ │
+│ JRE 11, 64 МБ│                │ JRE 11, 5 ГБ │
 └──────┬───────┘                └──────┬───────┘
        │ схема l2_login                │ схема l2_game
        ▼                               ▼
@@ -36,14 +38,14 @@ Mac (winemac, клиент C6 / 746)
 | Клиент Interlude (746, пропатченный system) | `./client/`, не в git | удалить папку |
 | Логи | `./logs/login`, `./logs/game` | удалить папку |
 
-**Память (лимиты контейнеров):** db 768 МБ (buffer pool 256 МБ), login 256 МБ, game 4 ГБ (heap 3 ГБ, из них около 1 ГБ занимает геодата). Итого до ~5 ГБ из 6–8 ГБ виртуалки; в простое фактически ~0,8 ГБ.
+**Память (лимиты контейнеров):** db 768 МБ (buffer pool 256 МБ), login 256 МБ, game 6 ГБ (heap 5 ГБ, из них около 1 ГБ занимает геодата). Итого до ~7 ГБ: Docker нужно дать не меньше 7,5 ГБ.
 
 ## Запуск
 
-Требуется OrbStack (или Docker Desktop). Из корня репозитория:
+Требуется Docker Desktop (или OrbStack) с памятью не меньше 7,5 ГБ. Подробно для macOS и Windows — [docs/setup.md](docs/setup.md). Из корня репозитория:
 
 ```sh
-docker compose up -d --build     # первая сборка ~2–5 минут
+docker compose up -d --build     # первая сборка занимает несколько минут
 docker compose logs -f game      # ждать строку "Registered as server: [1] Bartz."
 python3 scripts/smoke_test.py    # проверка протоколов login и game (746)
 ```
