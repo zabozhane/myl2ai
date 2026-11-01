@@ -1,0 +1,879 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 3531dff..348efe1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -49,12 +49,14 @@ object AutobotsManager {
+     fun start(){
+         AutobotData
+         
++        dev.l2j.autobots.population.PopulationIdentity.repair()
+         AutobotsNameService
+         IconsTable
+         AutobotsDao.updateAllBotOnlineStatus(false)
+         AutobotScheduler
+         AutofarmManager
+         OfflineFarmManager.onServerStart()
++        dev.l2j.autobots.population.RouteSafety.load()
+         PopulationManager.start()
+ 
+         Klock.start("onUpdate", 1000, AutobotData.settings.iterationDelay, CoScopes.onUpdateScope, action = {
+@@ -250,6 +252,7 @@ object AutobotsManager {
+     }
+     
+     internal suspend fun spawnAutobot(autobot: Autobot){
++        if (activeBots.values.any { it.objectId == autobot.objectId || it.name.equals(autobot.name, true) }) return
+         if(autobot.isIngame()) {
+             return
+         }
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsNameManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsNameManager.kt
+index 6239e1c..3e995db 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsNameManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsNameManager.kt
+@@ -19,6 +19,9 @@ object AutobotsNameService {
+         loadWordlist()
+     }
+ 
++    private val reserved = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
++
++    @Synchronized
+     fun getRandomAvailableName(): String {
+         var name = getRandomNameFromWordlist()
+ 
+@@ -26,6 +29,7 @@ object AutobotsNameService {
+             name = getRandomNameFromWordlist()
+         }
+ 
++        reserved.add(name.lowercase(java.util.Locale.ROOT))
+         return name
+     }
+ 
+@@ -53,7 +57,7 @@ object AutobotsNameService {
+     }
+ 
+     private fun nameAlreadyExists(name: String): Boolean {
+-        return PlayerInfoTable.getInstance().getPlayerObjectId(name) > 0
++        return name.lowercase(java.util.Locale.ROOT) in reserved || PlayerInfoTable.getInstance().getPlayerObjectId(name) > 0
+     }
+     
+     fun nameIsValid(name: String) : Boolean{
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+index 11d29af..5897fdd 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+@@ -30,6 +30,11 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+         var detours = 0
+ 
+         while (true) {
++            if (bot.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.WATER)) {
++                bot.stopMove(null)
++                onStuck()
++                return
++            }
+             val remaining = distance(bot.location(), destination)
+             if (remaining <= arrivalRadius || bot.isDead || bot.isUnderAttack()) return
+ 
+@@ -49,6 +54,11 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+                 } else {
+                     nextLeg(remaining)
+                 }
++                if (!dev.l2j.autobots.population.RouteSafety.safeSegment(bot,bot.location(),leg)) {
++                    println("Autobots route: ${bot.name} id=${bot.objectId} refused unsafe leg to ${leg.x},${leg.y},${leg.z}")
++                    onStuck()
++                    return
++                }
+                 bot.moveTo(leg.x, leg.y, leg.z)
+             }
+             delay(CHECK_INTERVAL_MS)
+diff --git a/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt b/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
+index 2c9e7b2..a6ef8d8 100644
+--- a/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
++++ b/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
+@@ -96,10 +96,13 @@ internal object AutobotsDao {
+         }
+     }
+ 
+-    fun loadByName(name: String): Autobot? {
++    fun loadByName(name: String): Autobot? = load(name, false)
++    fun loadById(id: Int): Autobot? = load(id, true)
++
++    private fun load(value: Any, byId: Boolean): Autobot? {
+         L2DatabaseFactory.getInstance().connection.use { con ->
+-            con.prepareStatement(LoadByName).use { ps ->
+-                ps.setString(1, name)
++            con.prepareStatement(if (byId) LoadById else LoadByName).use { ps ->
++                if (byId) ps.setInt(1, value as Int) else ps.setString(1, value as String)
+                 ps.executeQuery().use { rs ->
+                     
+                     if(!rs.next()) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 05feb4a..24573ef 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -104,6 +104,9 @@ object OfflineFarmManager {
+     private val lastTownTripAt = ConcurrentHashMap<Int, Long>()
+     private val diedAt = ConcurrentHashMap<Int, Long>()
+     private val townJobs = ConcurrentHashMap<Int, Job>()
++    private val huntProgress = ConcurrentHashMap<Int, Pair<Long, Long>>()
++    private val huntedSpot = ConcurrentHashMap<Int, Long>()
++    private val emptySpots = ConcurrentHashMap<Int, MutableMap<Long,Long>>()
+     private val pendingHunt = ConcurrentHashMap.newKeySet<Int>()
+     private val retryAfter = ConcurrentHashMap<Int, Long>()
+     private val failedRoundAt = ConcurrentHashMap<Int, Long>()
+@@ -222,6 +225,9 @@ object OfflineFarmManager {
+             lastTownTripAt.remove(id)
+             diedAt.remove(id)
+             questsLoaded.remove(id)
++            huntProgress.remove(id)
++            huntedSpot.remove(id)
++            emptySpots.remove(id)
+             pendingHunt.remove(id)
+             retryAfter.remove(id)
+             failedRoundAt.remove(id)
+@@ -314,10 +320,14 @@ object OfflineFarmManager {
+         // Auto hunt refuses to fight in a town or a peace zone; such spots are no targets either.
+         // Spots this character already failed to reach stay excluded until a hunt actually starts.
+         val excluded = unreachableSpots.getOrPut(player.objectId) { mutableSetOf() }
++        emptySpots[player.objectId]?.let { recent ->
++            recent.entries.removeIf { now-it.value>30*60_000L }
++            excluded.addAll(recent.keys)
++        }
+         var spot: HuntingSpot? = null
+         for (attempt in 1..MAX_SPOT_ATTEMPTS) {
+             val candidate = HuntingSpots.choose(player, level, excluded, maxWalk = MAX_WALK_TO_SPOT) ?: break
+-            if (isPeaceful(candidate.location.x, candidate.location.y, candidate.location.z)) {
++            if (isPeaceful(candidate.location.x, candidate.location.y, candidate.location.z) || HuntingSpots.huntAnchor(player,candidate)==null) {
+                 excluded.add(candidate.key)
+                 continue
+             }
+@@ -347,9 +357,10 @@ object OfflineFarmManager {
+ 
+     private fun startSpotTrip(player: Player, spot: HuntingSpot) {
+         if (!isActive(player) || player.isDead) return
+-        traveling[player.objectId] = Travel(Trip.TO_SPOT, spot.location.x, spot.location.y, spot.location.z,
++        val anchor=HuntingSpots.huntAnchor(player,spot) ?: return
++        traveling[player.objectId] = Travel(Trip.TO_SPOT, anchor.x, anchor.y, anchor.z,
+                 spotKey = spot.key, lastMoveAt = System.currentTimeMillis())
+-        walk(player, spot.location.x, spot.location.y, spot.location.z)
++        walk(player, anchor.x, anchor.y, anchor.z)
+         LOGGER.info("Offline farm: ${player.name} stays online, walks to a hunting spot at ${spot.location.x},${spot.location.y}.")
+     }
+ 
+@@ -559,6 +570,24 @@ object OfflineFarmManager {
+             }
+         }
+ 
++        // An enabled farm with no prey is also a stall; the anchor may be empty or all prey too low level.
++        for ((id,player) in farming) {
++            if (!isActive(player) || player.isDead || traveling.containsKey(id) || townJobs.containsKey(id) ||
++                    !AutofarmManager.isAutoFarming(player)) { huntProgress.remove(id); continue }
++            val previous=huntProgress[id]
++            if (previous==null || previous.first!=player.exp.toLong()) {
++                huntProgress[id]=player.exp.toLong() to now
++                continue
++            }
++            if (now-previous.second<3*60_000L || player.target!=null || player.isUnderAttack() ||
++                    player.isCastingNow || player.isAttackingNow || player.isSitting) continue
++            huntedSpot[id]?.let { key -> emptySpots.getOrPut(id){mutableMapOf()}[key]=now }
++            huntProgress.remove(id)
++            AutofarmManager.stopFarm(player,"no prey or experience for three minutes")
++            LOGGER.info("Offline farm: ${player.name} left an unproductive hunting anchor.")
++            goHunting(player)
++        }
++
+         // Recover idle farmers both in town and in the field, with backoff when no route works.
+         for ((id, player) in farming) {
+             if (traveling.containsKey(id) || townJobs.containsKey(id) || player.isDead || !isActive(player)) {
+@@ -717,6 +746,7 @@ object OfflineFarmManager {
+         when (travel.trip) {
+             Trip.TO_TOWN -> runChoresThenBack(player, Location(travel.spotX, travel.spotY, travel.spotZ))
+             Trip.TO_SPOT, Trip.BACK_TO_SPOT -> {
++                travel.spotKey?.let { huntedSpot[player.objectId]=it }
+                 startFarmLogged(player, "reached the spot")
+                 LOGGER.info("Offline farm: ${player.name} reached the spot, hunting.")
+             }
+@@ -782,6 +812,7 @@ object OfflineFarmManager {
+         if (player.isSitting) player.standUp()
+         val remaining = distance(player.x, player.y, x, y)
+         if (remaining <= LEG_LENGTH) {
++            if (!dev.l2j.autobots.population.RouteSafety.safeSegment(player,Location(player.x,player.y,player.z),Location(x,y,z))) return
+             player.moveTo(x, y, z)
+             return
+         }
+@@ -790,7 +821,9 @@ object OfflineFarmManager {
+         val legY = player.y + ((y - player.y) * ratio).toInt()
+         val legZ = player.z + ((z - player.z) * ratio).toInt()
+         // A straight-line height is often under a floor or over a bridge; the ground under the point is reachable.
+-        player.moveTo(legX, legY, GeoEngine.getInstance().getHeight(legX, legY, legZ).toInt())
++        val point=Location(legX,legY,GeoEngine.getInstance().getHeight(legX,legY,legZ).toInt())
++        if (dev.l2j.autobots.population.RouteSafety.safeSegment(player,Location(player.x,player.y,player.z),point))
++            player.moveTo(point.x,point.y,point.z)
+     }
+ 
+     /** A step to one side of the straight line, so the next leg starts from somewhere the pathfinder can solve. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index c014b34..a8f6286 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -94,9 +94,14 @@ internal object HuntingSpots {
+         val candidates = spots.asSequence()
+                 .filter { it.key !in excluded && isSuitable(it, level) }
+                 .filter { withinReach(bot, it, maxWalk, useExits) }
+-                .filter { !crossesLedge(bot, it) }
++                .filter { !crossesLedge(bot, it) && RouteSafety.safeDestination(bot,it.location) }
+                 .map { it to score(it, bot, level) * lootBonus(it, level, wanted) }
+                 .sortedByDescending { it.second }
++                .filter { (spot, _) ->
++                    val start = if (useExits && distance(bot.location(),spot.location)>maxWalk)
++                        teleportExits.minByOrNull { distance(it,spot.location) } ?: bot.location() else bot.location()
++                    RouteSafety.safeSegment(bot,start,spot.location)
++                }
+                 .take(CANDIDATES)
+                 .toList()
+         if (candidates.isEmpty()) return null
+@@ -110,6 +115,18 @@ internal object HuntingSpots {
+     }
+ 
+     /** True when hunting at [spot] doesn't mean a walk across the map: close directly, or close after a teleport exit. */
++    /** Anchor on prey the actual character can target, rather than an unrelated spawn in the same cell. */
++    fun huntAnchor(player: Player, spot: HuntingSpot): Location? = SpawnTable.getInstance().spawns.asSequence()
++            .filter { it.template.isType("Monster") && it.template.level.toInt() in (player.level-5).coerceAtLeast(1)..(player.level+1) }
++            .mapNotNull { spawn -> (spawn.loc ?: spawn.npc?.position)?.let { Location(it.x,it.y,it.z) } }
++            .filter { distance(it,spot.location)<2500 && safeAnchor(player,it) }
++            .minByOrNull { distance(it,spot.location) }
++
++    private fun safeAnchor(player: Player,at: Location) =
++            net.sf.l2j.gameserver.data.manager.ZoneManager.getInstance().getZone(at.x,at.y,at.z,net.sf.l2j.gameserver.model.zone.type.PeaceZone::class.java)==null &&
++            net.sf.l2j.gameserver.data.manager.ZoneManager.getInstance().getZone(at.x,at.y,at.z,net.sf.l2j.gameserver.model.zone.type.TownZone::class.java)==null && RouteSafety.safeDestination(player,at) &&
++            RouteSafety.safeSegment(player,player.location(),at)
++
+     private fun withinReach(bot: Player, spot: HuntingSpot, maxWalk: Int, useExits: Boolean): Boolean {
+         if (maxWalk == Int.MAX_VALUE) return true
+         if (distance(bot.location(), spot.location) <= maxWalk) return true
+@@ -134,7 +151,7 @@ internal object HuntingSpots {
+         if (!isDeadly(killerLevel, hunterLevel)) return
+         var marked = 0
+         for (spot in spots) {
+-            if (killerLevel <= spot.dangerLevel || distance(location, spot.location) > KILLER_MARK_RADIUS) continue
++            if (killerLevel <= spot.dangerLevel || kotlin.math.hypot((location.x-spot.location.x).toDouble(),(location.y-spot.location.y).toDouble()) > KILLER_MARK_RADIUS) continue
+             spot.raiseDanger(killerLevel)
+             SpotDangerDao.save(spot.key, killerLevel)
+             marked++
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index f379c88..3f7e7d4 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -85,6 +85,12 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private val wrapUpMs = Rnd.get(WRAP_UP_MIN_MINUTES, WRAP_UP_MAX_MINUTES) * 60_000L
+     private var homeUnreachable = false
+     private var afkRetreats = 0
++    private var lastDry: Location? = null
++    private var waterTarget: Location? = null
++    private var waterMoveAt = 0L
++    private var waterProgressAt = 0L
++    private var waterDistance = Double.MAX_VALUE
++    private var threatEscapeAt = 0L
+     private var spot: HuntingSpot? = null
+     private var spotLevel = 0
+     // A spot that turned out empty, crowded or unreachable, with when it was marked: marks fade and the spot is tried again.
+@@ -125,6 +131,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     suspend fun onUpdate() {
+         checkFall()
++        if (!bot.isDead && escapeWater()) return
++        if (!bot.isDead && escapeThreat()) return
+         if (bot.isInStoreMode) {
+             // A store stays open for its segment, then the bot packs up and moves on.
+             if (session.isOver()) nextSegment()
+@@ -138,9 +146,6 @@ internal class LifeBehavior(private val bot: Autobot) {
+             return
+         }
+ 
+-        // A swimmer out of breath drops everything and heads back to land before it drowns.
+-        if (escapeWater()) return
+-
+         if (!bot.isInsideZone(ZoneId.TOWN)) tripDoneInTown = false
+ 
+         val wrappingUp = session.activity == SessionPlan.Activity.Home || session.activity == SessionPlan.Activity.Trade
+@@ -205,21 +210,67 @@ internal class LifeBehavior(private val bot: Autobot) {
+      * heads back to land in short legs, like a player who swam too far and turns around.
+      */
+     private suspend fun escapeWater(): Boolean {
+-        if (bot.isDead || !bot.isInsideZone(ZoneId.WATER)) return false
+-        if (bot.getActiveSequence() != null) {
+-            // The sequence that brought the bot here (a walk across the map) is dropped first.
++        if (!bot.isInsideZone(ZoneId.WATER)) {
++            lastDry = bot.location()
++            waterTarget = null
++            waterDistance = Double.MAX_VALUE
++            return false
++        }
++        val now=System.currentTimeMillis()
++        val water=net.sf.l2j.gameserver.data.manager.ZoneManager.getInstance().getZone(bot.x,bot.y,bot.z,
++                net.sf.l2j.gameserver.model.zone.type.WaterZone::class.java)
++        // Swim near the surface rather than along the lake bottom. The core breath task only checks the
++        // zone flag; a bot whose head is above the waterline can breathe while its feet remain in water.
++        if (water!=null && bot.z+bot.collisionHeight>=water.waterZ)
++            net.sf.l2j.gameserver.taskmanager.WaterTaskManager.getInstance().remove(bot)
++        if (waterTarget==null) {
+             bot.cancelSequence()
++            bot.stopMove(null)
++            bot.abortAttack()
++            bot.abortCast()
++            bot.target=null
++            waterTarget=RouteSafety.shore(bot,lastDry)
++            waterProgressAt=now
++            println("Autobots water: ${bot.name} id=${bot.objectId} escaping to $waterTarget")
++        }
++        val shore=waterTarget ?: return true
++        val remaining=distance(bot.location(),shore)
++        if (remaining < waterDistance-50) { waterDistance=remaining; waterProgressAt=now }
++        if (now-waterProgressAt>20_000L) {
++            waterTarget=RouteSafety.shore(bot,null)
++            waterProgressAt=now
++            waterDistance=Double.MAX_VALUE
+             return true
+         }
+-        if (bot.isMoving) return true
+-        if (bot.target != null) bot.target = null
+-        // The spot anchor is a spawn point, so it is known land; without a spot the nearest town is the safe direction.
+-        val anchor = spot?.location ?: MapRegionData.getInstance().getLocationToTeleport(bot, TeleportType.TOWN)
+-        val remaining = distance(bot.location(), anchor).coerceAtLeast(1.0)
+-        val leg = if (remaining <= WATER_ESCAPE_LEG) anchor
+-        else Location(bot.x + ((anchor.x - bot.x) * WATER_ESCAPE_LEG / remaining).toInt(),
+-                bot.y + ((anchor.y - bot.y) * WATER_ESCAPE_LEG / remaining).toInt(), anchor.z)
+-        WalkToSequence(bot, leg, WATER_ESCAPE_ARRIVAL) {}.execute()
++        // Do not create a sequence here: the next life tick used to cancel its own escape sequence.
++        if (now-waterMoveAt>=3000 && (!bot.isMoving || now-waterProgressAt>10_000)) {
++            waterMoveAt=now
++            if (bot.isSitting) bot.standUp()
++            val ratio=(400.0/remaining.coerceAtLeast(1.0)).coerceAtMost(1.0)
++            bot.ai.setIntention(net.sf.l2j.gameserver.enums.IntentionType.MOVE_TO,
++                    Location(bot.x+((shore.x-bot.x)*ratio).toInt(),bot.y+((shore.y-bot.y)*ratio).toInt(),
++                            if (water!=null && remaining>500) minOf(water.waterZ-10,bot.z+300) else shore.z))
++        }
++        return true
++    }
++
++    /** Give up a dangerous chase before the high-level monster kills the novice. No free teleport. */
++    private suspend fun escapeThreat(): Boolean {
++        val threat=bot.getKnownTypeInRadius(Monster::class.java,1000)
++                .filter { !it.isDead && it.isAggressive && HuntingSpots.isDeadly(it.level,bot.level) }
++                .minByOrNull { distance(bot,it) } ?: return false
++        val now=System.currentTimeMillis()
++        if (now-threatEscapeAt<4000) return true
++        threatEscapeAt=now
++        HuntingSpots.reportKillerAt(bot.location(),threat.level,bot.level)
++        bot.cancelSequence();bot.abortAttack();bot.abortCast();bot.target=null
++        dropSpot()
++        val dx=(bot.x-threat.x).toDouble();val dy=(bot.y-threat.y).toDouble()
++        val length=kotlin.math.hypot(dx,dy).coerceAtLeast(1.0)
++        val x=bot.x+(dx*900/length).toInt();val y=bot.y+(dy*900/length).toInt()
++        val z=net.sf.l2j.gameserver.geoengine.GeoEngine.getInstance().getHeight(x,y,bot.z).toInt()
++        if (bot.isSitting) bot.standUp()
++        bot.ai.setIntention(net.sf.l2j.gameserver.enums.IntentionType.MOVE_TO,Location(x,y,z))
+         return true
+     }
+ 
+@@ -293,7 +344,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+         }
+         avoidDeadlySpot(killer)
+         // Died on a long walk to its spot: the way there is what kills, don't walk it again.
+-        if (killer === bot) spot?.takeIf { distance(bot.location(), it.location) > MAX_TRAVEL_ON_FOOT }?.let { abandon(it) }
++        if (killer === bot) {
++            RouteSafety.reportWaterDeath(bot.location())
++            spot?.let { abandon(it) }
++            waterTarget=null
++        }
+         // A raid is a risk the bot took on purpose: it does not make the bot fall back to easier monsters.
+         if (RaidPlanner.isRaiding(bot)) RaidLog.count(RaidLog.Event.Deaths) else fitness.onDeath()
+         if (!bot.isInParty) session.onDeath(context())
+@@ -490,7 +545,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         }
+         val level = if (group != null) PartyPlan.huntLevel(group) else fitness.huntLevel()
+         val current = spot
+-        if (current != null && (level == spotLevel || HuntingSpots.isSuitable(current, level))) {
++        if (current != null && HuntingSpots.isSuitable(current,level) && RouteSafety.safeDestination(bot,current.location)) {
+             spotLevel = level
+             return current
+         }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationIdentity.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationIdentity.kt
+new file mode 100644
+index 0000000..ccdce82
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationIdentity.kt
+@@ -0,0 +1,57 @@
++package dev.l2j.autobots.population
++
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.data.sql.PlayerInfoTable
++import java.util.Locale
++
++/** Startup-only repair: preserve ids, inventories and relations, rename only colliding bot names. */
++internal object PopulationIdentity {
++    fun repair() {
++        L2DatabaseFactory.getInstance().connection.use { con ->
++            con.autoCommit = false
++            try {
++                val used = mutableSetOf<String>()
++                con.createStatement().use { st -> st.executeQuery("SELECT char_name FROM characters").use { rs ->
++                    while (rs.next()) used += rs.getString(1).lowercase(Locale.ROOT)
++                } }
++                val bots = mutableListOf<Triple<Int, String, Int>>()
++                con.createStatement().use { st -> st.executeQuery("SELECT obj_Id,char_name,accesslevel FROM autobots ORDER BY level DESC,obj_Id").use { rs ->
++                    while (rs.next()) bots += Triple(rs.getInt(1), rs.getString(2), rs.getInt(3))
++                } }
++                // Reserve every original name before choosing suffixes, including names later in the list.
++                val reserved = (used + bots.map { it.second.lowercase(Locale.ROOT) }).toMutableSet()
++                for ((id, original, access) in bots) {
++                    var name = original
++                    if (!used.add(name.lowercase(Locale.ROOT))) {
++                        var suffix = id.toString(36)
++                        var n = 0
++                        do {
++                            val tail = suffix + if (n == 0) "" else (n).toString(36)
++                            name = original.take(16 - tail.length) + tail
++                            n++
++                        } while (!reserved.add(name.lowercase(Locale.ROOT)))
++                        used += name.lowercase(Locale.ROOT)
++                        con.prepareStatement("UPDATE autobots SET char_name=? WHERE obj_Id=?").use { ps ->
++                            ps.setString(1, name); ps.setInt(2, id); ps.executeUpdate()
++                        }
++                        println("Autobots identity: renamed duplicate $original id=$id to $name")
++                    }
++                }
++                con.commit()
++                // No bot has spawned yet; rebuild the shared name registry from the committed names.
++                con.createStatement().use { st -> st.executeQuery("SELECT obj_Id,char_name,accesslevel FROM autobots").use { rs ->
++                    while (rs.next()) {
++                        val id = rs.getInt(1)
++                        PlayerInfoTable.getInstance().removePlayer(id)
++                        PlayerInfoTable.getInstance().addPlayer(id, "Autobots", rs.getString(2), rs.getInt(3))
++                    }
++                } }
++                val exists = con.createStatement().use { st -> st.executeQuery("SHOW INDEX FROM autobots WHERE Key_name='autobots_unique_name'").use { it.next() } }
++                if (!exists) con.createStatement().use { it.executeUpdate("ALTER TABLE autobots ADD UNIQUE KEY autobots_unique_name(char_name)") }
++            } catch (e: Exception) {
++                con.rollback()
++                throw e
++            }
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index 1b9057a..f28ce92 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -49,7 +49,7 @@ internal object PopulationManager {
+     // Every 5 minutes.
+     private const val CLANS_EVERY_TICKS = 20
+ 
+-    private class Member(val name: String, val firstDay: LocalDate, val career: Career, val schedule: DailySchedule)
++    private class Member(val id: Int, val name: String, val firstDay: LocalDate, val career: Career, val schedule: DailySchedule)
+ 
+     private val members = ConcurrentHashMap<Int, Member>()
+     private val settings get() = AutobotData.settings
+@@ -79,7 +79,7 @@ internal object PopulationManager {
+             val today = now.toLocalDate()
+             val (playing, offline) = members.values.partition { it.career.isActiveOn(today) && (settings.populationAlwaysOnline || it.schedule.isPlaying(now)) }
+ 
+-            offline.mapNotNull { AutobotsManager.activeBots[it.name] }
++            offline.mapNotNull { active(it) }
+                     .filter { it.controller == null && !it.isInCombat && it.life?.keepsOnline() != true }
+                     .forEach {
+                         SocialTrade.beforeLogout(it)
+@@ -89,29 +89,29 @@ internal object PopulationManager {
+             // Bots learn when their session ends, so they can head back to town before logging out.
+             val nowMillis = System.currentTimeMillis()
+             playing.forEach { member ->
+-                AutobotsManager.activeBots[member.name]?.life?.sessionEndsAt =
++                active(member)?.life?.sessionEndsAt =
+                         if (settings.populationAlwaysOnline) 0L else nowMillis + member.schedule.minutesLeft(now) * 60_000L
+             }
+ 
+-            playing.filter { !AutobotsManager.activeBots.containsKey(it.name) }
++            playing.filter { active(it) == null }
+                     .shuffled()
+                     .take(settings.populationLoginsPerTick)
+                     .forEach { login(it) }
+ 
+             if (settings.economyEnabled && (ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
+-                val bots = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
++                val bots = members.values.mapNotNull { active(it) }.distinctBy { it.objectId }
+                 EconomyLog.summary(bots)
+                 QuestLog.summary(bots)
+                 SkillLog.summary(bots)
+                 if (SocialTrade.enabled) TradeLog.summary(bots)
+             }
+             if ((ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
+-                GroupFinder.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
+-                SessionPlan.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
+-                RaidLog.summary(members.values.mapNotNull { AutobotsManager.activeBots[it.name] })
++                GroupFinder.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
++                SessionPlan.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
++                RaidLog.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 dev.l2j.autobots.population.llm.Llm.summary()
+             }
+-            val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
++            val online = members.values.mapNotNull { active(it) }.distinctBy { it.objectId }
+             if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
+             if (ticks % GROUPS_EVERY_TICKS == 1) SocialTrade.tick(online)
+             if (ticks % CLANS_EVERY_TICKS == 3) dev.l2j.autobots.population.group.Clans.tick(online)
+@@ -138,7 +138,7 @@ internal object PopulationManager {
+     }
+ 
+     private fun addMember(objectId: Int, name: String, firstDay: LocalDate) {
+-        members[objectId] = Member(name, firstDay, Career(objectId, firstDay), DailySchedule(objectId, settings.populationSleepHours,
++        members[objectId] = Member(objectId, name, firstDay, Career(objectId, firstDay), DailySchedule(objectId, settings.populationSleepHours,
+                 settings.populationMinSessions..settings.populationMaxSessions,
+                 settings.populationMinSessionMinutes..settings.populationMaxSessionMinutes))
+     }
+@@ -177,8 +177,12 @@ internal object PopulationManager {
+         addMember(bot.objectId, bot.name, LocalDate.now(zone))
+     }
+ 
++    private fun active(member: Member): Autobot? =
++            AutobotsManager.activeBots[member.name]?.takeIf { it.objectId == member.id }
++
+     private suspend fun login(member: Member) {
+-        val bot = AutobotsDao.loadByName(member.name) ?: return
++        if (active(member) != null) return
++        val bot = AutobotsDao.loadById(member.id) ?: return
+         bot.life = LifeBehavior(bot)
+         bot.respawnAction = RespawnAction.None
+         // Like a player: fight back against whoever flags on us, never start PvP on the innocent.
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/RouteSafety.kt b/src/main/kotlin/dev/l2j/autobots/population/RouteSafety.kt
+new file mode 100644
+index 0000000..f4e27f0
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/RouteSafety.kt
+@@ -0,0 +1,93 @@
++package dev.l2j.autobots.population
++
++import dev.l2j.autobots.extensions.location
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.data.manager.ZoneManager
++import net.sf.l2j.gameserver.data.sql.SpawnTable
++import net.sf.l2j.gameserver.geoengine.GeoEngine
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.location.Location
++import net.sf.l2j.gameserver.model.zone.type.WaterZone
++import java.util.concurrent.ConcurrentHashMap
++import kotlin.math.*
++
++/** Route checks include hazards between safe endpoints, and floors below a novice's path. */
++internal object RouteSafety {
++    private const val CELL = 2500
++    private const val RADIUS = 900.0
++    private val waterDeaths = ConcurrentHashMap<Pair<Int, Int>, Location>()
++    private data class Threat(val loc: Location, val level: Int)
++    private val threats by lazy {
++        SpawnTable.getInstance().spawns.filter { it.template.isType("Monster") && it.template.aggroRange > 0 }
++                .mapNotNull { s -> (s.loc ?: s.npc?.position)?.let { Threat(Location(it.x,it.y,it.z),s.template.level.toInt()) } }
++                .groupBy { cell(it.loc.x,it.loc.y) }
++    }
++    private fun cell(x: Int,y: Int) = Math.floorDiv(x,CELL) to Math.floorDiv(y,CELL)
++
++    fun load() {
++        L2DatabaseFactory.getInstance().connection.use { con ->
++            con.createStatement().use { it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_water_hazards (cell_x INT NOT NULL,cell_y INT NOT NULL,x INT NOT NULL,y INT NOT NULL,z INT NOT NULL,PRIMARY KEY(cell_x,cell_y))") }
++            con.createStatement().use { st -> st.executeQuery("SELECT x,y,z FROM autobot_water_hazards").use { rs ->
++                while(rs.next()) { val p=Location(rs.getInt(1),rs.getInt(2),rs.getInt(3)); waterDeaths[cell(p.x,p.y)]=p }
++            } }
++        }
++    }
++
++    fun reportWaterDeath(at: Location) {
++        val key=cell(at.x,at.y)
++        waterDeaths[key]=Location(at.x,at.y,at.z)
++        L2DatabaseFactory.getInstance().connection.use { con ->
++            con.prepareStatement("INSERT INTO autobot_water_hazards VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE x=VALUES(x),y=VALUES(y),z=VALUES(z)").use {
++                it.setInt(1,key.first);it.setInt(2,key.second);it.setInt(3,at.x);it.setInt(4,at.y);it.setInt(5,at.z);it.executeUpdate()
++            }
++        }
++    }
++
++    fun isWater(at: Location): Boolean = ZoneManager.getInstance().getZone(at.x,at.y,at.z,WaterZone::class.java)!=null
++
++    /** Includes underwater spawn anchors; a spawn is not proof that the shore is reachable. */
++    fun safeDestination(player: Player, at: Location): Boolean = !isWater(at) &&
++            waterDeaths.values.none { hypot((it.x-at.x).toDouble(),(it.y-at.y).toDouble()) < RADIUS }
++
++    fun safeSegment(player: Player, from: Location, to: Location): Boolean {
++        val dx=(to.x-from.x).toDouble();val dy=(to.y-from.y).toDouble()
++        val len2=dx*dx+dy*dy
++        fun crosses(at: Location): Boolean {
++            val initial=hypot((from.x-at.x).toDouble(),(from.y-at.y).toDouble())
++            val final=hypot((to.x-at.x).toDouble(),(to.y-at.y).toDouble())
++            if (initial<RADIUS && final>initial+20) return false // permit an escape from an existing hazard
++            val t=if(len2==0.0) 0.0 else (((at.x-from.x)*dx+(at.y-from.y)*dy)/len2).coerceIn(0.0,1.0)
++            return hypot(from.x+t*dx-at.x,from.y+t*dy-at.y)<RADIUS
++        }
++        for (cx in Math.floorDiv(minOf(from.x,to.x)-1000,CELL)..Math.floorDiv(maxOf(from.x,to.x)+1000,CELL))
++            for (cy in Math.floorDiv(minOf(from.y,to.y)-1000,CELL)..Math.floorDiv(maxOf(from.y,to.y)+1000,CELL)) {
++                if (threats[cx to cy].orEmpty().any { HuntingSpots.isDeadly(it.level,player.level) &&
++                            minOf(abs(it.loc.z-from.z),abs(it.loc.z-to.z))<2500 && crosses(it.loc) }) return false
++            }
++        if (waterDeaths.values.any { crosses(it) }) return false
++        // A swimmer is allowed to reach shore; dry routes must not dip into water along the way.
++        if (!isWater(from)) {
++            val steps=(sqrt(len2)/400).toInt().coerceAtLeast(1)
++            for (i in 1..steps) {
++                val x=from.x+(dx*i/steps).toInt();val y=from.y+(dy*i/steps).toInt()
++                val z=GeoEngine.getInstance().getHeight(x,y,from.z).toInt()
++                if (isWater(Location(x,y,z))) return false
++            }
++        }
++        return true
++    }
++
++    /** Last dry point first; otherwise look for an actual dry ground point around the swimmer. */
++    fun shore(player: Player, remembered: Location?): Location? {
++        if (remembered!=null && safeDestination(player,remembered)) return remembered
++        for (radius in listOf(256,512,1024,2048,4096,6000)) {
++            val dry=(0 until 16).map { i ->
++                val angle=2*Math.PI*i/16
++                val x=player.x+(cos(angle)*radius).toInt();val y=player.y+(sin(angle)*radius).toInt()
++                Location(x,y,GeoEngine.getInstance().getHeight(x,y,player.z).toInt())
++            }.filter { !isWater(it) }
++            if (dry.isNotEmpty()) return dry.minByOrNull { abs(it.z-player.z) }
++        }
++        return null
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+index 8cfefba..3e13323 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+@@ -9,7 +9,7 @@ import net.sf.l2j.gameserver.enums.actors.ClassId
+  * normally, falls back to easier monsters to farm adena and gear, or gives up soloing and needs a group. A bot under
+  * level 10 only steps a little down ([Mode.Careful]): for a newbie, dying is part of learning.
+  */
+-internal class Fitness(private val bot: Autobot) {
++internal class Fitness(private val bot: Autobot, private val clock: () -> Long = System::currentTimeMillis) {
+ 
+     enum class Mode(val levelOffset: Int) { Normal(0), Careful(-2), Farm(-5), NeedsGroup(-8) }
+ 
+@@ -17,10 +17,12 @@ internal class Fitness(private val bot: Autobot) {
+         private set
+ 
+     private val deaths = ArrayDeque<Long>()
+-    private var modeSince = System.currentTimeMillis()
++    private var modeSince = clock()
++    private var lastDeathAt = 0L
+ 
+     fun onDeath() {
+-        val now = System.currentTimeMillis()
++        val now = clock()
++        lastDeathAt = now
+         deaths.addLast(now)
+         while (deaths.isNotEmpty() && now - deaths.first() > WINDOW_MS) deaths.removeFirst()
+         if (deaths.size < MAX_DEATHS_PER_HOUR) return
+@@ -48,12 +50,13 @@ internal class Fitness(private val bot: Autobot) {
+ 
+     /** Re-evaluated whenever a new hunting spot is chosen. @return true if the mode changed. */
+     fun update(): Boolean {
+-        val now = System.currentTimeMillis()
++        val now = clock()
++        while (deaths.isNotEmpty() && now - deaths.first() > WINDOW_MS) deaths.removeFirst()
+         val weak = Gear.isWeak(bot)
+         return when {
+             mode == Mode.Normal && weak ->
+                 switchTo(if (bot.level < MIN_LEVEL) Mode.Careful else Mode.Farm, "gear is weak for level ${bot.level}")
+-            mode != Mode.Normal && !weak && deaths.isEmpty() && now - modeSince > WINDOW_MS -> {
++            mode != Mode.Normal && !weak && deaths.isEmpty() && now - maxOf(modeSince, lastDeathAt) > WINDOW_MS -> {
+                 bot.needsGroup = false
+                 switchTo(Mode.Normal, "geared up and an hour without deaths")
+             }
+@@ -76,7 +79,7 @@ internal class Fitness(private val bot: Autobot) {
+         if (next == mode) return false
+         EconomyLog.log(bot, Deal.ModeChange, "mode $mode -> $next: $reason")
+         mode = next
+-        modeSince = System.currentTimeMillis()
++        modeSince = clock()
+         return true
+     }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+index f8d8518..2efe8e1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+@@ -113,7 +113,8 @@ internal object GroupFinder {
+     fun wasOffered(leader: Autobot, player: Player) =
+             offers[leader.objectId]?.let { it.first == player.objectId && it.second > System.currentTimeMillis() } ?: false
+ 
+-    fun tick(online: Collection<Autobot>) {
++    fun tick(candidates: Collection<Autobot>) {
++        val online = candidates.distinctBy { it.objectId }
+         if (!enabled) return
+         val now = System.currentTimeMillis()
+         val cap = online.size * settings.groupMaxPopulationPercent / 100
+@@ -163,7 +164,8 @@ internal object GroupFinder {
+      * One line every 10 minutes: parties, how many members are with their leader, dead, in combat or sitting,
+      * how many bots are looking, and the levels gained by party members since the last line.
+      */
+-    fun summary(online: Collection<Autobot>) {
++    fun summary(candidates: Collection<Autobot>) {
++        val online = candidates.distinctBy { it.objectId }
+         if (!settings.groupLog) return
+         val parties = online.filter { it.isInParty }.map { it.party }.distinct()
+         val members = parties.flatMap { it.members }
+@@ -238,7 +240,10 @@ internal object GroupFinder {
+         return if (chosen.size + 1 >= MIN_SIZE) chosen else null
+     }
+ 
+-    private fun form(leader: Autobot, members: List<Autobot>, kind: PartyKind) {
++    private fun form(leader: Autobot, candidates: List<Autobot>, kind: PartyKind) {
++        if (leader.isInParty) return
++        val members = candidates.distinctBy { it.objectId }.filter { it.objectId != leader.objectId && !it.isInParty }
++        if (members.size + 1 < kind.minSize) return
+         // The leader sets the loot rule: a gambler keeps what it picks up (raid drops too), the others share at random.
+         val lootRule = when {
+             Temper.of(leader.objectId) == Temper.Gambler -> LootRule.ITEM_LOOTER
+@@ -335,6 +340,14 @@ internal object GroupFinder {
+         return true
+     }
+ 
++    fun leaveUnreachable(bot: Autobot) {
++        val party=bot.party ?: return
++        val leader=party.leader ?: return
++        party.removePartyMember(bot,MessageType.LEFT)
++        leftParty[bot.objectId]=leader.objectId to System.currentTimeMillis()+NO_RETURN_MS
++        startLooking(bot)
++    }
++
+     /**
+      * Too many for what the spot gives: one member goes. The party's only tank or healer may decide to leave on its own
+      * ([SELF_LEAVE_PERCENT]), it is never sent away. Otherwise the leader sends away the one it likes least among the
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+index c2dbafb..029274d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+@@ -3,6 +3,7 @@ package dev.l2j.autobots.population.group
+ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.behaviors.sequences.TravelByGatekeeperSequence
+ import dev.l2j.autobots.behaviors.sequences.WalkToSequence
++import dev.l2j.autobots.extensions.getActiveSequence
+ import dev.l2j.autobots.extensions.location
+ import dev.l2j.autobots.population.economy.GoToTownSequence
+ import dev.l2j.autobots.population.isUnderAttack
+@@ -30,6 +31,9 @@ internal class PartyBehavior(private val bot: Autobot) {
+ 
+     private var lastGreetedParty: Party? = null
+     private var travelFailedAt = 0L
++    private var separatedSince = 0L
++    private var lastGap = Double.MAX_VALUE
++    private var stalledSince = 0L
+ 
+     /** @return true when the party took care of this tick; false leaves it to the solo life (town errands, leading). */
+     suspend fun onUpdate(): Boolean {
+@@ -45,8 +49,12 @@ internal class PartyBehavior(private val bot: Autobot) {
+         if (RaidBehavior.update(bot, party)) return true
+         if (leader === bot) return lead(party)
+ 
+-        if (followFar(leader)) return true
+-
++        if (bot.isUnderAttack()) {
++            if (bot.isSitting) bot.standUp()
++            bot.combatBehavior.onUpdate()
++            return true
++        }
++        if (lostTooLong(party,leader)) return false
+         val target = assistTarget(party, leader)
+         if (target != null) {
+             if (bot.isSitting) bot.standUp()
+@@ -58,10 +66,7 @@ internal class PartyBehavior(private val bot: Autobot) {
+             return true
+         }
+ 
+-        if (bot.isUnderAttack()) {
+-            bot.combatBehavior.onUpdate()
+-            return true
+-        }
++        if (followFar(leader)) return true
+ 
+         if (leader.isSitting && !bot.isMoving) {
+             bot.combatBehavior.idleUpdate()
+@@ -82,17 +87,22 @@ internal class PartyBehavior(private val bot: Autobot) {
+ 
+     /** The leader hunts on its own terms; it only holds the party back while the healer drinks mana or someone heals up. */
+     private suspend fun lead(party: Party): Boolean {
+-        if (bot.isUnderAttack()) return false
++        if (bot.isUnderAttack() || nearbyMemberFighting(party)) {
++            if (bot.isSitting) bot.standUp()
++            return false
++        }
+         if (gather(party)) return true
+-        val tired = party.members.filter { it !== bot && distance(bot, it) < PartyPlan.RANGE }.any { member ->
++        val tired = party.members.filter { it !== bot && !it.isDead && distance(bot, it) < PartyPlan.RANGE }.any { member ->
+             (Role.of(member.classId) == Role.Healer && member.getManaPercentage() < REST_HEALER_MP) || member.getHealthPercentage() < REST_MEMBER_HP
+         }
+-        val rested = party.members.all { it.getManaPercentage() >= RESTED_PERCENT || Role.of(it.classId) != Role.Healer } &&
+-                party.members.all { it.getHealthPercentage() >= RESTED_PERCENT }
++        val living = party.members.filter { !it.isDead }
++        val rested = living.all { it.getManaPercentage() >= RESTED_PERCENT || Role.of(it.classId) != Role.Healer } &&
++                living.all { it.getHealthPercentage() >= RESTED_PERCENT }
+ 
+         val state = PartyPlan.state(party)
+-        val full = party.members.all { it.getManaPercentage() >= FULL_PERCENT && it.getHealthPercentage() >= FULL_PERCENT }
++        val full = living.all { it.getManaPercentage() >= FULL_PERCENT && it.getHealthPercentage() >= FULL_PERCENT }
+         if (bot.isSitting) {
++            if (nearbyMemberFighting(party)) { bot.standUp(); return false }
+             if (if (state.restUntilFull) full else rested) {
+                 state.restUntilFull = false
+                 bot.standUp()
+@@ -127,6 +137,7 @@ internal class PartyBehavior(private val bot: Autobot) {
+         // After a wait the leader goes on for a while and lets the late ones catch up, then waits again.
+         if (now - since > GATHER_MAX_MS + GATHER_MOVE_MS) state.gatheringSince = now
+         else if (now - since > GATHER_MAX_MS) return false
++        if (bot.getActiveSequence() != null) bot.cancelSequence()
+         if (bot.isMoving) bot.stopMove(null)
+         return true
+     }
+@@ -136,7 +147,7 @@ internal class PartyBehavior(private val bot: Autobot) {
+         val near = party.members.filter { it !== bot && !it.isDead && distance(bot, it) < PartyPlan.RANGE }
+         val agreed = PartyPlan.state(party).assist?.takeIf { it in near }
+         val tank = near.firstOrNull { Role.of(it.classId) == Role.Tank }
+-        listOfNotNull(agreed, tank, leader).forEach { ally ->
++        listOfNotNull(agreed, tank, leader.takeIf { !it.isDead && distance(bot,it)<PartyPlan.RANGE }).forEach { ally ->
+             val target = ally.target as? Monster
+             if (target != null && !target.isDead && (ally.isInCombat || target.target === ally)) return target
+         }
+@@ -149,7 +160,10 @@ internal class PartyBehavior(private val bot: Autobot) {
+     private suspend fun followFar(leader: Player): Boolean {
+         val gap = distance(bot, leader)
+         if (gap <= FAR) return false
+-        if (System.currentTimeMillis() - travelFailedAt < TRAVEL_RETRY_MS) return false
++        if (System.currentTimeMillis() - travelFailedAt < TRAVEL_RETRY_MS) {
++            bot.combatBehavior.idleUpdate()
++            return true
++        }
+         if (bot.isSitting) bot.standUp()
+ 
+         val inTown = bot.isInsideZone(ZoneId.TOWN)
+@@ -167,7 +181,25 @@ internal class PartyBehavior(private val bot: Autobot) {
+             else -> WalkToSequence(bot, leader.location(), FOLLOW_DISTANCE) { failed = true }.execute()
+         }
+         if (failed) travelFailedAt = System.currentTimeMillis()
+-        return !failed
++        return true
++    }
++
++    /** A separated bot leaves after repeated failed travel, rather than following forever without experience. */
++    private fun lostTooLong(party: Party, leader: Player): Boolean {
++        val gap=distance(bot,leader)
++        val now=System.currentTimeMillis()
++        if (!leader.isDead && gap<=PartyPlan.RANGE) {
++            separatedSince=0;stalledSince=0;lastGap=Double.MAX_VALUE
++            return false
++        }
++        if (separatedSince==0L) { separatedSince=now;stalledSince=now }
++        if (gap<lastGap-100) { lastGap=gap;stalledSince=now }
++        if (now-separatedSince<5*60_000L || now-stalledSince<2*60_000L) return false
++        bot.cancelSequence()
++        println("Autobots groups: ${bot.name} id=${bot.objectId} leaves unreachable leader ${leader.name}, gap=${gap.toInt()}")
++        GroupFinder.leaveUnreachable(bot)
++        separatedSince=0;stalledSince=0;lastGap=Double.MAX_VALUE
++        return true
+     }
+ 
+     /** Keeps within a few steps of the leader; casters stay a bit further back. */
