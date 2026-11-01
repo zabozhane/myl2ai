@@ -1,0 +1,230 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 8d7117d..68ac5da 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -40,6 +40,7 @@
+   <professionWeightSummoner>100</professionWeightSummoner>
+   <!-- Parties: population bots in a party follow the leader, assist the tank, heal, buff and rest together. -->
+   <groupsEnabled>true</groupsEnabled>
++  <clansEnabled>true</clansEnabled>
+   <!-- Bots gather parties on their own (a healer from level 25, then tank, buffer, spoiler and damage dealers),
+        shout for missing members and answer players who look for a group in chat. At most this percent of the
+        online population plays in parties; the rest hunt alone. groupLog prints every formed party. -->
+diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+index c18b35d..a0fb4ec 100644
+--- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
++++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+@@ -617,6 +617,11 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+         ChatHandler.getInstance().getHandler(3).handleChat(3, this, null, message)
+     }
+ 
++    internal fun clanSay(message: String){
++        if (clan == null) return
++        ChatHandler.getInstance().getHandler(4).handleChat(4, this, null, message)
++    }
++
+     internal fun tell(target: String, message: String){
+         ChatHandler.getInstance().getHandler(2).handleChat(2, this, target, message)
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index d16d8e7..200248a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -44,6 +44,7 @@ internal data class AutobotSettings(
+         @JsonProperty("professionWeightTank") var professionWeightTank: Int = 100,
+         @JsonProperty("professionWeightSummoner") var professionWeightSummoner: Int = 100,
+         @JsonProperty("groupsEnabled") var groupsEnabled: Boolean = true,
++        @JsonProperty("clansEnabled") var clansEnabled: Boolean = true,
+         @JsonProperty("groupFinderEnabled") var groupFinderEnabled: Boolean = true,
+         @JsonProperty("groupFinderMinLevel") var groupFinderMinLevel: Int = 10,
+         @JsonProperty("groupMaxPopulationPercent") var groupMaxPopulationPercent: Int = 40,
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/DailySchedule.kt b/src/main/kotlin/dev/l2j/autobots/population/DailySchedule.kt
+index 8578f82..425dbcf 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/DailySchedule.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/DailySchedule.kt
+@@ -23,6 +23,9 @@ internal class DailySchedule(
+         (TYPICAL_WAKE_MINUTE + rnd.nextGaussian() * WAKE_DEVIATION_MINUTES).toInt().coerceIn(EARLIEST_WAKE_MINUTE, LATEST_WAKE_MINUTE)
+     }
+ 
++    /** The hour of the day the bot wakes up: its chronotype, for matching play styles (stage 4a). */
++    fun wakeHour(): Int = wakeMinute / 60
++
+     fun isPlaying(now: ZonedDateTime): Boolean {
+         val sinceWake = now.minusMinutes(wakeMinute.toLong())
+         val minuteOfBotDay = sinceWake.hour * 60 + sinceWake.minute
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index d9bbc3e..1b9057a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -46,6 +46,8 @@ internal object PopulationManager {
+     private const val SUMMARY_EVERY_TICKS = 40
+     // Every 30 seconds.
+     private const val GROUPS_EVERY_TICKS = 2
++    // Every 5 minutes.
++    private const val CLANS_EVERY_TICKS = 20
+ 
+     private class Member(val name: String, val firstDay: LocalDate, val career: Career, val schedule: DailySchedule)
+ 
+@@ -112,6 +114,7 @@ internal object PopulationManager {
+             val online = members.values.mapNotNull { AutobotsManager.activeBots[it.name] }
+             if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
+             if (ticks % GROUPS_EVERY_TICKS == 1) SocialTrade.tick(online)
++            if (ticks % CLANS_EVERY_TICKS == 3) dev.l2j.autobots.population.group.Clans.tick(online)
+             if (ticks % GROUPS_EVERY_TICKS == 0) dev.l2j.autobots.population.llm.BotChatter.tick(online)
+             dev.l2j.autobots.population.llm.ChatMemory.tick()
+             if (++ticks % SAVE_EVERY_TICKS == 0) {
+@@ -184,8 +187,12 @@ internal object PopulationManager {
+         bot.life?.escapeDangerOnLogin()
+         Relations.load(bot)
+         GroupFinder.onSessionStart(bot)
++        dev.l2j.autobots.population.group.Clans.onLogin(bot)
+     }
+ 
++    /** The hour the bot wakes up at: a stable chronotype, for matching play styles in clans (stage 4a). */
++    fun wakeHour(objectId: Int): Int? = members[objectId]?.schedule?.wakeHour()
++
+     private fun logout(bot: Autobot) {
+         GroupFinder.forget(bot)
+         Relations.save(bot, forget = true)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt
+new file mode 100644
+index 0000000..a715715
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt
+@@ -0,0 +1,122 @@
++package dev.l2j.autobots.population.group
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.population.PopulationManager
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.sql.ClanTable
++import kotlin.math.abs
++
++/**
++ * Bot clans (stage 4a). A bot with real friends founds a clan and names it; the leader invites people it likes and
++ * the invited decide for themselves, by liking, trust, same race, close level and a similar daily schedule.
++ * Membership is the core's own (the autobots table carries clanid and the clan roster unions both tables), so clans
++ * survive relogins and restarts. Reputation, crests, wars and inviting players come later, with clan raids.
++ */
++internal object Clans {
++    private const val MIN_LEVEL = 10
++    private const val FRIENDS_TO_FOUND = 2
++    private const val FOUND_PERCENT = 20
++    private const val MAX_MEMBERS = 12
++    private const val INVITES_PER_TICK = 2
++    private const val INVITE_MIN_AFFINITY = 25
++    private const val ACCEPT_SCORE = 35
++    private const val GREET_PERCENT = 30
++    private const val LEAVE_PERCENT = 20
++    private const val LEAVE_PENALTY_MS = 24 * 60 * 60 * 1000L
++
++    /** Every few minutes: found, invite, leave. */
++    fun tick(online: List<Autobot>) {
++        if (!AutobotData.settings.clansEnabled) return
++        found(online)
++        invite(online)
++        leave(online)
++    }
++
++    /** A returning member greets the clan once in a while. */
++    fun onLogin(bot: Autobot) {
++        val clan = bot.clan ?: return
++        if (Rnd.get(100) < GREET_PERCENT && clan.onlineMembersCount > 1)
++            bot.clanSay(listOf("hi all", "привет всем", "о/", "hey").random())
++    }
++
++    /** A sociable bot with friends and no clan starts its own. */
++    private fun found(online: List<Autobot>) {
++        for (bot in online) {
++            if (bot.clanId != 0 || bot.level < MIN_LEVEL) continue
++            if (System.currentTimeMillis() < bot.clanCreateExpiryTime) continue
++            val friends = Relations.relationsOf(bot).values.count { it.affinity >= Relations.FRIEND }
++            if (friends < FRIENDS_TO_FOUND || Rnd.get(100) >= FOUND_PERCENT) continue
++            val name = nameFor() ?: continue
++            if (ClanTable.getInstance().createClan(bot, name) == null) continue
++            println("Autobots clans: ${bot.name} (lv ${bot.level}) founded \"$name\"")
++        }
++    }
++
++    /** A clan leader invites the person it likes most; not everyone says yes. */
++    private fun invite(online: List<Autobot>) {
++        val byId = online.associateBy { it.objectId }
++        var invited = 0
++        for (clan in ClanTable.getInstance().clans) {
++            if (invited >= INVITES_PER_TICK) return
++            if (clan.membersCount >= MAX_MEMBERS) continue
++            val leader = clan.leader?.playerInstance as? Autobot ?: continue
++            if (!byId.containsKey(leader.objectId)) continue
++            val candidate = Relations.relationsOf(leader)
++                    .filter { it.value.affinity >= INVITE_MIN_AFFINITY }
++                    .mapNotNull { (id, rel) -> byId[id]?.to(rel) }
++                    .filter { (bot, _) -> bot.clanId == 0 && bot.level >= MIN_LEVEL }
++                    .maxByOrNull { (bot, rel) -> sympathy(leader, bot, rel.affinity, rel.trust) }
++                    ?: continue
++            val (bot, rel) = candidate
++            val score = sympathy(leader, bot, rel.affinity, rel.trust)
++            // The invited decides by how the leader looks to it; a borderline offer is a coin flip.
++            if (score < ACCEPT_SCORE + Rnd.get(20)) {
++                if (AutobotData.settings.groupLog) println("Autobots clans: ${bot.name} declined ${clan.name} (score $score)")
++                continue
++            }
++            clan.addClanMember(bot)
++            invited++
++            println("Autobots clans: ${bot.name} (lv ${bot.level}) joined ${clan.name} (${clan.membersCount} members)")
++            if (Rnd.get(100) < 60) bot.clanSay(listOf("hi!", "glad to be here", "привет!", "рад быть с вами").random())
++        }
++    }
++
++    /** Nobody stays where the leader is disliked. */
++    private fun leave(online: List<Autobot>) {
++        for (bot in online) {
++            val clan = bot.clan ?: continue
++            // The leader stays with its own clan; disbanding comes with clan features later.
++            if (clan.leaderId == bot.objectId) continue
++            if ((Relations.of(bot, clan.leaderId)?.affinity ?: 0) > Relations.AVOID || Rnd.get(100) >= LEAVE_PERCENT) continue
++            clan.removeClanMember(bot.objectId, System.currentTimeMillis() + LEAVE_PENALTY_MS)
++            println("Autobots clans: ${bot.name} left ${clan.name}")
++        }
++    }
++
++    /** How much [bot] fits [leader]'s clan: liking, trust, same race, close level, a similar daily schedule. */
++    private fun sympathy(leader: Autobot, bot: Autobot, affinity: Int, trust: Int): Int {
++        var score = affinity + trust / 2
++        if (leader.race == bot.race) score += 10
++        val gap = abs(leader.level - bot.level)
++        if (gap <= 5) score += 10 else if (gap <= 10) score += 4
++        val a = PopulationManager.wakeHour(leader.objectId)
++        val b = PopulationManager.wakeHour(bot.objectId)
++        if (a != null && b != null && abs(a - b) <= 2) score += 8
++        return score
++    }
++
++    private val PREFIX = listOf("Iron", "Silver", "Dark", "Red", "Wild", "Stone", "Night", "Storm", "White", "Blood",
++            "Golden", "Frost", "Black", "Bright", "Green", "Steel", "Grey", "Swift", "Rune", "Moon")
++    private val SUFFIX = listOf("Wolves", "Dragons", "Blades", "Guard", "Fangs", "Hawks", "Bears", "Shadows", "Flame",
++            "Tide", "Oath", "Shield", "Crows", "Talons", "Forge", "Wind", "Spire", "Brothers", "Watch", "Fist")
++
++    /** A two-word clan name, alphanumeric and free; a few tries, then the founder thinks some more. */
++    private fun nameFor(): String? {
++        repeat(10) {
++            val name = PREFIX.random() + SUFFIX.random()
++            if (name.length in 3..16 && ClanTable.getInstance().getClanByName(name) == null) return name
++        }
++        return null
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
+index a463443..2a1df52 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
+@@ -34,6 +34,9 @@ internal object Relations {
+ 
+     fun trust(bot: Player, otherId: Int): Int = memory[bot.objectId]?.get(otherId)?.trust ?: 0
+ 
++    /** All that [bot] remembers about others: clan founding and invites (stage 4a) are decided on it. */
++    fun relationsOf(bot: Player): Map<Int, Relation> = memory[bot.objectId] ?: emptyMap()
++
+     /** A deal kept or broken (stage 2g) moves trust and liking. Only a bot online has its memory loaded. */
+     fun adjust(bot: Player, otherId: Int, trust: Int, affinity: Int = 0) {
+         if (bot !is Autobot || bot.objectId == otherId || !memory.containsKey(bot.objectId)) return
