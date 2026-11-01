@@ -205,7 +205,7 @@ new file mode 100644
 index 0000000..47039a9
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
-@@ -0,0 +1,658 @@
+@@ -0,0 +1,682 @@
 +package dev.l2j.autobots.offlinelife
 +
 +import dev.l2j.autobots.Autobot
@@ -273,12 +273,17 @@ index 0000000..47039a9
 +                         val arrivalRadius: Int = ARRIVAL_RADIUS,
 +                         /** A gatekeeper hop was already used on this trip; a second one would mean a teleport loop. */
 +                         val gkHopped: Boolean = false,
++                         /** The hunting spot this trip targets, so an unreachable spot can be excluded next time. */
++                         val spotKey: Long? = null,
 +                         /** A trainer trip already reached the ring around the trainer and walks to a standing point. */
 +                         val finalApproach: Boolean = false,
 +                         var lastMoveAt: Long = 0L,
 +                         /** Stuck detection: closest approach so far, checks without progress, sidesteps tried. */
 +                         var bestDistance: Double = Double.MAX_VALUE, var stuckChecks: Int = 0, var detours: Int = 0)
 +    private val traveling = ConcurrentHashMap<Int, Travel>()
++
++    /** Hunting spots a character already failed to reach on foot; cleared when a hunt actually starts. */
++    private val unreachableSpots = ConcurrentHashMap<Int, MutableSet<Long>>()
 +
 +    /** Throttle for the "any lessons to learn?" scan of farming characters. */
 +    private val lessonCheckedAt = ConcurrentHashMap<Int, Long>()
@@ -368,6 +373,7 @@ index 0000000..47039a9
 +        if (!reaping.add(id)) return
 +        try {
 +            traveling.remove(id)
++            unreachableSpots.remove(id)
 +            lessonCheckedAt.remove(id)
 +            statusLoggedAt.remove(id)
 +            idleSince.remove(id)
@@ -401,6 +407,13 @@ index 0000000..47039a9
 +                LOGGER.info("Offline farm: ${player.name} skips trainer ${trainer.name}: no gatekeeper hop within budget.")
 +                // Not now and not in a minute: a failed trainer trip is retried after a longer pause.
 +                lessonCheckedAt[player.objectId] = System.currentTimeMillis() + LESSON_RETRY_AFTER_FAIL_MS
++                // The lesson is postponed, but life goes on: without a fallback the character would
++                // stand in town forever (the idle watchdog deliberately skips town/peace zones).
++                if (thenHunt) {
++                    goHunting(player)
++                } else {
++                    startFarmLogged(player, "trainer trip failed")
++                }
 +                return
 +            }
 +            hopped = true
@@ -437,7 +450,8 @@ index 0000000..47039a9
 +        // Safer than the population bots: the spot's monsters match a slightly lower level.
 +        val level = (player.level - 2).coerceAtLeast(1)
 +        // Auto hunt refuses to fight in a town or a peace zone; such spots are no targets either.
-+        val excluded = mutableSetOf<Long>()
++        // Spots this character already failed to reach stay excluded until a hunt actually starts.
++        val excluded = unreachableSpots.getOrPut(player.objectId) { mutableSetOf() }
 +        var spot: HuntingSpot? = null
 +        for (attempt in 1..MAX_SPOT_ATTEMPTS) {
 +            val candidate = HuntingSpots.choose(player, level, excluded, maxWalk = MAX_WALK_TO_SPOT) ?: break
@@ -453,7 +467,7 @@ index 0000000..47039a9
 +            return
 +        }
 +        traveling[player.objectId] = Travel(Trip.TO_SPOT, spot.location.x, spot.location.y, spot.location.z,
-+                lastMoveAt = System.currentTimeMillis())
++                spotKey = spot.key, lastMoveAt = System.currentTimeMillis())
 +        walk(player, spot.location.x, spot.location.y, spot.location.z)
 +        LOGGER.info("Offline farm: ${player.name} stays online, walks to a hunting spot at ${spot.location.x},${spot.location.y}.")
 +    }
@@ -623,7 +637,15 @@ index 0000000..47039a9
 +                    walk(player, travel.targetX, travel.targetY, travel.targetZ)
 +                    return
 +                }
-+                // The spot itself is unreachable: hunt right where the character stands.
++                // The spot is unreachable from here: remember it and try another one; with none
++                // left, hunt right where the character stands.
++                travel.spotKey?.let { unreachableSpots.getOrPut(player.objectId) { mutableSetOf() }.add(it) }
++                if (travel.spotKey != null) {
++                    LOGGER.info("Offline farm: ${player.name} looks for another hunting spot.")
++                    goHunting(player)
++                    if (traveling.containsKey(player.objectId))
++                        return
++                }
 +                startFarmLogged(player, "destination unreachable")
 +            }
 +        }
@@ -632,6 +654,8 @@ index 0000000..47039a9
 +    private fun onArrived(player: Player, travel: Travel) {
 +        when (travel.trip) {
 +            Trip.TO_SPOT, Trip.BACK_TO_SPOT -> {
++                // The hunt restarts, so earlier "unreachable" marks no longer matter.
++                unreachableSpots.remove(player.objectId)
 +                startFarmLogged(player, "reached the spot")
 +                LOGGER.info("Offline farm: ${player.name} reached the spot, hunting.")
 +            }
