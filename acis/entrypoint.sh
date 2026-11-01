@@ -81,6 +81,19 @@ configure_geodata() {
 }
 
 role=${1:-}
+if [ "$role" = game ] || [ "$role" = login ]; then
+	if [ -r "$ACIS_HOME/build-info.txt" ]; then
+		printf 'Server build: role=%s ' "$role"
+		tr '\n' ' ' < "$ACIS_HOME/build-info.txt"
+		printf '\n'
+	else
+		echo "Server build: role=$role revision=unknown workingTreeDirty=unknown"
+	fi
+	if [ "$role" = game ]; then
+		artifact_hash=$(sha256sum "$ACIS_HOME/gameserver/libs/autobots.jar" | cut -d ' ' -f 1)
+		echo "Server artifact: autobotsSha256=$artifact_hash"
+	fi
+fi
 case "$role" in
 	init-db)
 		exec "$ACIS_HOME/bin/init-db.sh"

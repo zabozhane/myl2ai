@@ -400,3 +400,11 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     checked against geodata and route hazards; NPC interaction uses a standing point beside the NPC. Paid travel
     is a fallback, only when the fare leaves the supply reserve and the final walk is valid. Failed trainers are
     temporarily excluded; postponed lessons do not stop hunting.
+
+- `l2autobots-audit-market.patch` — AUD-11–AUD-12:
+  - Store shopping uses actual deficits; missing books are considered alongside gear, and stocked shots are not
+    repurchased on every town visit. An offer exactly at the buyer's limit is accepted without haggling.
+  - `Autobots store audit:` after the first minute and then every ten minutes separates listings with no online bot need, distant demand, price
+    or budget barriers, and potential buyers. Actual shopping attempts separately count missing offers, price,
+    budget, route, haggle and core transaction failures. Human demand is not inferred; no artificial purchases.
+  - Economy, trade, quests, skills, raids, population, parties, clans and offline-farm events include actor IDs.

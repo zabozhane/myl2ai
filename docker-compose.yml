@@ -8,6 +8,8 @@ x-acis-image: &acis-image
       ACIS_COMMIT: ${ACIS_COMMIT}
       AUTOBOTS_COMMIT: ${AUTOBOTS_COMMIT}
       JDK_VERSION: ${JDK_VERSION}
+      BUILD_REVISION: ${BUILD_REVISION:-unknown}
+      BUILD_DIRTY: ${BUILD_DIRTY:-unknown}
 
 x-db-credentials: &db-credentials
   LOGIN_DB_NAME: ${LOGIN_DB_NAME}
