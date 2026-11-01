@@ -380,7 +380,8 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     and nearby high-level aggressive spawns (including the floor below). Existing danger marks apply across floors.
     Water death locations persist in `autobot_water_hazards`, provisioned at startup.
   - A swimmer drops its old activity, heads for a remembered dry point or a verified shore, and retains that target
-    across ticks. Walking sequences stop when they enter water; escape movement does not cancel itself.
+    across ticks. Surfacing above wet ground does not count as reaching land. Walking sequences stop when they
+    enter water; escape movement does not cancel itself, and a swimmer's head above the waterline restores air.
   - Recovery from careful/farming mode waits an hour from the last death as well as the last mode change.
   - Party members defend and assist nearby allies before travelling; dead members do not hold up recovery.
     A member stalled away from the leader for five minutes (no progress for two) leaves, with a rejoin cooldown.
