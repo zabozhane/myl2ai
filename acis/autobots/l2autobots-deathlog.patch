@@ -1,0 +1,13 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 829b494..63684f1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -288,7 +288,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+             println("Autobots death: ${bot.name} (lv ${bot.level} ${bot.classId}) ${if (killer === bot) "drowned" else "killed by $by"}, attackers ${attackers.size}" +
+                     " [${attackers.joinToString(" ") { "${it.name}/${it.level}" }}], potions $potions, mode ${fitness.mode}," +
+                     " hunt lv $spotLevel, spot ${spot?.key ?: "-"}, party ${bot.party?.membersCount ?: 0}," +
+-                    " weapon ${bot.activeWeaponItem?.crystalType ?: "none"}, at ${bot.x},${bot.y},${bot.z}" +
++                    " weapon ${bot.activeWeaponItem?.let { "${it.name}/${it.crystalType}" } ?: "fists"}, at ${bot.x},${bot.y},${bot.z}" +
+                     (RaidPlanner.raidOf(bot.party)?.let { ", raid ${it.boss.name} ${it.phase}" } ?: ""))
+         }
+         avoidDeadlySpot(killer)
