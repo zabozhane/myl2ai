@@ -1,0 +1,744 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt
+index 341be5f..cec5667 100644
+--- a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt
+@@ -78,6 +78,12 @@ object AutofarmManager {
+         return activePlayers.containsKey(player.objectId)
+     }
+ 
++    /** Economy helpers need class preferences even while hunting is stopped in town. */
++    @Synchronized
++    internal fun prepareOfflineBehavior(player: Player) {
++        combatBehaviors.getOrPut(player.objectId) { getBehaviorForActiveClass(player) }
++    }
++
+     fun toggleFarm(player: Player) {
+         if (isAutoFarming(player)) stopFarm(player) else startFarm(player)
+     }
+@@ -175,7 +181,7 @@ object AutofarmManager {
+     }
+ 
+     /** Why auto hunt can't run where the player is now, or null when it can. */
+-    private fun forbiddenReason(player: Player): String? = when {
++    internal fun forbiddenReason(player: Player): String? = when {
+         player.isDead -> "you are dead"
+         player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE) -> "not in a peaceful zone"
+         player.isInsideZone(ZoneId.SIEGE) -> "not in a siege zone"
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+new file mode 100644
+index 0000000..85fd0bf
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -0,0 +1,152 @@
++package dev.l2j.autobots.offlinelife
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.extensions.moveTo
++import dev.l2j.autobots.population.economy.Approach
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.economy.Market
++import dev.l2j.autobots.population.quests.QuestEvent
++import dev.l2j.autobots.population.quests.QuestLog
++import dev.l2j.autobots.population.quests.QuestWorld
++import dev.l2j.autobots.population.quests.RepeatQuest
++import dev.l2j.autobots.population.quests.RepeatQuests
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.delay
++import dev.l2j.autobots.population.isUnderAttack
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.enums.IntentionType
++import net.sf.l2j.gameserver.model.actor.Npc
++import net.sf.l2j.gameserver.model.actor.Player
++
++/**
++ * Town errands of an offline-farm character, done like a player's: hand in the repeatable quest the hunt
++ * gathered, sell the junk to a merchant, restock escape scrolls and potions, grab newbie buffs. All of it
++ * reuses the population bots' economy and quest helpers, which already work on any Player. Nothing is given
++ * for free: the quest script pays, the merchant pays, the shop charges.
++ */
++internal object OfflineChores {
++
++    /** One visit to town: quests first (their adena pays for the rest), then sell, then buy, then buffs. */
++    suspend fun run(player: Player) {
++        if (!OfflineFarmManager.isActive(player) || player.isDead) return
++        OfflineEquipment.equip(player)
++        turnInQuests(player)
++        sellJunk(player)
++        buySupplies(player)
++        newbieBuffs(player)
++        player.refreshOverloaded()
++    }
++
++    /** Takes [quest] from [giver] with the same dialog clicks a player makes; the farm walks out afterwards. */
++    suspend fun takeQuest(player: Player, quest: RepeatQuest, giver: Npc) {
++        if (!approach(player, giver)) return
++        player.target = giver
++        pause(player, Rnd.get(1500, 4000).toLong())
++        giver.onBypassFeedback(player, "Quest ${quest.questName}")
++        for (event in quest.takeEvents) {
++            pause(player, Rnd.get(1500, 4000).toLong())
++            player.processQuestEvent(quest.questName, event)
++        }
++        player.target = null
++        if (player.getQuestState(quest.questName)?.isStarted == true)
++            QuestLog.log(player, QuestEvent.Taken, "${quest.questName} taken from ${giver.name} (offline farm, ${quest.rewardNote})")
++    }
++
++    /** Every started repeatable quest with enough loot whose giver stands in this town; the script pays. */
++    private suspend fun turnInQuests(player: Player) {
++        if (!AutobotData.settings.questsEnabled) return
++        for (quest in RepeatQuests.all) {
++            if (!OfflineFarmManager.isActive(player) || player.isDead) return
++            val state = player.getQuestState(quest.questName) ?: continue
++            if (!state.isStarted) continue
++            val items = quest.questItems.sumOf { player.inventory.getInventoryItemCount(it, -1) }
++            if (items < quest.turnInAt) continue
++            val giver = QuestWorld.closestNpc(player, listOf(quest.giver)) ?: continue
++            if (distance(player, giver) > OfflineFarmManager.GIVER_WITHIN) continue
++            if (!approach(player, giver)) continue
++
++            val before = player.adena
++            player.target = giver
++            pause(player, Rnd.get(1500, 4000).toLong())
++            giver.onBypassFeedback(player, "Quest ${quest.questName}")
++            pause(player, Rnd.get(1500, 4000).toLong())
++            player.target = null
++            val earned = player.adena - before
++            if (earned > 0 || player.inventory.getInventoryItemCount(quest.questItems.first(), -1) < items) {
++                QuestLog.adenaEarned(earned)
++                QuestLog.log(player, QuestEvent.TurnedIn,
++                        "${quest.questName} handed in to ${giver.name} (offline farm)" + if (earned > 0) " for $earned adena" else "")
++            }
++        }
++    }
++
++    /** What Gear.surplus marks as unneeded goes to the nearest merchant, like TownTrip does for bots. */
++    private suspend fun sellJunk(player: Player) {
++        val junk = OfflineEquipment.surplus(player)
++        if (junk.isEmpty()) return
++        val shop = Market.closestShop(player) ?: return
++        if (!approach(player, shop.merchant)) return
++        Market.sellToNpc(player, shop, junk)
++    }
++
++    private suspend fun buySupplies(player: Player) {
++        if (Gear.isArcher(player)) buy(player, Gear.arrowId(player), target = 1500, onlyBelow = 500, budgetShare = 0.6)
++        // No town shop sells mana potions in Interlude: mages rest, as players did.
++        val potions = Gear.HEALING_POTIONS.sumOf { Gear.count(player, it) }
++        val potion = Gear.HEALING_POTIONS.firstOrNull { Market.findProduct(player, it) != null }
++        if (potion != null) buy(player, potion, target = 10, onlyBelow = 3, budgetShare = 0.5, have = potions)
++        buy(player, Gear.SCROLL_OF_ESCAPE, target = 2, onlyBelow = 1, budgetShare = 1.0)
++        if (player.level >= 20) {
++            val shotId = Gear.shotId(player)
++            if (shotId > 0) buy(player, shotId, target = 500, onlyBelow = 150, budgetShare = 0.4)
++        }
++    }
++
++    /** Buys up to [target] pieces when the character has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */
++    private suspend fun buy(player: Player, itemId: Int, target: Int, onlyBelow: Int, budgetShare: Double,
++                            have: Int = Gear.count(player, itemId)) {
++        if (have >= onlyBelow) return
++        val (shop, product) = Market.findProduct(player, itemId) ?: return
++        val price = Market.priceWithTax(shop, product).coerceAtLeast(1)
++        val count = minOf(target - have, (player.adena * budgetShare / price).toInt())
++        if (count <= 0) return
++        if (!approach(player, shop.merchant)) return
++        Market.buyFromNpc(player, shop, product, count)
++    }
++
++    private suspend fun newbieBuffs(player: Player) {
++        if (!player.isNewbie || player.level < 10) return
++        val guide = Market.newbieGuideNear(player) ?: return
++        if (!approach(player, guide)) return
++        guide.onBypassFeedback(player, "SupportMagic")
++        pause(player, Rnd.get(1000, 3000).toLong())
++    }
++
++    private suspend fun pause(player: Player, millis: Long) {
++        delay(millis)
++        if (!OfflineFarmManager.isActive(player) || player.isDead || player.isUnderAttack())
++            throw CancellationException("Offline errands interrupted")
++    }
++
++    /**
++     * Walks up to an NPC the way TownTrip.walkTo does for bots: a standing point next to it (some grocers stand
++     * where no path leads), then a short approach, then a pause like a player reading the window.
++     */
++    private suspend fun approach(player: Player, npc: Npc): Boolean {
++        if (!OfflineFarmManager.isActive(player) || player.isDead) return false
++        if (!npc.isInsideRadius(player, Npc.INTERACTION_DISTANCE, true, false)) {
++            val spot = Approach.pointNear(player, npc)
++            if (spot != null) player.moveTo(spot.x, spot.y, spot.z)
++            else player.ai.setIntention(IntentionType.INTERACT, npc)
++            for (second in 1..20) {
++                pause(player, 1000)
++                if (npc.isInsideRadius(player, Npc.INTERACTION_DISTANCE, true, false) || player.isDead) break
++            }
++        }
++        if (!npc.isInsideRadius(player, Npc.INTERACTION_DISTANCE, true, false)) return false
++        player.target = npc
++        pause(player, Rnd.get(1500, 3000).toLong())
++        return OfflineFarmManager.isActive(player) && !player.isDead
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+new file mode 100644
+index 0000000..1802276
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+@@ -0,0 +1,106 @@
++package dev.l2j.autobots.offlinelife
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.autofarm.AutofarmManager
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.trade.Loans
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.enums.items.ArmorType
++import net.sf.l2j.gameserver.enums.skills.Stats
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++import net.sf.l2j.gameserver.model.item.kind.Item
++import net.sf.l2j.gameserver.model.itemcontainer.Inventory
++import net.sf.l2j.gameserver.skills.Env
++
++/** Conservative upgrades for an owner's character: real item stats, no price-based swaps. */
++internal object OfflineEquipment {
++    fun equip(player: Player) {
++        if (!OfflineFarmManager.isActive(player) || player.isDead || player.isCastingNow || player.isAttackingNow) return
++        AutofarmManager.prepareOfflineBehavior(player)
++        val candidates = player.inventory.items.filter { eligible(player, it) }
++                .sortedByDescending { score(player, it) }
++        for (item in candidates) {
++            if (!OfflineFarmManager.isActive(player)) return
++            val slot = slot(player, item)
++            if (slot < 0 || !fits(player, item)) continue
++            val worn = player.inventory.getPaperdollItem(slot)
++            if (worn == null || score(player, item) > score(player, worn) + 0.01) Gear.equip(player, item)
++        }
++    }
++
++    /** Keep consumables, materials, recipes, future-grade and enhanced/borrowed gear. */
++    fun surplus(player: Player): List<ItemInstance> {
++        val protected = Loans.protectedObjects(player)
++        return player.inventory.items.filter { item ->
++            if (item.isEquipped || !item.isSellable || item.isQuestItem || item.isHeroItem || item.isShadowItem ||
++                    item.isAugmented || item.enchantLevel > 0 || item.objectId in protected ||
++                    item.item.crystalType.id > Gear.gradeFor(player.level).id || (!item.isWeapon && !item.isArmor)) false
++            else {
++                val slot = slot(player, item)
++                val worn = if (slot >= 0) player.inventory.getPaperdollItem(slot) else null
++                worn != null && fits(player, item) && score(player, worn) >= score(player, item)
++            }
++        }
++    }
++
++    private fun eligible(player: Player, item: ItemInstance): Boolean = !item.isEquipped &&
++            item.isEquipable && !item.isQuestItem && !item.isHeroItem && !item.isShadowItem &&
++            (item.isWeapon || item.isArmor) && item.item.crystalType.id <= Gear.gradeFor(player.level).id &&
++            slot(player, item) >= 0
++
++    private fun fits(player: Player, item: ItemInstance): Boolean {
++        val current = player.inventory.getPaperdollItem(slot(player, item))
++        val kit = AutobotData.equipment.firstOrNull { player.level in it.minLevel..it.maxLevel && player.classId == it.classId }
++        if (item.isWeapon) {
++            val expected = kit?.rightHand?.takeIf { it > 0 }?.let { ItemTable.getInstance().getTemplate(it) }
++            if (current != null && item.itemType != current.itemType && item.itemType != expected?.itemType) return false
++            if (current == null && (expected == null || item.itemType != expected.itemType)) return false
++            if (item.weaponItem.isMagical != player.isMageClass) return false
++            // Avoid silently unequipping a shield or a second armor piece.
++            if (item.item.bodyPart == Item.SLOT_LR_HAND && player.inventory.getPaperdollItem(Inventory.PAPERDOLL_LHAND) != null) return false
++        } else if (item.item.type2 != Item.TYPE2_ACCESSORY) {
++            if (current != null && (item.itemType != current.itemType || item.item.bodyPart != current.item.bodyPart)) return false
++            if (current == null && item.itemType == (if (player.isMageClass) ArmorType.HEAVY else ArmorType.MAGIC)) return false
++            if (item.item.bodyPart == Item.SLOT_L_HAND && player.activeWeaponItem?.bodyPart == Item.SLOT_LR_HAND) return false
++            if (item.item.bodyPart == Item.SLOT_LEGS && player.inventory.getPaperdollItem(Inventory.PAPERDOLL_CHEST)?.item?.bodyPart == Item.SLOT_FULL_ARMOR) return false
++            if (item.item.bodyPart == Item.SLOT_FULL_ARMOR && player.inventory.getPaperdollItem(Inventory.PAPERDOLL_LEGS) != null) return false
++        }
++        return true
++    }
++
++    /** Apply the core's own base and enchant functions, without equipping the candidate to measure it. */
++    internal fun score(player: Player, item: ItemInstance): Double {
++        val stat = if (item.isWeapon) {
++            if (player.isMageClass) Stats.MAGIC_ATTACK else Stats.POWER_ATTACK
++        } else if (item.item.type2 == Item.TYPE2_ACCESSORY) Stats.MAGIC_DEFENCE
++        else if (item.item.bodyPart == Item.SLOT_L_HAND) Stats.SHIELD_DEFENCE else Stats.POWER_DEFENCE
++        val env = Env()
++        env.character = player
++        env.target = player
++        env.item = item
++        env.value = 0.0
++        item.item.getStatFuncs(item, player).filter { it.stat == stat }.sortedBy { it.order }.forEach { it.calc(env) }
++        return env.value
++    }
++
++    private fun slot(player: Player, item: ItemInstance): Int = when (item.item.bodyPart) {
++        Item.SLOT_R_HAND, Item.SLOT_LR_HAND -> Inventory.PAPERDOLL_RHAND
++        Item.SLOT_L_HAND -> Inventory.PAPERDOLL_LHAND
++        Item.SLOT_HEAD -> Inventory.PAPERDOLL_HEAD
++        Item.SLOT_CHEST, Item.SLOT_FULL_ARMOR -> Inventory.PAPERDOLL_CHEST
++        Item.SLOT_LEGS -> Inventory.PAPERDOLL_LEGS
++        Item.SLOT_GLOVES -> Inventory.PAPERDOLL_GLOVES
++        Item.SLOT_FEET -> Inventory.PAPERDOLL_FEET
++        Item.SLOT_NECK -> Inventory.PAPERDOLL_NECK
++        Item.SLOT_L_EAR, Item.SLOT_R_EAR, Item.SLOT_LR_EAR -> weaker(player, Inventory.PAPERDOLL_LEAR, Inventory.PAPERDOLL_REAR)
++        Item.SLOT_L_FINGER, Item.SLOT_R_FINGER, Item.SLOT_LR_FINGER -> weaker(player, Inventory.PAPERDOLL_LFINGER, Inventory.PAPERDOLL_RFINGER)
++        else -> -1
++    }
++
++    private fun weaker(player: Player, left: Int, right: Int): Int {
++        val a = player.inventory.getPaperdollItem(left) ?: return left
++        val b = player.inventory.getPaperdollItem(right) ?: return right
++        return if (score(player, a) <= score(player, b)) left else right
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 8e40f0d..05feb4a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -1,8 +1,19 @@
+ package dev.l2j.autobots.offlinelife
+ 
+ import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.CoScopes
+ import dev.l2j.autobots.autofarm.AutofarmManager
++import dev.l2j.autobots.extensions.useItem
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.quests.QuestWorld
++import dev.l2j.autobots.population.quests.RepeatQuests
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.CoroutineStart
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
+ import dev.l2j.autobots.extensions.moveTo
+ import dev.l2j.autobots.population.HuntingSpot
+ import dev.l2j.autobots.population.HuntingSpots
+@@ -14,6 +25,8 @@ import net.sf.l2j.L2DatabaseFactory
+ import net.sf.l2j.commons.random.Rnd
+ import net.sf.l2j.gameserver.data.SkillTable
+ import net.sf.l2j.gameserver.data.manager.ZoneManager
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.model.location.Location
+ import net.sf.l2j.gameserver.data.xml.TeleportLocationData
+ import net.sf.l2j.gameserver.enums.IntentionType
+ import net.sf.l2j.gameserver.enums.ZoneId
+@@ -50,8 +63,8 @@ import kotlin.math.sin
+  * pending walks to the nearest trainer of its class and returns to its spot afterwards.
+  * Every period of the offline life is journaled (character_offline_journal) and the owner gets a
+  * report window on login; the character is also stored to the DB periodically while the owner is
+- * away, so a crash loses minutes, not hours. No restock, no chat policy yet. Class change
+- * (professions) is stage 2.
++ * away, so a crash loses minutes, not hours. Town errands and revival reuse the core rules;
++ * professions are still deferred.
+  */
+ object OfflineFarmManager {
+     private val LOGGER = Logger.getLogger(OfflineFarmManager::class.java.name)
+@@ -62,7 +75,7 @@ object OfflineFarmManager {
+     /** objectIds being stored and removed right now because the owner logs in (deleteMe re-entrancy guard). */
+     private val reaping = ConcurrentHashMap.newKeySet<Int>()
+ 
+-    private enum class Trip { TO_SPOT, TO_TRAINER, BACK_TO_SPOT }
++    private enum class Trip { TO_SPOT, TO_TRAINER, BACK_TO_SPOT, TO_TOWN }
+ 
+     /** A walk order in progress: to the hunting spot, to a trainer, or back from the trainer to the spot. */
+     private class Travel(val trip: Trip, val targetX: Int, val targetY: Int, val targetZ: Int,
+@@ -86,6 +99,16 @@ object OfflineFarmManager {
+     /** Hunting spots a character already failed to reach on foot; cleared when a hunt actually starts. */
+     private val unreachableSpots = ConcurrentHashMap<Int, MutableSet<Long>>()
+ 
++    private val equipmentCheckedAt = ConcurrentHashMap<Int, Long>()
++    private val townCheckedAt = ConcurrentHashMap<Int, Long>()
++    private val lastTownTripAt = ConcurrentHashMap<Int, Long>()
++    private val diedAt = ConcurrentHashMap<Int, Long>()
++    private val townJobs = ConcurrentHashMap<Int, Job>()
++    private val pendingHunt = ConcurrentHashMap.newKeySet<Int>()
++    private val retryAfter = ConcurrentHashMap<Int, Long>()
++    private val failedRoundAt = ConcurrentHashMap<Int, Long>()
++    private val questsLoaded = ConcurrentHashMap.newKeySet<Int>()
++
+     /** Throttle for the "any lessons to learn?" scan of farming characters. */
+     private val lessonCheckedAt = ConcurrentHashMap<Int, Long>()
+ 
+@@ -115,15 +138,18 @@ object OfflineFarmManager {
+ 
+     fun onServerShutdown() {
+         serverShuttingDown = true
++        townJobs.values.forEach { it.cancel() }
+         // A restart closes every open journal period; the resume after the start opens fresh ones.
+         for ((_, player) in farming) {
+             runCatching { flushJournal(player, close = true, reason = "restart") }
+         }
+     }
+ 
+-    fun isFarming(player: Player): Boolean {
+-        return farming.containsKey(player.objectId)
+-    }
++    fun isFarming(player: Player): Boolean = farming[player.objectId] === player
++
++    internal fun isActive(player: Player): Boolean = !serverShuttingDown &&
++            farming[player.objectId] === player && !reaping.contains(player.objectId)
++
+ 
+     /**
+      * Core hook at the top of Player.deleteMe. Returns true when the character is kept online:
+@@ -147,6 +173,7 @@ object OfflineFarmManager {
+ 
+         player.client = DetachedClient(player)
+         farming[id] = player
++        lastTownTripAt[id] = System.currentTimeMillis()
+         markFarming(id)
+         openJournal(player)
+         beginFarm(player)
+@@ -189,6 +216,15 @@ object OfflineFarmManager {
+         val id = player.objectId
+         if (!reaping.add(id)) return
+         try {
++            townJobs.remove(id)?.cancel()
++            equipmentCheckedAt.remove(id)
++            townCheckedAt.remove(id)
++            lastTownTripAt.remove(id)
++            diedAt.remove(id)
++            questsLoaded.remove(id)
++            pendingHunt.remove(id)
++            retryAfter.remove(id)
++            failedRoundAt.remove(id)
+             traveling.remove(id)
+             unreachableSpots.remove(id)
+             lessonCheckedAt.remove(id)
+@@ -263,12 +299,16 @@ object OfflineFarmManager {
+         }
+         journal[player.objectId]?.let { it.adenaSpent += loc.price }
+         player.teleportTo(loc, 20)
++        player.onTeleported()
+         LOGGER.info("Offline farm: ${player.name} teleports to ${loc.x},${loc.y} for ${loc.price} adena.")
+         return true
+     }
+ 
+     /** Picks a hunting spot for the character's level and sends it there on foot. */
+     private fun goHunting(player: Player) {
++        if (!isActive(player) || player.isDead) return
++        val now = System.currentTimeMillis()
++        if (now < (retryAfter[player.objectId] ?: 0L)) return
+         // Safer than the population bots: the spot's monsters match a slightly lower level.
+         val level = (player.level - 2).coerceAtLeast(1)
+         // Auto hunt refuses to fight in a town or a peace zone; such spots are no targets either.
+@@ -285,9 +325,28 @@ object OfflineFarmManager {
+             break
+         }
+         if (spot == null) {
+-            LOGGER.info("Offline farm: ${player.name} stays online; no hunting spot within reach, idles in town.")
++            retryAfter[player.objectId] = now + SPOT_RETRY_MS
++            failedRoundAt.putIfAbsent(player.objectId, now)
++            LOGGER.info("Offline farm: ${player.name} exhausted reachable hunting spots; retry in 60 seconds.")
+             return
+         }
++        val chosen = spot
++        if (player.isInsideZone(ZoneId.TOWN) && availableQuest(player, chosen) != null) {
++            townAction(player) {
++                val quest = availableQuest(player, chosen)
++                if (quest != null) {
++                    val giver = QuestWorld.closestNpc(player, listOf(quest.giver))
++                    if (giver != null) OfflineChores.takeQuest(player, quest, giver)
++                }
++                if (isActive(player) && !player.isDead) startSpotTrip(player, chosen)
++            }
++            return
++        }
++        startSpotTrip(player, chosen)
++    }
++
++    private fun startSpotTrip(player: Player, spot: HuntingSpot) {
++        if (!isActive(player) || player.isDead) return
+         traveling[player.objectId] = Travel(Trip.TO_SPOT, spot.location.x, spot.location.y, spot.location.z,
+                 spotKey = spot.key, lastMoveAt = System.currentTimeMillis())
+         walk(player, spot.location.x, spot.location.y, spot.location.z)
+@@ -299,13 +358,19 @@ object OfflineFarmManager {
+                     ZoneManager.getInstance().getZone(x, y, z, PeaceZone::class.java) != null
+ 
+     private fun tick() {
+-        if (farming.isEmpty()) return
++        if (serverShuttingDown || farming.isEmpty()) return
+         val now = System.currentTimeMillis()
+ 
++        // No client sends Appearing for an offline farmer. Finish the core teleport acknowledgement
++        // here (including Scroll of Escape); otherwise it stays teleporting and cannot revive or hunt.
++        for ((_, player) in farming) {
++            if (isActive(player) && player.isTeleporting) player.onTeleported()
++        }
++
+         for ((id, travel) in traveling) {
+             try {
+                 val player = farming[id]
+-                if (player == null || player.isDead) {
++                if (player == null || !isActive(player) || player.isDead) {
+                     // Removed already, or dead on the way: stage 1 waits for the owner (no auto-return to village yet).
+                     traveling.remove(id)
+                     continue
+@@ -341,7 +406,7 @@ object OfflineFarmManager {
+                     continue
+                 }
+                 val arrived = distance(player.x, player.y, travel.targetX, travel.targetY) <= travel.arrivalRadius
+-                if (arrived) {
++                if (arrived && (travel.trip != Trip.TO_TOWN || player.isInsideZone(ZoneId.TOWN))) {
+                     traveling.remove(id)
+                     onArrived(player, travel)
+                     continue
+@@ -429,9 +494,57 @@ object OfflineFarmManager {
+             }
+         }
+ 
++        for ((id, player) in farming) {
++            if (!isActive(player)) continue
++            if (!player.isDead) { diedAt.remove(id); continue }
++            townJobs.remove(id)?.cancel()
++            val since = diedAt.getOrPut(id) { now }
++            if (now - since < DEATH_WAIT_MS || townJobs.containsKey(id)) continue
++            try {
++                AutofarmManager.stopFarm(player, "died")
++                traveling.remove(id)
++                diedAt.remove(id)
++                player.doRevive()
++                if (player.isDead) continue
++                player.teleportTo(MapRegionData.getInstance().getLocationToTeleport(player, MapRegionData.TeleportType.TOWN), 20)
++                player.onTeleported()
++                LOGGER.info("Offline farm: ${player.name} returned to the village after death.")
++                runChoresThenBack(player, null)
++            } catch (e: Exception) {
++                LOGGER.warning("Offline farm revive failed for ${player.name}: $e")
++            }
++        }
++
++        for ((id, player) in farming) {
++            if (!isActive(player) || player.isDead || traveling.containsKey(id) || townJobs.containsKey(id)) continue
++            if (now - (townCheckedAt[id] ?: 0L) < TOWN_CHECK_MS) continue
++            townCheckedAt[id] = now
++            try {
++                if (player.isUnderAttack() || player.isCastingNow || player.isAttackingNow ||
++                        !AutofarmManager.isAutoFarming(player) || player.isInsideZone(ZoneId.TOWN)) continue
++                if (now - (lastTownTripAt[id] ?: now) < MIN_TRIP_GAP_MS) continue
++                ensureQuestsLoaded(player)
++                val ready = RepeatQuests.all.any { q -> player.getQuestState(q.questName)?.isStarted == true &&
++                        q.questItems.sumOf { player.inventory.getInventoryItemCount(it, -1) } >= q.turnInAt }
++                val routine = now - (lastTownTripAt[id] ?: now) >= ROUTINE_TRIP_MS && OfflineEquipment.surplus(player).isNotEmpty()
++                if (Errands.loadPercent(player) >= 45 || ready || routine) startTownTrip(player)
++            } catch (e: Exception) {
++                LOGGER.warning("Offline farm town check failed for ${player.name}: $e")
++            }
++        }
++
++        // Equip collected loot between fights; never interfere with a walk or a town dialogue.
++        for ((id, player) in farming) {
++            if (!isActive(player) || player.isDead || player.isUnderAttack() || player.isAttackingNow || player.isCastingNow ||
++                    traveling.containsKey(id) || townJobs.containsKey(id) || now - (equipmentCheckedAt[id] ?: 0L) < 10_000L) continue
++            equipmentCheckedAt[id] = now
++            runCatching { OfflineEquipment.equip(player) }
++                    .onFailure { LOGGER.warning("Offline farm equipment failed for ${player.name}: $it") }
++        }
++
+         // Farming characters with affordable lessons visit their class trainer between fights.
+         for ((id, player) in farming) {
+-            if (traveling.containsKey(id)) continue
++            if (traveling.containsKey(id) || townJobs.containsKey(id) || !isActive(player) || now < (retryAfter[id] ?: 0L)) continue
+             if (now - (lessonCheckedAt[id] ?: 0L) < LESSON_CHECK_MS) continue
+             lessonCheckedAt[id] = now
+             try {
+@@ -446,22 +559,111 @@ object OfflineFarmManager {
+             }
+         }
+ 
+-        // Watchdog: a farmer that ended up idle outside a town (a refused startFarm, a lost
+-        // intention) gets the hunt restarted instead of standing around until the owner returns.
++        // Recover idle farmers both in town and in the field, with backoff when no route works.
+         for ((id, player) in farming) {
+-            if (traveling.containsKey(id) || player.isDead) {
++            if (traveling.containsKey(id) || townJobs.containsKey(id) || player.isDead || !isActive(player)) {
+                 idleSince.remove(id)
+                 continue
+             }
+-            if (AutofarmManager.isAutoFarming(player) || player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE)) {
++            if (AutofarmManager.isAutoFarming(player)) {
+                 idleSince.remove(id)
+                 continue
+             }
+             val since = idleSince.getOrPut(id) { now }
+-            if (now - since < IDLE_RESTART_MS) continue
++            if (now - since < IDLE_RESTART_MS || now < (retryAfter[id] ?: 0L)) continue
+             idleSince.remove(id)
+-            LOGGER.info("Offline farm: ${player.name} is idle outside a town, restarting the hunt.")
+-            startFarmLogged(player, "idle watchdog")
++            if (now - (failedRoundAt[id] ?: now) >= EXCLUSIONS_RETRY_MS) {
++                unreachableSpots.remove(id)
++                failedRoundAt.remove(id)
++            }
++            LOGGER.info("Offline farm: ${player.name} recovers an idle farm.")
++            if (player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE)) goHunting(player)
++            else startFarmLogged(player, "idle watchdog")
++        }
++    }
++
++    private fun ensureQuestsLoaded(player: Player) {
++        if (questsLoaded.add(player.objectId)) QuestWorld.loadQuestStates(player)
++    }
++
++    private fun availableQuest(player: Player, spot: HuntingSpot): dev.l2j.autobots.population.quests.RepeatQuest? {
++        if (!AutobotData.settings.questsEnabled) return null
++        ensureQuestsLoaded(player)
++        if (RepeatQuests.all.any { player.getQuestState(it.questName)?.isStarted == true }) return null
++        return RepeatQuests.matching(player, player.level, spot.npcIds()).firstOrNull { q ->
++            val giver = QuestWorld.closestNpc(player, listOf(q.giver))
++            giver != null && distance(player.x, player.y, giver.x, giver.y) <= GIVER_WITHIN
++        }
++    }
++
++    /** Every delayed town action is cancelled before the owner takes control again. */
++    private fun townAction(player: Player, action: suspend () -> Unit) {
++        if (!isActive(player)) return
++        val id = player.objectId
++        val job = CoScopes.generalScope.launch(start = CoroutineStart.LAZY) {
++            try {
++                if (isActive(player) && !player.isDead) action()
++            } catch (e: CancellationException) {
++                throw e
++            } catch (e: Exception) {
++                LOGGER.warning("Offline farm town action failed for ${player.name}: $e")
++            } finally {
++                townJobs.remove(id, coroutineContext[Job])
++                if (pendingHunt.remove(id) && isActive(player) && !player.isDead) goHunting(player)
++            }
++        }
++        if (townJobs.putIfAbsent(id, job) == null) job.start() else job.cancel()
++    }
++
++    private fun startTownTrip(player: Player) {
++        val id = player.objectId
++        lastTownTripAt[id] = System.currentTimeMillis()
++        val origin = Location(player.x, player.y, player.z)
++        townAction(player) {
++            AutofarmManager.stopFarm(player, "going to town")
++            LOGGER.info("Offline farm: ${player.name} heads to town for errands.")
++            if (Gear.count(player, Gear.SCROLL_OF_ESCAPE) > 0) {
++                if (player.isSitting) player.standUp()
++                player.useItem(Gear.SCROLL_OF_ESCAPE)
++                for (second in 1..30) {
++                    delay(1000)
++                    if (!isActive(player) || player.isDead) return@townAction
++                    if (player.isInsideZone(ZoneId.TOWN)) break
++                    if (second > 3 && !player.isCastingNow && !player.isTeleporting) break
++                }
++            }
++            if (player.isInsideZone(ZoneId.TOWN)) {
++                choresThenBack(player, origin)
++            } else {
++                val town = MapRegionData.getInstance().getLocationToTeleport(player, MapRegionData.TeleportType.TOWN)
++                if (distance(player.x, player.y, town.x, town.y) <= MAX_WALK_TO_TOWN) {
++                    traveling[id] = Travel(Trip.TO_TOWN, town.x, town.y, town.z,
++                            spotX = origin.x, spotY = origin.y, spotZ = origin.z, lastMoveAt = System.currentTimeMillis())
++                    walk(player, town.x, town.y, town.z)
++                } else startFarmLogged(player, "town too far without a scroll")
++            }
++        }
++    }
++
++    private fun runChoresThenBack(player: Player, spot: Location?) = townAction(player) { choresThenBack(player, spot) }
++
++    private suspend fun choresThenBack(player: Player, spot: Location?) {
++        try {
++            if (!isActive(player) || player.isDead) return
++            AutofarmManager.stopFarm(player, "town errands")
++            lastTownTripAt[player.objectId] = System.currentTimeMillis()
++            AutofarmManager.prepareOfflineBehavior(player)
++            ensureQuestsLoaded(player)
++            OfflineChores.run(player)
++        } catch (e: CancellationException) {
++            throw e
++        } catch (e: Exception) {
++            LOGGER.warning("Offline farm chores failed for ${player.name}: $e")
++        }
++        if (!isActive(player) || player.isDead) return
++        if (spot == null) pendingHunt.add(player.objectId) else {
++            traveling[player.objectId] = Travel(Trip.BACK_TO_SPOT, spot.x, spot.y, spot.z, lastMoveAt = System.currentTimeMillis())
++            walk(player, spot.x, spot.y, spot.z)
+         }
+     }
+ 
+@@ -469,6 +671,7 @@ object OfflineFarmManager {
+     private fun onStuck(player: Player, travel: Travel) {
+         LOGGER.info("Offline farm: ${player.name} can't reach ${travel.targetX},${travel.targetY} on foot, gives up the ${travel.trip} trip.")
+         when (travel.trip) {
++            Trip.TO_TOWN -> startFarmLogged(player, "town unreachable")
+             Trip.TO_TRAINER -> {
+                 val trainer = travel.trainer
+                 if (!travel.gkHopped && trainer != null && teleportNear(player, trainer.x, trainer.y)) {
+@@ -499,7 +702,7 @@ object OfflineFarmManager {
+                 // The spot is unreachable from here: remember it and try another one; with none
+                 // left, hunt right where the character stands.
+                 travel.spotKey?.let { unreachableSpots.getOrPut(player.objectId) { mutableSetOf() }.add(it) }
+-                if (travel.spotKey != null) {
++                if (travel.spotKey != null || player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE)) {
+                     LOGGER.info("Offline farm: ${player.name} looks for another hunting spot.")
+                     goHunting(player)
+                     if (traveling.containsKey(player.objectId))
+@@ -512,9 +715,8 @@ object OfflineFarmManager {
+ 
+     private fun onArrived(player: Player, travel: Travel) {
+         when (travel.trip) {
++            Trip.TO_TOWN -> runChoresThenBack(player, Location(travel.spotX, travel.spotY, travel.spotZ))
+             Trip.TO_SPOT, Trip.BACK_TO_SPOT -> {
+-                // The hunt restarts, so earlier "unreachable" marks no longer matter.
+-                unreachableSpots.remove(player.objectId)
+                 startFarmLogged(player, "reached the spot")
+                 LOGGER.info("Offline farm: ${player.name} reached the spot, hunting.")
+             }
+@@ -603,9 +805,16 @@ object OfflineFarmManager {
+ 
+     /** startFarm refuses silently (its message goes to the detached client); the farm log should still know. */
+     private fun startFarmLogged(player: Player, reason: String) {
++        if (!isActive(player) || player.isDead) return
+         AutofarmManager.startFarm(player)
+-        if (!AutofarmManager.isAutoFarming(player))
+-            LOGGER.info("Offline farm: ${player.name} could not start hunting ($reason).")
++        if (AutofarmManager.isAutoFarming(player)) {
++            unreachableSpots.remove(player.objectId)
++            failedRoundAt.remove(player.objectId)
++            retryAfter.remove(player.objectId)
++        } else {
++            retryAfter[player.objectId] = System.currentTimeMillis() + SPOT_RETRY_MS
++            LOGGER.info("Offline farm: ${player.name} could not start hunting ($reason): ${AutofarmManager.forbiddenReason(player) ?: "class or state rejected"}; retry scheduled.")
++        }
+     }
+ 
+     private fun distance(x1: Int, y1: Int, x2: Int, y2: Int) = hypot((x1 - x2).toDouble(), (y1 - y2).toDouble())
+@@ -647,10 +856,11 @@ object OfflineFarmManager {
+                 player.spawnMe(player.x, player.y, player.z)
+                 player.onPlayerEnter()
+                 farming[id] = player
++                lastTownTripAt[id] = System.currentTimeMillis()
+                 openJournal(player)
+                 LOGGER.info("Offline farm: ${player.name} is back after a server restart, keeps farming.")
+                 if (player.isDead)
+-                    LOGGER.info("Offline farm: ${player.name} was stored dead, waits for the owner.")
++                    LOGGER.info("Offline farm: ${player.name} was stored dead; will return to the village.")
+                 else
+                     beginFarm(player)
+             } catch (e: Exception) {
+@@ -862,6 +1072,15 @@ object OfflineFarmManager {
+         }.onFailure { LOGGER.warning("Offline farm report mark failed for ${player.name}: $it") }
+     }
+ 
++    private const val SPOT_RETRY_MS = 60_000L
++    private const val EXCLUSIONS_RETRY_MS = 5 * 60_000L
++    private const val DEATH_WAIT_MS = 15_000L
++    private const val TOWN_CHECK_MS = 60_000L
++    private const val MIN_TRIP_GAP_MS = 15 * 60_000L
++    private const val ROUTINE_TRIP_MS = 90 * 60_000L
++    private const val MAX_WALK_TO_TOWN = 6000
++    internal const val GIVER_WITHIN = 6000
++
+     /** How far on foot a character is willing to go from where the owner logged out. */
+     private const val MAX_WALK_TO_SPOT = 20000
+     /** How far a farming character is willing to walk for a trainer of its class. */
