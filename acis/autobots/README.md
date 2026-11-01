@@ -387,3 +387,16 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     A member stalled away from the leader for five minutes (no progress for two) leaves, with a rejoin cooldown.
   - Offline hunting anchors use spawns the character can actually target. Three minutes without prey or experience
     while idle triggers another spot; recently unproductive spots are excluded for thirty minutes.
+
+- `l2autobots-audit-chores.patch` — AUD-07–AUD-09:
+  - Ready repeatable quest loot triggers a town errand after the usual 15-minute trip interval. Unfinished quests
+    prefer safe spots with their own prey, including low-level prey after a level-up. A party keeps its normal
+    hunting plan. Quest logs distinguish repeatable work from profession quests and explain deferred hand-ins.
+  - Healing supplies are bought before optional gear, books and crafting. The basic arrow minimum remains an
+    essential for archers; affordable healing uses the whole essentials budget. Missing affordable healing also
+    triggers a town trip. Bots start healing-over-time below 60% HP, respect active effects/cooldowns and rest
+    earlier when out of healing. Live auto-hunt keeps the owner's potion settings.
+  - Trainers are selected by a reachable walking route first. Long walks use bounded searches over short links
+    checked against geodata and route hazards; NPC interaction uses a standing point beside the NPC. Paid travel
+    is a fallback, only when the fare leaves the supply reserve and the final walk is valid. Failed trainers are
+    temporarily excluded; postponed lessons do not stop hunting.

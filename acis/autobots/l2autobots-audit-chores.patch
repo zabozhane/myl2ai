@@ -1,0 +1,750 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index 1426367..1b40099 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -49,6 +49,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+             return
+         }
+         deadSince = 0
++        dev.l2j.autobots.population.economy.Healing.use(player)
+         
+         ensureSummonPet()        
+         handleShots()
+@@ -72,6 +73,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+             return
+         }
+         deadSince = 0
++        dev.l2j.autobots.population.economy.Healing.use(player)
+ 
+         ensureSummonPet()
+         handleShots()
+@@ -390,13 +392,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+     }
+ 
+     override val consumables: List<Consumable> = mutableListOf(
+-            Consumable(1540) { autobot -> autobot.getCombatBehavior().combatPreferences.useQuickHealingPots &&  autobot.getHealthPercentage() < 30 },
+             Consumable(728) { autobot -> autobot.getCombatBehavior().combatPreferences.useManaPots && autobot !is SecretManaRegen &&  autobot.getManaPercentage() < 60 },
+-            Consumable(1539) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterHealingPots &&  autobot.getHealthPercentage() < 80 && !autobot.hasEffect(2037) },
+             Consumable(5592) { autobot -> autobot.getCombatBehavior().combatPreferences.useGreaterCpPots &&  autobot.getCpPercentage() < 80 },
+             // Shop potions population bots buy (heals over time) and a mana drug from drops, not stacked with a running one.
+-            Consumable(1061) { autobot -> autobot.getHealthPercentage() < 40 && !autobot.hasEffect(2032) && !autobot.hasEffect(2031) },
+-            Consumable(1060) { autobot -> autobot.getHealthPercentage() < 40 && !autobot.hasEffect(2031) && !autobot.hasEffect(2032) },
+             Consumable(726) { autobot -> autobot.getManaPercentage() < 30 && !autobot.hasEffect(2279) }
+     )
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
+index f4668ad..7ada382 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
+@@ -33,7 +33,7 @@ internal class Rester(private val player: Player) {
+         return false
+     }
+ 
+-    private fun isTired() = player.getHealthPercentage() < TIRED_HEALTH_PERCENT || player.getManaPercentage() < TIRED_MANA_PERCENT ||
++    private fun isTired() = player.getHealthPercentage() < (if (player is dev.l2j.autobots.Autobot && dev.l2j.autobots.population.economy.Healing.count(player)==0) 75.0 else TIRED_HEALTH_PERCENT) || player.getManaPercentage() < TIRED_MANA_PERCENT ||
+             player.currentHp < minOf(fightCost * FIGHT_COST_MARGIN, player.maxHp * MAX_FIGHT_COST_SHARE)
+ 
+     private fun trackFightCost() {
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+index 85fd0bf..4b08f80 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -73,7 +73,8 @@ internal object OfflineChores {
+             pause(player, Rnd.get(1500, 4000).toLong())
+             player.target = null
+             val earned = player.adena - before
+-            if (earned > 0 || player.inventory.getInventoryItemCount(quest.questItems.first(), -1) < items) {
++            val remaining=quest.questItems.sumOf { player.inventory.getInventoryItemCount(it,-1) }
++            if (earned > 0 || remaining < items) {
+                 QuestLog.adenaEarned(earned)
+                 QuestLog.log(player, QuestEvent.TurnedIn,
+                         "${quest.questName} handed in to ${giver.name} (offline farm)" + if (earned > 0) " for $earned adena" else "")
+@@ -91,11 +92,12 @@ internal object OfflineChores {
+     }
+ 
+     private suspend fun buySupplies(player: Player) {
++        if(Gear.isArcher(player)) buy(player,Gear.arrowId(player),target=50,onlyBelow=10,budgetShare=1.0)
++        val potions=dev.l2j.autobots.population.economy.Healing.count(player)
++        val potion=dev.l2j.autobots.population.economy.Healing.product(player)
++        if(potion!=null) buy(player,potion,target=10,onlyBelow=3,budgetShare=1.0,have=potions)
+         if (Gear.isArcher(player)) buy(player, Gear.arrowId(player), target = 1500, onlyBelow = 500, budgetShare = 0.6)
+         // No town shop sells mana potions in Interlude: mages rest, as players did.
+-        val potions = Gear.HEALING_POTIONS.sumOf { Gear.count(player, it) }
+-        val potion = Gear.HEALING_POTIONS.firstOrNull { Market.findProduct(player, it) != null }
+-        if (potion != null) buy(player, potion, target = 10, onlyBelow = 3, budgetShare = 0.5, have = potions)
+         buy(player, Gear.SCROLL_OF_ESCAPE, target = 2, onlyBelow = 1, budgetShare = 1.0)
+         if (player.level >= 20) {
+             val shotId = Gear.shotId(player)
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 24573ef..f9e611a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -91,6 +91,8 @@ object OfflineFarmManager {
+                          val spotKey: Long? = null,
+                          /** A trainer trip already reached the ring around the trainer and walks to a standing point. */
+                          val finalApproach: Boolean = false,
++                         val route: List<Location> = emptyList(),
++                         var routeIndex: Int = 0,
+                          var lastMoveAt: Long = 0L,
+                          /** Stuck detection: closest approach so far, checks without progress, sidesteps tried. */
+                          var bestDistance: Double = Double.MAX_VALUE, var stuckChecks: Int = 0, var detours: Int = 0)
+@@ -104,6 +106,7 @@ object OfflineFarmManager {
+     private val lastTownTripAt = ConcurrentHashMap<Int, Long>()
+     private val diedAt = ConcurrentHashMap<Int, Long>()
+     private val townJobs = ConcurrentHashMap<Int, Job>()
++    private val trainerFailures=ConcurrentHashMap<Int,MutableMap<Int,Long>>()
+     private val huntProgress = ConcurrentHashMap<Int, Pair<Long, Long>>()
+     private val huntedSpot = ConcurrentHashMap<Int, Long>()
+     private val emptySpots = ConcurrentHashMap<Int, MutableMap<Long,Long>>()
+@@ -233,6 +236,7 @@ object OfflineFarmManager {
+             failedRoundAt.remove(id)
+             traveling.remove(id)
+             unreachableSpots.remove(id)
++            trainerFailures.remove(id)
+             lessonCheckedAt.remove(id)
+             statusLoggedAt.remove(id)
+             idleSince.remove(id)
+@@ -264,30 +268,33 @@ object OfflineFarmManager {
+         val originX = player.x
+         val originY = player.y
+         val originZ = player.z
+-        var hopped = gkHopped
+-        if (distance(player.x, player.y, trainer.x, trainer.y) > GK_HOP_DISTANCE && !hopped) {
+-            if (!teleportNear(player, trainer.x, trainer.y)) {
+-                LOGGER.info("Offline farm: ${player.name} skips trainer ${trainer.name}: no gatekeeper hop within budget.")
+-                // Not now and not in a minute: a failed trainer trip is retried after a longer pause.
+-                lessonCheckedAt[player.objectId] = System.currentTimeMillis() + LESSON_RETRY_AFTER_FAIL_MS
+-                // The lesson is postponed, but life goes on: without a fallback the character would
+-                // stand in town forever (the idle watchdog deliberately skips town/peace zones).
+-                if (thenHunt) {
+-                    goHunting(player)
+-                } else {
+-                    startFarmLogged(player, "trainer trip failed")
+-                }
++        val failed=trainerFailures.getOrPut(player.objectId){mutableMapOf()}
++        failed.entries.removeIf { System.currentTimeMillis()-it.value>30*60_000L }
++        val plan=dev.l2j.autobots.population.skills.TrainerTravel.select(player,failed.keys)
++        if(plan==null || (gkHopped && plan.exit!=null)) {
++            lessonCheckedAt[player.objectId]=System.currentTimeMillis()+LESSON_RETRY_AFTER_FAIL_MS
++            LOGGER.info("Offline farm: ${player.name} postpones lessons: no reachable trainer within the supply budget.")
++            if(thenHunt) goHunting(player) else startFarmLogged(player,"trainer unavailable")
++            return
++        }
++        val exit=plan.exit
++        if(exit!=null) {
++            if(!player.reduceAdena("Offline farm trainer",exit.price,player,false)) {
++                lessonCheckedAt[player.objectId]=System.currentTimeMillis()+LESSON_RETRY_AFTER_FAIL_MS
++                if(thenHunt) goHunting(player) else startFarmLogged(player,"trainer fare unavailable")
+                 return
+             }
+-            hopped = true
++            journal[player.objectId]?.let { it.adenaSpent+=exit.price }
++            player.teleportTo(exit,20);player.onTeleported()
+         }
+-        // Phase one is the ring around the trainer; the exact standing point is validated up close
+-        // in the travel tick (Approach from afar finds no path through a whole town).
+-        traveling[player.objectId] = Travel(Trip.TO_TRAINER, trainer.x, trainer.y, trainer.z, trainer = trainer,
+-                thenHunt = thenHunt, spotX = originX, spotY = originY, spotZ = originZ,
+-                arrivalRadius = TRAINER_APPROACH_RADIUS, gkHopped = hopped,
+-                lastMoveAt = System.currentTimeMillis())
+-        walk(player, trainer.x, trainer.y, trainer.z)
++        val destination=plan.walk.points.last()
++        traveling[player.objectId]=Travel(Trip.TO_TRAINER,destination.x,destination.y,destination.z,trainer=plan.trainer,
++                thenHunt=thenHunt,spotX=originX,spotY=originY,spotZ=originZ,
++                arrivalRadius=APPROACH_ARRIVAL_RADIUS,gkHopped=gkHopped||exit!=null,finalApproach=true,
++                route=plan.walk.points,lastMoveAt=System.currentTimeMillis())
++        val first=plan.walk.points.first()
++        walk(player,first.x,first.y,first.z)
++        LOGGER.info("Offline farm: ${player.name} goes to trainer ${plan.trainer.name}: ${plan.walk.points.size} waypoints, fare ${exit?.price?:0}.")
+     }
+ 
+     /** A paid gatekeeper hop to the teleport location closest to the target. Walls, not distance, are the point. */
+@@ -416,6 +423,17 @@ object OfflineFarmManager {
+                     traveling[id] = next
+                     continue
+                 }
++                if(travel.route.isNotEmpty() && travel.routeIndex<travel.route.lastIndex) {
++                    val point=travel.route[travel.routeIndex]
++                    if(distance(player.x,player.y,point.x,point.y)<=80 && kotlin.math.abs(player.z-point.z)<200) {
++                        travel.routeIndex++
++                        val next=travel.route[travel.routeIndex]
++                        travel.bestDistance=Double.MAX_VALUE;travel.stuckChecks=0
++                        travel.lastMoveAt=now
++                        walk(player,next.x,next.y,next.z)
++                        continue
++                    }
++                }
+                 val arrived = distance(player.x, player.y, travel.targetX, travel.targetY) <= travel.arrivalRadius
+                 if (arrived && (travel.trip != Trip.TO_TOWN || player.isInsideZone(ZoneId.TOWN))) {
+                     traveling.remove(id)
+@@ -423,7 +441,8 @@ object OfflineFarmManager {
+                     continue
+                 }
+                 // A finished or lost leg (arrived mid-way, stun, a fight the movement survived): walk the next leg.
+-                val remaining = distance(player.x, player.y, travel.targetX, travel.targetY)
++                val progressPoint=travel.route.getOrNull(travel.routeIndex)
++                val remaining = distance(player.x, player.y, progressPoint?.x?:travel.targetX, progressPoint?.y?:travel.targetY)
+                 if (remaining < travel.bestDistance - MIN_PROGRESS) {
+                     travel.bestDistance = remaining
+                     travel.stuckChecks = 0
+@@ -436,7 +455,7 @@ object OfflineFarmManager {
+                     travel.detours++
+                     travel.stuckChecks = 0
+                     travel.lastMoveAt = now
+-                    walkDetour(player, travel.targetX, travel.targetY)
++                    walkDetour(player, progressPoint?.x?:travel.targetX, progressPoint?.y?:travel.targetY)
+                     continue
+                 }
+                 if (travel.stuckChecks >= MAX_STUCK_CHECKS) {
+@@ -447,7 +466,8 @@ object OfflineFarmManager {
+                 }
+                 if (player.ai.desire.intention != IntentionType.MOVE_TO && now - travel.lastMoveAt > REISSUE_MOVE_MS) {
+                     travel.lastMoveAt = now
+-                    walk(player, travel.targetX, travel.targetY, travel.targetZ)
++                    val next=travel.route.getOrNull(travel.routeIndex)
++                    walk(player,next?.x?:travel.targetX,next?.y?:travel.targetY,next?.z?:travel.targetZ)
+                 }
+             } catch (e: Exception) {
+                 LOGGER.warning("Offline farm tick failed for $id: $e")
+@@ -538,7 +558,9 @@ object OfflineFarmManager {
+                 val ready = RepeatQuests.all.any { q -> player.getQuestState(q.questName)?.isStarted == true &&
+                         q.questItems.sumOf { player.inventory.getInventoryItemCount(it, -1) } >= q.turnInAt }
+                 val routine = now - (lastTownTripAt[id] ?: now) >= ROUTINE_TRIP_MS && OfflineEquipment.surplus(player).isNotEmpty()
+-                if (Errands.loadPercent(player) >= 45 || ready || routine) startTownTrip(player)
++                val lowHealing=dev.l2j.autobots.population.economy.Healing.count(player)<3 &&
++                        (dev.l2j.autobots.population.economy.Market.healingPriceAtHome(player)?:Int.MAX_VALUE)<=player.adena
++                if (Errands.loadPercent(player) >= 45 || ready || routine || lowHealing) startTownTrip(player)
+             } catch (e: Exception) {
+                 LOGGER.warning("Offline farm town check failed for ${player.name}: $e")
+             }
+@@ -559,9 +581,14 @@ object OfflineFarmManager {
+             if (now - (lessonCheckedAt[id] ?: 0L) < LESSON_CHECK_MS) continue
+             lessonCheckedAt[id] = now
+             try {
+-                if (player.isDead || player.isUnderAttack() || !AutofarmManager.isAutoFarming(player)) continue
++                if (player.isDead || player.isUnderAttack() || player.isAttackingNow || player.isCastingNow || !AutofarmManager.isAutoFarming(player)) continue
+                 if (learnableNow(player).isEmpty()) continue
+-                val trainer = nearestTrainer(player) ?: continue
++                val trainer = nearestTrainer(player)
++                if(trainer==null) {
++                    lessonCheckedAt[id]=now+LESSON_RETRY_AFTER_FAIL_MS
++                    LOGGER.info("Offline farm: ${player.name} postpones lessons: no reachable trainer within supply budget.")
++                    continue
++                }
+                 LOGGER.info("Offline farm: ${player.name} has skills to learn, walks to trainer ${trainer.name}.")
+                 AutofarmManager.stopFarm(player, "going to the trainer")
+                 goToTrainer(player, trainer, thenHunt = false)
+@@ -702,10 +729,10 @@ object OfflineFarmManager {
+         when (travel.trip) {
+             Trip.TO_TOWN -> startFarmLogged(player, "town unreachable")
+             Trip.TO_TRAINER -> {
+-                val trainer = travel.trainer
+-                if (!travel.gkHopped && trainer != null && teleportNear(player, trainer.x, trainer.y)) {
+-                    // The village walls stopped the walk; a gatekeeper hop into the town solves it.
+-                    goToTrainer(player, trainer, travel.thenHunt, gkHopped = true)
++                travel.trainer?.let { trainerFailures.getOrPut(player.objectId){mutableMapOf()}[it.objectId]=System.currentTimeMillis() }
++                val alternative=nearestTrainer(player)
++                if(alternative!=null) {
++                    goToTrainer(player,alternative,travel.thenHunt,gkHopped=travel.gkHopped)
+                     return
+                 }
+                 // A trainer trip that led nowhere is retried after a longer pause, not in a minute.
+@@ -772,10 +799,11 @@ object OfflineFarmManager {
+             SkillLearner.lessons(player).filter { SkillLearner.bookFor(it) == 0 && player.sp >= it.correctedCost }
+ 
+     /** The nearest visible trainer of the character's class within a walkable distance. */
+-    private fun nearestTrainer(player: Player): Folk? =
+-            World.getInstance().objects.filterIsInstance<Folk>()
+-                    .filter { it.isVisible && it.template.canTeach(player.classId) && distance(player.x, player.y, it.x, it.y) <= MAX_WALK_TO_TRAINER }
+-                    .minByOrNull { distance(player.x, player.y, it.x, it.y) }
++    private fun nearestTrainer(player: Player): Folk? {
++        val failed=trainerFailures.getOrPut(player.objectId){mutableMapOf()}
++        failed.entries.removeIf { System.currentTimeMillis()-it.value>30*60_000L }
++        return dev.l2j.autobots.population.skills.TrainerTravel.select(player,failed.keys)?.trainer
++    }
+ 
+     /** Mirrors RequestAcquireSkill for general skills: level order, template, SP, then the skill is stored. */
+     private fun acquire(player: Player, trainer: Folk, node: GeneralSkillNode): Boolean {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index a8f6286..8b5b5df 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -90,9 +90,10 @@ internal object HuntingSpots {
+      * ([useExits]), at most [maxWalk] of walking left after the best teleport exit.
+      */
+     fun choose(bot: Player, level: Int, excluded: Set<Long>, wanted: WantedLoot? = null,
+-               maxWalk: Int = Int.MAX_VALUE, useExits: Boolean = false): HuntingSpot? {
++               maxWalk: Int = Int.MAX_VALUE, useExits: Boolean = false, preferredNpcIds: Set<Int> = emptySet()): HuntingSpot? {
+         val candidates = spots.asSequence()
+                 .filter { it.key !in excluded && isSuitable(it, level) }
++                .filter { preferredNpcIds.isEmpty() || it.npcIds().any { id -> id in preferredNpcIds } }
+                 .filter { withinReach(bot, it, maxWalk, useExits) }
+                 .filter { !crossesLedge(bot, it) && RouteSafety.safeDestination(bot,it.location) }
+                 .map { it to score(it, bot, level) * lootBonus(it, level, wanted) }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index f993322..67fd2cd 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -50,7 +50,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private val economy get() = AutobotData.settings.economyEnabled
+     private val fitness = Fitness(bot)
+     private val party = PartyBehavior(bot)
+-    private val quests = QuestRunner(bot)
++    internal val quests = QuestRunner(bot)
+     // A party member's own trip to town: the party goes on hunting meanwhile.
+     private var partyErrand = false
+ 
+@@ -126,6 +126,9 @@ internal class LifeBehavior(private val bot: Autobot) {
+         if (economy && CraftBook.enabled) RecipeBookDao.load(bot)
+     }
+ 
++    fun repeatTurnInReady(): Boolean = quests.repeatReady()
++    fun repeatTargetIds(): Set<Int> = quests.repeatTargets()
++
+     /** The current segment of the session; a party member follows its party instead. */
+     val activity get() = session.activity
+ 
+@@ -140,6 +143,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         }
+         if (isWrappingUp()) logoffAnnounced = dev.l2j.autobots.population.llm.Persuasion.tick(bot,
+                 (plannedEnd() - System.currentTimeMillis()) / 60_000L, logoffAnnounced)
++        if (bot.isInParty) bot.questTargets=null
+         if (AutobotData.settings.groupsEnabled && bot.isInParty && updateInParty()) return
+         if (bot.isDead || bot.isUnderAttack()) {
+             bot.combatBehavior.onUpdate()
+@@ -501,6 +505,10 @@ internal class LifeBehavior(private val bot: Autobot) {
+             return
+         }
+ 
++        // Repeatable quests can still need low-level prey after an extra level: do not silently reject it.
++        val repeatTargets=quests.repeatTargets()
++        if(!bot.isInParty && repeatTargets.isNotEmpty() && target.npcIds().any { it in repeatTargets })
++            bot.questTargets=repeatTargets
+         val isAway = distance(bot.location(), target.location) > SPOT_RADIUS
+         // A quester grabs the repeatable quest of this hunting ground on the way out of town.
+         if (inTown && quests.beforeLeavingTown(target)) return
+@@ -547,8 +555,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+             dropSpot()
+         }
+         val level = if (group != null) PartyPlan.huntLevel(group) else fitness.huntLevel()
++        val repeatTargets=if(bot.isInParty) emptySet() else quests.repeatTargets()
+         val current = spot
+-        if (current != null && HuntingSpots.isSuitable(current,level) && RouteSafety.safeDestination(bot,current.location)) {
++        val repeatSuitable=current!=null && repeatTargets.isNotEmpty() && current.npcIds().any { it in repeatTargets } &&
++                !HuntingSpots.isDeadly(current.dangerLevel,bot.level)
++        if (current != null && (HuntingSpots.isSuitable(current,level)||repeatSuitable) && RouteSafety.safeDestination(bot,current.location)) {
+             spotLevel = level
+             return current
+         }
+@@ -558,7 +569,10 @@ internal class LifeBehavior(private val bot: Autobot) {
+         // A bot reaches its spot on foot or by a gatekeeper ride plus a walk: either way no more than
+         // MAX_TRAVEL_ON_FOOT of walking, or the way there is what kills it. A crowded close spot beats a far one.
+         val canRide = canTeleport()
+-        val next = HuntingSpots.choose(bot, level, excludedSpots, wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide)
++        val repeatLevel=repeatTargets.mapNotNull { net.sf.l2j.gameserver.data.xml.NpcData.getInstance().getTemplate(it)?.level?.toInt() }.minOrNull()?:level
++        val next = (if(repeatTargets.isNotEmpty()) HuntingSpots.choose(bot,repeatLevel,excludedSpots,wanted,MAX_TRAVEL_ON_FOOT,
++                useExits=canRide,preferredNpcIds=repeatTargets) else null)
++                ?: HuntingSpots.choose(bot, level, excludedSpots, wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide)
+                 ?: HuntingSpots.choose(bot, level, emptySet(), wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide)
+         if (next != null && wanted != null) EconomyLog.note(bot, "farming for ${if (wanted.spoil) "spoil" else "drops"} " +
+                 "${wanted.items.take(5).joinToString { ItemTable.getInstance().getTemplate(it)?.name ?: "$it" }} at ${next.location}")
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt
+new file mode 100644
+index 0000000..5636b8b
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt
+@@ -0,0 +1,35 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.extensions.getCombatBehavior
++import dev.l2j.autobots.extensions.useItem
++import dev.l2j.autobots.utils.getHealthPercentage
++import net.sf.l2j.gameserver.model.actor.Player
++import java.util.concurrent.ConcurrentHashMap
++
++/** Own potions only: start slow healing early, never stack healing-over-time effects. */
++internal object Healing {
++    private val usedAt=ConcurrentHashMap<Int,Long>()
++    private val effects=listOf(2031,2032,2037)
++    fun count(player: Player): Int = listOf(1060,1061,1539,1540).sumOf { Gear.count(player,it) }
++    fun product(player: Player): Int? = Gear.HEALING_POTIONS.mapNotNull { id ->
++        Market.findProduct(player,id)?.let { (shop,p) -> id to Market.priceWithTax(shop,p) }
++    }.filter { it.second<=player.adena }.minByOrNull { it.second }?.first
++        ?: Gear.HEALING_POTIONS.filter { Market.findProduct(player,it)!=null }.minByOrNull { Market.npcPrice(it)?:Int.MAX_VALUE }
++
++    fun use(player: Player) {
++        if(player !is Autobot || player.isDead) return // live auto-hunt uses the owner's own settings
++        val now=System.currentTimeMillis()
++        if(now-(usedAt[player.objectId]?:0L)<3000) return
++        val hp=player.getHealthPercentage()
++        val prefs=player.getCombatBehavior().combatPreferences
++        val quick=hp<30 && prefs.useQuickHealingPots && Gear.count(player,1540)>0
++        val id=if(quick) 1540 else {
++            if(hp>=60 || effects.any { player.getFirstEffect(it)!=null }) return
++            listOf(1539,1061,1060).firstOrNull { Gear.count(player,it)>0 && (it!=1539 || prefs.useGreaterHealingPots) } ?: return
++        }
++        usedAt[player.objectId]=now
++        player.useItem(id)
++        EconomyLog.note(player,"used healing item $id at ${hp.toInt()}% HP")
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+index 9bdf3b0..040965b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+@@ -78,6 +78,13 @@ internal object Market {
+             .filter { (_, product) -> !product.hasLimitedStock() || product.count > 0 }
+             .minByOrNull { (shop, _) -> distance(bot, shop.merchant) }
+ 
++    fun healingPriceAtHome(bot: Player): Int? {
++        val town=net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getLocationToTeleport(bot,
++                net.sf.l2j.gameserver.data.xml.MapRegionData.TeleportType.TOWN)
++        return shops.filter { distance(it.merchant.location(),town)<=TOWN_RADIUS }
++                .flatMap { shop -> Gear.HEALING_POTIONS.mapNotNull { shop.products[it]?.let { p -> priceWithTax(shop,p) } } }.minOrNull()
++    }
++
+     fun closestShop(bot: Player): Shop? = shopsNear(bot).minByOrNull { distance(bot, it.merchant) }
+ 
+     /** Village Newbie Guides: their "support magic" buffs novices of level 10-24 for free, as on retail. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+new file mode 100644
+index 0000000..c78654b
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+@@ -0,0 +1,92 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.behaviors.sequences.WalkToSequence
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.delay
++import net.sf.l2j.gameserver.geoengine.GeoEngine
++import net.sf.l2j.gameserver.model.actor.Npc
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.location.Location
++import dev.l2j.autobots.population.RouteSafety
++import kotlin.math.*
++
++/** A route ends beside the NPC, not in its blocked counter/roof geodata cell. */
++internal object NpcTravel {
++    data class Walk(val points: List<Location>, val length: Double)
++
++    fun plan(player: Player,npc: Npc,origin: Location=player.location(),maxDistance: Int=12000): Walk? {
++        if (distance(origin,npc.location())>maxDistance) return null
++        val geo=GeoEngine.getInstance()
++        val candidates=listOfNotNull(Approach.pointNear(player,npc)) + listOf(60,100,130).flatMap { radius ->
++            (0 until 16).map { i ->
++                val a=2*Math.PI*i/16;val x=npc.x+(cos(a)*radius).toInt();val y=npc.y+(sin(a)*radius).toInt()
++                Location(x,y,geo.getHeight(x,y,npc.z).toInt())
++            }
++        }
++        val goals=candidates.filter { abs(it.z-npc.z)<=50 }.distinctBy { Triple(it.x,it.y,it.z) }.sortedBy { distance(origin,it) }.take(12)
++        for (point in goals) {
++            val path=segment(player,origin,point) ?: continue
++            return Walk(path,(listOf(origin)+path).zipWithNext().sumOf { distance(it.first,it.second) })
++        }
++        // The core's largest path buffer covers only a few thousand world units. Solve a longer
++        // walk as a bounded coarse search whose individual links use the real geodata pathfinder.
++        for(point in goals.take(3)) {
++            val route=coarse(player,origin,point,maxDistance) ?: continue
++            return Walk(route,(listOf(origin)+route).zipWithNext().sumOf { distance(it.first,it.second) })
++        }
++        return null
++    }
++
++    private fun segment(player: Player,from: Location,to: Location): List<Location>? {
++        val geo=GeoEngine.getInstance()
++        val path=if(geo.canMoveToTarget(from.x,from.y,from.z,to.x,to.y,to.z)) listOf(to)
++            else geo.findPath(from.x,from.y,from.z,to.x,to.y,to.z,true)?.toList().orEmpty().let { if(it.isEmpty()) it else it+to }
++        if(path.isEmpty()) return null
++        if((listOf(from)+path).zipWithNext().any { !RouteSafety.safeSegment(player,it.first,it.second) }) return null
++        return path
++    }
++
++    private data class Node(val x: Int,val y: Int,val at: Location,val route: List<Location>,val cost: Double)
++    private fun coarse(player: Player,from: Location,to: Location,maxDistance: Int): List<Location>? {
++        val queue=java.util.PriorityQueue<Node>(compareBy { it.cost+distance(it.at,to) })
++        val costs=mutableMapOf<Triple<Int,Int,Int>,Double>()
++        queue.add(Node(0,0,from,emptyList(),0.0))
++        val geo=GeoEngine.getInstance()
++        var expanded=0
++        while(queue.isNotEmpty() && expanded++<160) {
++            val node=queue.poll()
++            if(distance(node.at,to)<=2800) segment(player,node.at,to)?.let { return node.route+it }
++            for(dx in -1..1) for(dy in -1..1) {
++                if(dx==0 && dy==0) continue
++                val nx=node.x+dx;val ny=node.y+dy
++                val x=from.x+nx*800;val y=from.y+ny*800
++                val at=Location(x,y,geo.getHeight(x,y,node.at.z).toInt())
++                if(distance(from,at)>maxDistance || !RouteSafety.safeDestination(player,at)) continue
++                val key=Triple(nx,ny,Math.floorDiv(at.z,200))
++                val lower=node.cost+distance(node.at,at)
++                if(lower>=(costs[key]?:Double.MAX_VALUE)) continue
++                val link=segment(player,node.at,at) ?: continue
++                val cost=node.cost+(listOf(node.at)+link).zipWithNext().sumOf { distance(it.first,it.second) }
++                if(cost>maxDistance*2 || cost>=(costs[key]?:Double.MAX_VALUE)) continue
++                costs[key]=cost
++                queue.add(Node(nx,ny,at,node.route+link,cost))
++            }
++        }
++        return null
++    }
++
++    suspend fun reach(player: Player,npc: Npc,maxDistance: Int=12000): Boolean {
++        if(player.isDead) return false
++        if(player.isSitting) { player.standUp();delay(2700) }
++        if (!npc.isInsideRadius(player,Npc.INTERACTION_DISTANCE,true,false)) {
++            val route=plan(player,npc,maxDistance=maxDistance) ?: return false
++            for(point in route.points) {
++                var failed=false
++                WalkToSequence(player,point,20){failed=true}.definition()
++                if(failed || player.isDead) return false
++            }
++        }
++        return !player.isDead && npc.isInsideRadius(player,Npc.INTERACTION_DISTANCE,true,false)
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index c0d0d71..bdee913 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -49,6 +49,8 @@ internal object Errands {
+     fun shouldLeaveSpot(bot: Autobot, lastTripAt: Long): Boolean {
+         val minutesSinceTrip = (System.currentTimeMillis() - lastTripAt) / 60_000
+         if (minutesSinceTrip < MIN_MINUTES_BETWEEN_TRIPS) return false
++        if(bot.life?.repeatTurnInReady()==true) return true
++        if(Healing.count(bot)<3 && (Market.healingPriceAtHome(bot)?:Int.MAX_VALUE)<=bot.adena) return true
+         if (SkillLearner.hasLessons(bot)) return true
+         if (loadPercent(bot) >= HEAVY_LOAD_PERCENT) return true
+         if (outOfShots(bot)) return true
+@@ -111,6 +113,8 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         if (bot.isSitting) bot.standUp()
+ 
+         Gear.equipUpgradesFromInventory(bot)
++        sellToNpc(junk())
++        buyHealing()
+         SocialTrade.repayInTown(bot)
+         Crystals.crystallizeJunk(bot)
+         tradeWithStores()
+@@ -217,16 +221,13 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         // Shares of what the bot can spend now: a scroll home and potions are cheap insurance, and the rest stays
+         // for gear. The reserve is travel money, and a scroll or a potion is exactly what it is kept for, so
+         // essentials may use all of the adena. No town shop sells mana potions in Interlude: mages rest, as players did.
+-        val potions = Gear.HEALING_POTIONS.sumOf { Gear.count(bot, it) }
+-        val potion = Gear.HEALING_POTIONS.firstOrNull { Market.findProduct(bot, it) != null }
++        buyHealing()
+         if (bot.level < 20) {
+             // A newbie fights next to the village and walks home in minutes, so the potions that keep it alive
+             // come first; the scroll is one at most, and only with adena left after the potions.
+-            if (potion != null) buy(potion, target = 10, budgetShare = 1.0, onlyBelow = 3, have = potions, essential = true)
+             buy(Gear.SCROLL_OF_ESCAPE, target = 1, budgetShare = 1.0, onlyBelow = 1, essential = true)
+         } else {
+             buy(Gear.SCROLL_OF_ESCAPE, target = 2, budgetShare = 1.0, onlyBelow = 1, essential = true)
+-            if (potion != null) buy(potion, target = 10, budgetShare = 0.5, onlyBelow = 3, have = potions, essential = true)
+         }
+         if (bot.level >= 20 || Errands.spendable(bot) >= 5000) {
+             buy(Gear.shotId(bot), target = shotsFor(bot.level), budgetShare = 0.4, onlyBelow = shotsFor(bot.level) / 3)
+@@ -235,6 +236,14 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         if (Gear.isArcher(bot)) buy(Gear.arrowId(bot), target = 1500, budgetShare = 0.6, onlyBelow = 500, essential = true)
+     }
+ 
++    private suspend fun buyHealing() {
++        if(Gear.isArcher(bot)) buy(Gear.arrowId(bot),target=50,budgetShare=1.0,onlyBelow=10,essential=true)
++        val have=Healing.count(bot)
++        if(have>=3) return
++        val potion=Healing.product(bot) ?: return
++        buy(potion,target=10,budgetShare=1.0,onlyBelow=3,have=have,essential=true)
++    }
++
+     /** Buys up to [target] pieces when the bot has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */
+     private suspend fun buy(itemId: Int, target: Int, budgetShare: Double, onlyBelow: Int, have: Int = Gear.count(bot, itemId),
+                             essential: Boolean = false) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index f772e27..f0dab2a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -75,9 +75,34 @@ internal class QuestRunner(private val bot: Autobot) {
+     }
+ 
+     /** A bot due for its profession quest plays this session rather than idling or trading, as a player would. */
+-    fun hasBusiness(): Boolean = AutobotData.settings.questsEnabled && bot.classId.level() == 0 && bot.level >= START_LEVEL &&
++    fun hasBusiness(): Boolean = repeatReady() || AutobotData.settings.questsEnabled && bot.classId.level() == 0 && bot.level >= START_LEVEL &&
+             !bot.isInParty && System.currentTimeMillis() >= pausedUntil && PathQuests.forBaseClass(bot.classId).any { it.to in getSupportedClasses }
+ 
++    fun repeatReady(): Boolean {
++        if (!AutobotData.settings.questsEnabled) return false
++        ensureLoaded()
++        return RepeatQuests.all.any { q -> bot.getQuestState(q.questName)?.isStarted==true &&
++                q.questItems.sumOf { bot.inventory.getInventoryItemCount(it,-1) }>=q.turnInAt }
++    }
++
++    fun repeatTargets(): Set<Int> {
++        if(!AutobotData.settings.questsEnabled) return emptySet()
++        ensureLoaded()
++        return RepeatQuests.all.filter { q -> bot.getQuestState(q.questName)?.isStarted==true &&
++                q.questItems.sumOf { bot.inventory.getInventoryItemCount(it,-1) }<q.turnInAt }.flatMap { it.monsters }.filter { id ->
++            val template=net.sf.l2j.gameserver.data.xml.NpcData.getInstance().getTemplate(id)
++            template!=null && template.level.toInt()<=bot.level+1
++        }.toSet()
++    }
++
++    private val repeatDeferredAt=mutableMapOf<String,Long>()
++    private fun deferRepeat(name: String,reason: String) {
++        val now=System.currentTimeMillis()
++        if(now-(repeatDeferredAt[name]?:0L)<5*60_000L) return
++        repeatDeferredAt[name]=now
++        println("Autobots quests: ${bot.name} id=${bot.objectId} defers $name: $reason")
++    }
++
+     fun onLogout() {
+         relax()
+         QuestLog.setActive(bot, false)
+@@ -103,7 +128,7 @@ internal class QuestRunner(private val bot: Autobot) {
+         val quest = RepeatQuests.matching(bot, bot.level, spot.npcIds()).firstOrNull() ?: return false
+         val giver = QuestWorld.closestNpc(bot, listOf(quest.giver)) ?: return false
+         if (distance(bot, giver) > GIVER_WITHIN) return false
+-        if (!reach(giver)) return true
++        if (!reach(giver)) { deferRepeat(quest.questName,"cannot reach giver to take quest"); return false }
+ 
+         bot.target = giver
+         delay(Rnd.get(1500, 4000).toLong())
+@@ -132,8 +157,16 @@ internal class QuestRunner(private val bot: Autobot) {
+             val items = quest.questItems.sumOf { bot.inventory.getInventoryItemCount(it, -1) }
+             if (items < quest.turnInAt) continue
+             val giver = QuestWorld.closestNpc(bot, listOf(quest.giver)) ?: continue
+-            if (distance(bot, giver) > GIVER_WITHIN) continue
+-            if (!reach(giver)) continue
++            if (distance(bot,giver)>GIVER_WITHIN) {
++                val exit=gatekeeperExitFor(giver.location())
++                if(exit==null || exit.price>dev.l2j.autobots.population.economy.Errands.spendable(bot)) {
++                    deferRepeat(quest.questName,"giver is in another town; no affordable route after supplies reserve")
++                    continue
++                }
++                travelTo(giver.location(),800)
++                if(distance(bot,giver)>GIVER_WITHIN) { deferRepeat(quest.questName,"route to giver's town failed"); continue }
++            }
++            if (!reach(giver)) { deferRepeat(quest.questName,"giver is unreachable"); continue }
+ 
+             val before = bot.adena
+             bot.target = giver
+@@ -142,10 +175,12 @@ internal class QuestRunner(private val bot: Autobot) {
+             delay(Rnd.get(1500, 4000).toLong())
+             bot.target = null
+             val earned = bot.adena - before
+-            if (earned > 0 || bot.inventory.getInventoryItemCount(quest.questItems.first(), -1) < items) {
++            val remaining=quest.questItems.sumOf { bot.inventory.getInventoryItemCount(it,-1) }
++            if (earned > 0 || remaining < items) {
++                repeatDeferredAt.remove(quest.questName)
+                 QuestLog.adenaEarned(earned)
+                 QuestLog.log(bot, QuestEvent.TurnedIn, "${quest.questName} handed in to ${giver.name}" + if (earned > 0) " for $earned adena" else "")
+-            }
++            } else deferRepeat(quest.questName,"NPC dialog did not accept the loot")
+         }
+     }
+ 
+@@ -313,9 +348,10 @@ internal class QuestRunner(private val bot: Autobot) {
+ 
+     /** Walks (or takes a gatekeeper) to an NPC until it can talk. @return true once in talking range. */
+     private suspend fun reach(npc: Npc): Boolean {
+-        if (distance(bot, npc) <= Npc.INTERACTION_DISTANCE) return true
+-        travelTo(npc.location(), Npc.INTERACTION_DISTANCE - 50)
+-        return distance(bot, npc) <= Npc.INTERACTION_DISTANCE
++        if (distance(bot,npc)>12000) {
++            travelTo(npc.location(),800)
++        }
++        return dev.l2j.autobots.population.economy.NpcTravel.reach(bot,npc)
+     }
+ 
+     private suspend fun travelTo(destination: Location, radius: Int) {
+@@ -461,6 +497,7 @@ internal object QuestLog {
+         val events = QuestEvent.values().joinToString(" ") { "${it.name}=${counts[it]?.getAndSet(0) ?: 0}" }
+         // Bots past 20 still without a profession: those that haven't finished their Path quest yet.
+         val waiting = bots.count { it.level >= 20 && it.classId.level() == 0 }
+-        println("Autobots quest summary: $events questing=${active.count { id -> bots.any { it.objectId == id } }} noProfessionAt20=$waiting questAdena=${adenaEarned.getAndSet(0)}")
++        println("Autobots quest summary: $events questing=${active.count { id -> bots.any { it.objectId == id } }} noProfessionAt20=$waiting questAdena=${adenaEarned.getAndSet(0)} " +
++                "repeatReady=${bots.count { it.life?.repeatTurnInReady()==true }} repeatInProgress=${bots.count { it.life?.repeatTargetIds()?.isNotEmpty()==true }}")
+     }
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt b/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt
+index 0b67a9a..cd00621 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt
+@@ -78,13 +78,19 @@ internal object SkillLearner {
+ 
+         val learnable = affordable.filter { bookFor(it).let { book -> book == 0 || Gear.count(bot, book) > 0 } }
+         if (learnable.isEmpty()) return 0
+-        val trainer = trainers.filter { it.isVisible && it.template.canTeach(bot.classId) && distance(bot, it) <= TRAINER_RADIUS }
+-                .minByOrNull { distance(bot, it) }
++        var reached: Folk?=null
++        for(candidate in trainers.filter { it.isVisible && it.template.canTeach(bot.classId) && distance(bot,it)<=TRAINER_RADIUS }
++                .sortedBy { distance(bot,it) }.take(6)) {
++            if(dev.l2j.autobots.population.economy.NpcTravel.plan(bot,candidate)!=null && walkTo(bot,candidate)) {
++                reached=candidate
++                break
++            }
++        }
++        val trainer=reached
+         if (trainer == null) {
+-            SkillLog.note(bot, "no trainer for ${bot.classId} in this town")
++            SkillLog.note(bot, "no reachable trainer for ${bot.classId} in this town")
+             return 0
+         }
+-        if (!walkTo(bot, trainer)) return 0
+ 
+         // Learning a level can open the next one (Power Strike 1, then 2...): go on while SP lasts.
+         var learned = 0
+@@ -135,10 +141,12 @@ internal object SkillLearner {
+     private suspend fun walkTo(bot: Autobot, target: net.sf.l2j.gameserver.model.actor.Creature): Boolean {
+         if (bot.isDead) return false
+         if (bot.isSitting) bot.standUp()
+-        if (distance(bot, target) > Npc.INTERACTION_DISTANCE) {
+-            WalkToSequence(bot, target.location(), Npc.INTERACTION_DISTANCE - 50) {}.definition()
++        if(target is Npc) {
++            if(!dev.l2j.autobots.population.economy.NpcTravel.reach(bot,target)) return false
++        } else {
++            WalkToSequence(bot,target.location(),Npc.INTERACTION_DISTANCE-50){}.definition()
++            if(distance(bot,target)>Npc.INTERACTION_DISTANCE) return false
+         }
+-        if (distance(bot, target) > Npc.INTERACTION_DISTANCE * 1.5) return false
+         bot.target = target
+         delay(Rnd.get(2000, 5000).toLong())
+         return !bot.isDead
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/skills/TrainerTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/skills/TrainerTravel.kt
+new file mode 100644
+index 0000000..14b9619
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/skills/TrainerTravel.kt
+@@ -0,0 +1,32 @@
++package dev.l2j.autobots.population.skills
++
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.population.economy.NpcTravel
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.gameserver.data.xml.TeleportLocationData
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Folk
++import net.sf.l2j.gameserver.model.location.TeleportLocation
++
++/** Walking to a local guild is free; a paid ride is a last resort, and must leave a supply reserve. */
++internal object TrainerTravel {
++    data class Plan(val trainer: Folk,val walk: NpcTravel.Walk,val exit: TeleportLocation?=null)
++
++    fun select(player: Player,excluded: Set<Int> = emptySet()): Plan? {
++        val trainers=World.getInstance().objects.filterIsInstance<Folk>()
++                .filter { it.isVisible && it.template.canTeach(player.classId) && it.objectId !in excluded }
++                .sortedBy { distance(player,it) }
++        for(npc in trainers.filter { distance(player,it)<=12000 }.take(6)) {
++            NpcTravel.plan(player,npc)?.let { return Plan(npc,it) }
++        }
++        val budget=(player.adena-Errands.reserve(player)).coerceAtLeast(0)
++        return trainers.take(8).flatMap { npc ->
++            TeleportLocationData.getInstance().allTeleportLocations.asSequence()
++                    .filter { !it.isNoble && it.price<=budget && distance(it,npc.location())<6000 }
++                    .sortedBy { it.price+distance(it,npc.location())/10 }.take(2)
++                    .mapNotNull { exit -> NpcTravel.plan(player,npc,exit,6000)?.let { Plan(npc,it,exit) } }.toList()
++        }.minByOrNull { (it.exit?.price?:0)+it.walk.length/10 }
++    }
++}
