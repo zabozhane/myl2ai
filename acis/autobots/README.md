@@ -347,3 +347,25 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     `autobot_spot_danger` table (`SpotDangerDao`) and survive restarts. When the spots are built, a cell also counts
     the aggressive spawns one floor below it and its neighbours, because that is where hunters fall through.
     Drops of more than 800z in place are logged (`... dropped ...z from ...`) to find how bots get down.
+- `acis-382-offlinefarm.patch` - core hooks for the offline farm (stage 1 of `docs/offline-life.md`), applied after
+  `acis-382-trade.patch`: `Player.deleteMe` first asks `AutobotsManager.tryKeepOnlineOnLogout` (true = the module
+  keeps the player online, no cleanup/store/removal); `GameClient.loadCharFromDisk` asks `onPlayerReentry` when the
+  picked character is already in the world (true = the module stored and removed the offline-farming object, so the
+  usual `Player.restore` loads it fresh); `Shutdown.disconnectAllPlayers` finally calls the module's
+  `AutobotsManager.onServerShutdown`, so the offline farm stops keeping players online before the world is emptied.
+- `l2autobots-offlinefarm.patch` - the offline farm itself, applied after ledges. New package `offlinelife/`:
+  `OfflineFarmManager` keeps a logging-out player in the world with a `DetachedClient` (a no-op GameClient, like the
+  bots' one) and starts `AutofarmManager` on it. A field logout anchors the hunt right there; a town logout learns
+  affordable skills at the class trainer first, then walks to a hunting spot of a slightly lower level
+  (`HuntingSpots`, peaceful spots filtered out - auto hunt refuses towns). A farming character with lessons pending
+  walks (or takes a paid gatekeeper hop, `character_offline_farm` budget rules) to its class trainer and returns to
+  the spot afterwards; spellbook skills are skipped for now. Long walks go in short legs with sidesteps around
+  obstacles, and NPCs are approached at a validated standing point (`Approach`), not their own unreachable cell.
+  When the owner picks the character, the farm stops, the object goes through the normal deleteMe (cleanup + store)
+  and the login restores it from the DB. A store, a trade, death, olympiad, observer mode, a mount, a siege zone and
+  a cursed weapon all refuse the offline farm. The marker table `character_offline_farm` (`sql/`) tracks farming
+  characters, so `onServerStart` restores them into the world after a restart and they keep farming; stale markers
+  are dropped. Chat command `.offlinefarm` (on|off|toggle) lives in
+  the auto hunt settings (`character_autofarm_settings`, new `offlineEnabled` JSON field, **on by default** —
+  the farm just works on every logout unless turned off). Both core hooks are
+  wrapped in runCatching: a module failure can never break a login or a logout.

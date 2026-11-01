@@ -1,0 +1,56 @@
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/Shutdown.java b/aCis_gameserver/java/net/sf/l2j/gameserver/Shutdown.java
+index 88a3dc4..bc20230 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/Shutdown.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/Shutdown.java
+@@ -1,5 +1,6 @@
+ package net.sf.l2j.gameserver;
+ 
++import dev.l2j.autobots.AutobotsManager;
+ import net.sf.l2j.commons.concurrent.ThreadPool;
+ import net.sf.l2j.commons.lang.StringUtil;
+ import net.sf.l2j.commons.logging.CLogger;
+@@ -338,6 +339,9 @@ public class Shutdown extends Thread
+ 	 */
+ 	private static void disconnectAllPlayers()
+ 	{
++		// Let the bots module stop its background work and stop keeping players online (offline farm) before the world is emptied.
++		AutobotsManager.INSTANCE.onServerShutdown();
++		
+ 		for (Player player : World.getInstance().getPlayers())
+ 		{
+ 			final GameClient client = player.getClient();
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java
+index 6dfdd52..fad3235 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java
+@@ -8116,6 +8116,10 @@ public class Player extends Playable
+ 	@Override
+ 	public void deleteMe()
+ 	{
++		// L2Autobots offline farm: the module may keep the player online (detached client) instead of a logout.
++		if (AutobotsManager.INSTANCE.tryKeepOnlineOnLogout(this))
++			return;
++		
+ 		cleanup();
+ 		store();
+ 		super.deleteMe();
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/GameClient.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/GameClient.java
+index d3adc4d..f6bb5a0 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/GameClient.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/GameClient.java
+@@ -1,5 +1,6 @@
+ package net.sf.l2j.gameserver.network;
+ 
++import dev.l2j.autobots.AutobotsManager;
+ import java.net.InetAddress;
+ import java.nio.ByteBuffer;
+ import java.sql.Connection;
+@@ -534,7 +535,7 @@ public class GameClient extends MMOClient<MMOConnection<GameClient>> implements
+ 			return null;
+ 		
+ 		Player player = World.getInstance().getPlayer(objectId);
+-		if (player != null)
++		if (player != null && !AutobotsManager.INSTANCE.onPlayerReentry(player))
+ 		{
+ 			if (player.getClient() != null)
+ 				player.getClient().closeNow();
