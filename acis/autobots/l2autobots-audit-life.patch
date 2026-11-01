@@ -259,7 +259,7 @@ index c014b34..a8f6286 100644
              SpotDangerDao.save(spot.key, killerLevel)
              marked++
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index f379c88..3f7e7d4 100644
+index f379c88..f993322 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 @@ -85,6 +85,12 @@ internal class LifeBehavior(private val bot: Autobot) {
@@ -294,21 +294,24 @@ index f379c88..3f7e7d4 100644
          if (!bot.isInsideZone(ZoneId.TOWN)) tripDoneInTown = false
  
          val wrappingUp = session.activity == SessionPlan.Activity.Home || session.activity == SessionPlan.Activity.Trade
-@@ -205,21 +210,67 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -205,21 +210,70 @@ internal class LifeBehavior(private val bot: Autobot) {
       * heads back to land in short legs, like a player who swam too far and turns around.
       */
      private suspend fun escapeWater(): Boolean {
 -        if (bot.isDead || !bot.isInsideZone(ZoneId.WATER)) return false
 -        if (bot.getActiveSequence() != null) {
 -            // The sequence that brought the bot here (a walk across the map) is dropped first.
-+        if (!bot.isInsideZone(ZoneId.WATER)) {
-+            lastDry = bot.location()
++        val ground=Location(bot.x,bot.y,net.sf.l2j.gameserver.geoengine.GeoEngine.getInstance().getHeight(bot.x,bot.y,bot.z).toInt())
++        val groundWater=net.sf.l2j.gameserver.data.manager.ZoneManager.getInstance().getZone(ground.x,ground.y,ground.z,
++                net.sf.l2j.gameserver.model.zone.type.WaterZone::class.java)
++        if (!bot.isInsideZone(ZoneId.WATER) && groundWater==null) {
++            lastDry = ground
 +            waterTarget = null
 +            waterDistance = Double.MAX_VALUE
 +            return false
 +        }
 +        val now=System.currentTimeMillis()
-+        val water=net.sf.l2j.gameserver.data.manager.ZoneManager.getInstance().getZone(bot.x,bot.y,bot.z,
++        val water=groundWater ?: net.sf.l2j.gameserver.data.manager.ZoneManager.getInstance().getZone(bot.x,bot.y,bot.z,
 +                net.sf.l2j.gameserver.model.zone.type.WaterZone::class.java)
 +        // Swim near the surface rather than along the lake bottom. The core breath task only checks the
 +        // zone flag; a bot whose head is above the waterline can breathe while its feet remain in water.
@@ -374,7 +377,7 @@ index f379c88..3f7e7d4 100644
          return true
      }
  
-@@ -293,7 +344,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -293,7 +347,11 @@ internal class LifeBehavior(private val bot: Autobot) {
          }
          avoidDeadlySpot(killer)
          // Died on a long walk to its spot: the way there is what kills, don't walk it again.
@@ -387,7 +390,7 @@ index f379c88..3f7e7d4 100644
          // A raid is a risk the bot took on purpose: it does not make the bot fall back to easier monsters.
          if (RaidPlanner.isRaiding(bot)) RaidLog.count(RaidLog.Event.Deaths) else fitness.onDeath()
          if (!bot.isInParty) session.onDeath(context())
-@@ -490,7 +545,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -490,7 +548,7 @@ internal class LifeBehavior(private val bot: Autobot) {
          }
          val level = if (group != null) PartyPlan.huntLevel(group) else fitness.huntLevel()
          val current = spot
