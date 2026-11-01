@@ -408,3 +408,20 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
     or budget barriers, and potential buyers. Actual shopping attempts separately count missing offers, price,
     budget, route, haggle and core transaction failures. Human demand is not inferred; no artificial purchases.
   - Economy, trade, quests, skills, raids, population, parties, clans and offline-farm events include actor IDs.
+
+- `l2autobots-offline-social.patch` — offline party/first-profession play and persistent static parties:
+  - Reuses PartyBehavior/QuestRunner on a real Player. Offline characters join only compatible bot-led non-raid
+    parties with an open slot; no human invites/trades, no leadership or solo pulls. Town routes and active quests
+    cannot be interrupted by a party invite. Owner reentry cancels and joins work before storage/removal.
+  - Party/quest events are persisted separately in `character_offline_events` and included in the owner's report.
+    First-profession scripts and marks are real; second-profession scenarios are still a shared future feature.
+  - Actual party friends may found a static (3–9 members, five-level spread, mutual liking and shared history).
+    `autobot_statics` and `autobot_static_members` preserve membership; members share the founder's session
+    schedule in addition to their own. The live party reassembles without random size/expiry changes. Failed
+    travel backs off for 30 minutes; ordinary group settings still disable shared sessions and formation.
+  - Co-located static mates gain liking/trust 1.5 times as quickly, within the existing caps. Friendship is not
+    granted on creation; strangers cannot found a static. Core party experience/rewards stay unchanged.
+  - Sequence children are cancelled with their owning action, and player sequence bookkeeping is concurrent.
+
+For an existing database, apply addon SQL from the new image before starting the upgraded game:
+`docker compose run --rm db-init` (new CREATE TABLE IF NOT EXISTS tables only).
