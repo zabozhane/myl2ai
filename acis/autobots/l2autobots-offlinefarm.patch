@@ -1,0 +1,866 @@
+diff --git a/sql/character_offline_farm.sql b/sql/character_offline_farm.sql
+new file mode 100644
+index 0000000..c7f4b47
+--- /dev/null
++++ b/sql/character_offline_farm.sql
+@@ -0,0 +1,5 @@
++CREATE TABLE IF NOT EXISTS character_offline_farm (
++  `obj_Id` INT UNSIGNED NOT NULL DEFAULT 0,
++  `started` BIGINT NOT NULL DEFAULT 0,
++  PRIMARY KEY (obj_Id)
++);
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 49d6c65..b90f2e1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -12,6 +12,8 @@ import dev.l2j.autobots.extensions.useMagicSkill
+ import dev.l2j.autobots.models.AutobotInfo
+ import dev.l2j.autobots.models.BotChat
+ import dev.l2j.autobots.models.ChatType
++import dev.l2j.autobots.offlinelife.OfflineFarmCommandHandler
++import dev.l2j.autobots.offlinelife.OfflineFarmManager
+ import dev.l2j.autobots.population.PopulationManager
+ import dev.l2j.autobots.population.group.GroupChat
+ import dev.l2j.autobots.population.llm.BotTalk
+@@ -52,6 +54,7 @@ object AutobotsManager {
+         AutobotsDao.updateAllBotOnlineStatus(false)
+         AutobotScheduler
+         AutofarmManager
++        OfflineFarmManager.onServerStart()
+         PopulationManager.start()
+ 
+         Klock.start("onUpdate", 1000, AutobotData.settings.iterationDelay, CoScopes.onUpdateScope, action = {
+@@ -73,11 +76,24 @@ object AutobotsManager {
+     }
+ 
+     fun onServerShutdown(){
++        OfflineFarmManager.onServerShutdown()
+         AutobotsDao.updateAllBotOnlineStatus(false)
+     }
+ 
++    /** Core hook (Player.deleteMe): true = the module keeps the player online for the offline farm; no logout happens. */
++    fun tryKeepOnlineOnLogout(player: Player): Boolean {
++        // A failure here must never break a normal logout: the player simply leaves as usual.
++        return runCatching { OfflineFarmManager.tryKeepOnlineOnLogout(player) }.getOrDefault(false)
++    }
++
++    /** Core hook (GameClient.loadCharFromDisk): the owner picked a character kept online; the module stores and removes it. */
++    fun onPlayerReentry(player: Player): Boolean {
++        return runCatching { OfflineFarmManager.onPlayerReentry(player) }.getOrDefault(false)
++    }
++
+     fun onChat(type: Int, chatter: Player, target: String?, text: String, handler : IChatHandler) : Boolean{
+         if(AutofarmCommandHandler.onChat(chatter, text)) return true
++        if(OfflineFarmCommandHandler.onChat(chatter, text)) return true
+         
+         if(chatter.isGM) {
+             if(chatter.isControllingBot()) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmSettings.kt b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmSettings.kt
+index c9723ca..e0e2d40 100644
+--- a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmSettings.kt
+@@ -13,6 +13,8 @@ internal data class AutofarmSettings(
+         @JsonProperty("rest") var rest: Boolean = true,
+         @JsonProperty("loot") var loot: Boolean = true,
+         @JsonProperty("attackRaids") var attackRaids: Boolean = false,
++        /** Keep auto hunting after the owner logs out: the character stays online (offline farm, stage 1 of offline-life). On by default; `.offlinefarm off` disables it. */
++        @JsonProperty("offlineEnabled") var offlineEnabled: Boolean = true,
+         @JsonProperty("disabledSkills") var disabledSkills: MutableSet<Int> = mutableSetOf()
+ ) {
+     companion object {
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/DetachedClient.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/DetachedClient.kt
+new file mode 100644
+index 0000000..447a8a2
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/DetachedClient.kt
+@@ -0,0 +1,82 @@
++package dev.l2j.autobots.offlinelife
++
++import net.sf.l2j.commons.mmocore.ReceivablePacket
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.network.GameClient
++import net.sf.l2j.gameserver.network.serverpackets.L2GameServerPacket
++import java.nio.ByteBuffer
++
++/**
++ * A no-op client for a live player's character kept online without a connection (offline farm).
++ * Packets are swallowed; the character stays visible and is played by the AI until the owner logs in.
++ */
++internal class DetachedClient(val owner: Player) : GameClient(null) {
++
++    override fun toString(): String {
++        return "Detached client of ${owner.name}"
++    }
++
++    override fun decrypt(buf: ByteBuffer?, size: Int): Boolean {
++        return true
++    }
++
++    override fun encrypt(buf: ByteBuffer?, size: Int): Boolean {
++        return true
++    }
++
++    override fun enableCrypt(): ByteArray {
++        return byteArrayOf()
++    }
++
++    override fun setState(pState: GameClientState?) {
++
++    }
++
++    override fun sendPacket(gsp: L2GameServerPacket?) {
++
++    }
++
++    override fun markToDeleteChar(slot: Int): Byte {
++        return 0
++    }
++
++    override fun markRestoredChar(slot: Int) {
++
++    }
++
++    override fun loadCharFromDisk(slot: Int): Player {
++        return owner
++    }
++
++    override fun close(gsp: L2GameServerPacket?) {
++
++    }
++
++    override fun closeNow() {
++
++    }
++
++    override fun cleanMe(fast: Boolean) {
++
++    }
++
++    override fun dropPacket(): Boolean {
++        return false
++    }
++
++    override fun onBufferUnderflow() {
++
++    }
++
++    override fun onUnknownPacket() {
++
++    }
++
++    override fun execute(packet: ReceivablePacket<GameClient>?) {
++
++    }
++
++    override fun isDetached(): Boolean {
++        return false
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmCommandHandler.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmCommandHandler.kt
+new file mode 100644
+index 0000000..285639a
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmCommandHandler.kt
+@@ -0,0 +1,38 @@
++package dev.l2j.autobots.offlinelife
++
++import dev.l2j.autobots.autofarm.AutofarmManager
++import net.sf.l2j.gameserver.model.actor.Player
++
++/**
++ * Chat command `.offlinefarm`: whether the character keeps auto hunting after its owner logs out.
++ * The flag lives in the auto hunt settings (character_autofarm_settings) and survives relogins.
++ */
++internal object OfflineFarmCommandHandler {
++
++    const val COMMAND = ".offlinefarm"
++
++    /** Chat commands; true when the line was a command and must not reach the chat. */
++    fun onChat(player: Player, text: String): Boolean {
++        val command = text.trim().lowercase()
++        if (command != COMMAND && !command.startsWith("$COMMAND ")) return false
++
++        val settings = AutofarmManager.getSettings(player)
++        when (command.removePrefix(COMMAND).trim()) {
++            "" -> {
++                settings.offlineEnabled = !settings.offlineEnabled
++                AutofarmManager.onSettingsChanged(player)
++                player.sendMessage("Offline farm: " + (if (settings.offlineEnabled)
++                    "ON — the character keeps auto hunting where it stands when you log out."
++                else
++                    "OFF."))
++            }
++            "on", "off" -> {
++                settings.offlineEnabled = command.removePrefix(COMMAND).trim() == "on"
++                AutofarmManager.onSettingsChanged(player)
++                player.sendMessage("Offline farm: " + (if (settings.offlineEnabled) "ON." else "OFF."))
++            }
++            else -> player.sendMessage("Offline farm: $COMMAND toggles, $COMMAND on|off. The hunt starts where you log out; in a town the character just idles online.")
++        }
++        return true
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+new file mode 100644
+index 0000000..47039a9
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -0,0 +1,658 @@
++package dev.l2j.autobots.offlinelife
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.autofarm.AutofarmManager
++import dev.l2j.autobots.extensions.moveTo
++import dev.l2j.autobots.population.HuntingSpot
++import dev.l2j.autobots.population.HuntingSpots
++import dev.l2j.autobots.population.economy.Approach
++import dev.l2j.autobots.population.isUnderAttack
++import dev.l2j.autobots.population.skills.SkillLearner
++import dev.l2j.autobots.utils.Klock
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.SkillTable
++import net.sf.l2j.gameserver.data.manager.ZoneManager
++import net.sf.l2j.gameserver.data.xml.TeleportLocationData
++import net.sf.l2j.gameserver.enums.IntentionType
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.geoengine.GeoEngine
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Npc
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Folk
++import net.sf.l2j.gameserver.model.holder.skillnode.GeneralSkillNode
++import net.sf.l2j.gameserver.model.zone.type.PeaceZone
++import net.sf.l2j.gameserver.model.zone.type.TownZone
++import java.util.concurrent.ConcurrentHashMap
++import java.util.logging.Logger
++import kotlin.math.atan2
++import kotlin.math.cos
++import kotlin.math.hypot
++import kotlin.math.sin
++
++/**
++ * Offline farm, stage 1 of the offline-life spec (docs/offline-life.md): when a player logs out,
++ * the character stays in the world with a detached client and keeps hunting until the owner logs in
++ * again. Logging out in the field starts the auto hunt right there; logging out in a town sends the
++ * character on foot to a hunting spot of its level first (walking only, no gatekeeper rides yet).
++ *
++ * Development without the owner: skills are learned at a class trainer for SP, like population bots
++ * do (SkillLearner), except spellbook skills are skipped for now (no book shopping yet). A character
++ * logging out in a town learns first and only then walks out; a farming character with lessons
++ * pending walks to the nearest trainer of its class and returns to its spot afterwards.
++ * No restock, no journal, no chat policy yet. Class change (professions) is stage 2.
++ */
++object OfflineFarmManager {
++    private val LOGGER = Logger.getLogger(OfflineFarmManager::class.java.name)
++
++    /** objectIds of live players currently kept online by the offline farm. */
++    private val farming = ConcurrentHashMap<Int, Player>()
++
++    /** objectIds being stored and removed right now because the owner logs in (deleteMe re-entrancy guard). */
++    private val reaping = ConcurrentHashMap.newKeySet<Int>()
++
++    private enum class Trip { TO_SPOT, TO_TRAINER, BACK_TO_SPOT }
++
++    /** A walk order in progress: to the hunting spot, to a trainer, or back from the trainer to the spot. */
++    private class Travel(val trip: Trip, val targetX: Int, val targetY: Int, val targetZ: Int,
++                         val trainer: Folk? = null,
++                         /** A trainer visit after a town logout continues to a hunting spot, not back to town. */
++                         val thenHunt: Boolean = false,
++                         val spotX: Int = 0, val spotY: Int = 0, val spotZ: Int = 0,
++                         /** How close to the target counts as arrived (an approach point next to an NPC is exact). */
++                         val arrivalRadius: Int = ARRIVAL_RADIUS,
++                         /** A gatekeeper hop was already used on this trip; a second one would mean a teleport loop. */
++                         val gkHopped: Boolean = false,
++                         /** A trainer trip already reached the ring around the trainer and walks to a standing point. */
++                         val finalApproach: Boolean = false,
++                         var lastMoveAt: Long = 0L,
++                         /** Stuck detection: closest approach so far, checks without progress, sidesteps tried. */
++                         var bestDistance: Double = Double.MAX_VALUE, var stuckChecks: Int = 0, var detours: Int = 0)
++    private val traveling = ConcurrentHashMap<Int, Travel>()
++
++    /** Throttle for the "any lessons to learn?" scan of farming characters. */
++    private val lessonCheckedAt = ConcurrentHashMap<Int, Long>()
++
++    /** Throttle for the periodic live status line of farming characters. */
++    private val statusLoggedAt = ConcurrentHashMap<Int, Long>()
++
++    /** Since when a farming character is neither traveling nor hunting (idle watchdog). */
++    private val idleSince = ConcurrentHashMap<Int, Long>()
++
++    @Volatile
++    private var serverShuttingDown = false
++
++    /** Drives the walks; the fights themselves are driven by AutofarmManager's own tick. */
++    private val travelTask =
++            Klock.start("offlineFarmTravel", 2000, 3000, CoScopes.onUpdateScope, action = { tick() })
++
++    fun onServerShutdown() {
++        serverShuttingDown = true
++    }
++
++    fun isFarming(player: Player): Boolean {
++        return farming.containsKey(player.objectId)
++    }
++
++    /**
++     * Core hook at the top of Player.deleteMe. Returns true when the character is kept online:
++     * this deleteMe call then does no cleanup, no store and no removal from the world.
++     */
++    fun tryKeepOnlineOnLogout(player: Player): Boolean {
++        if (player is Autobot) return false
++        val id = player.objectId
++        if (reaping.contains(id)) return false
++        if (serverShuttingDown) return false
++        // Only a real logout of a character that is in the world; character creation and admin
++        // deletion call deleteMe on objects that were never online.
++        if (!player.isOnline) return false
++        if (World.getInstance().getPlayer(id) !== player) return false
++        if (!AutofarmManager.getSettings(player).offlineEnabled) return false
++        // A store wins over the farm; the rest mirrors what auto hunt itself refuses.
++        if (player.isInStoreMode || player.activeTradeList != null) return false
++        if (player.isDead || player.isInOlympiadMode || player.isInObserverMode || player.isMounted) return false
++        if (player.isInsideZone(ZoneId.SIEGE)) return false
++        if (player.isCursedWeaponEquipped) return false
++
++        player.client = DetachedClient(player)
++        farming[id] = player
++        markFarming(id)
++        beginFarm(player)
++        return true
++    }
++
++    /**
++     * Starts the farm life of a character already kept online: a town/peace logout learns what the
++     * character can afford before leaving the town; a field logout anchors the hunt right there.
++     */
++    private fun beginFarm(player: Player) {
++        if (player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE)) {
++            val trainer = nearestTrainer(player)
++            if (trainer != null && learnableNow(player).isNotEmpty()) {
++                goToTrainer(player, trainer, thenHunt = true)
++                LOGGER.info("Offline farm: ${player.name} stays online, goes to trainer ${trainer.name} first.")
++            } else {
++                goHunting(player)
++            }
++        } else {
++            // The hunt anchors at the logout spot.
++            startFarmLogged(player, "field logout")
++            LOGGER.info("Offline farm: ${player.name} stays online, hunting where the owner left.")
++        }
++    }
++
++    /**
++     * Core hook in GameClient.loadCharFromDisk: the owner picked a character that is kept online.
++     * The farm is stopped and the old object is stored and removed; the caller then restores
++     * the character fresh from the DB. Returns true when the character was an offline farmer.
++     */
++    fun onPlayerReentry(player: Player): Boolean {
++        if (!farming.containsKey(player.objectId)) return false
++        reap(player)
++        return true
++    }
++
++    @Synchronized
++    private fun reap(player: Player) {
++        val id = player.objectId
++        if (!reaping.add(id)) return
++        try {
++            traveling.remove(id)
++            lessonCheckedAt.remove(id)
++            statusLoggedAt.remove(id)
++            idleSince.remove(id)
++            AutofarmManager.stopFarm(player, "you are back")
++            // Full cleanup + store + removal from the world. deleteMe calls tryKeepOnlineOnLogout
++            // again, but the reaping guard makes it take the normal logout path.
++            player.deleteMe()
++            LOGGER.info("Offline farm: ${player.name} stored and removed for the owner's login.")
++        } finally {
++            reaping.remove(id)
++            farming.remove(id)
++            unmarkFarming(id)
++        }
++    }
++
++    /**
++     * Sends the character to a trainer. Villages are walled, and a cross-country walk to a trainer
++     * inside has no path through the gate, so a faraway trainer means a paid gatekeeper hop into its
++     * town first (gatekeeper rides for the farm's needs are within the stage-1 budget rules).
++     * NPCs often stand on cells no path leads to (behind a counter, under a roof), so the trip then
++     * targets a validated standing point next to the trainer, like the population bots do.
++     */
++    private fun goToTrainer(player: Player, trainer: Folk, thenHunt: Boolean, gkHopped: Boolean = false) {
++        // Where the hunt continues after the lesson: captured before any gatekeeper hop.
++        val originX = player.x
++        val originY = player.y
++        val originZ = player.z
++        var hopped = gkHopped
++        if (distance(player.x, player.y, trainer.x, trainer.y) > GK_HOP_DISTANCE && !hopped) {
++            if (!teleportNear(player, trainer.x, trainer.y)) {
++                LOGGER.info("Offline farm: ${player.name} skips trainer ${trainer.name}: no gatekeeper hop within budget.")
++                // Not now and not in a minute: a failed trainer trip is retried after a longer pause.
++                lessonCheckedAt[player.objectId] = System.currentTimeMillis() + LESSON_RETRY_AFTER_FAIL_MS
++                return
++            }
++            hopped = true
++        }
++        // Phase one is the ring around the trainer; the exact standing point is validated up close
++        // in the travel tick (Approach from afar finds no path through a whole town).
++        traveling[player.objectId] = Travel(Trip.TO_TRAINER, trainer.x, trainer.y, trainer.z, trainer = trainer,
++                thenHunt = thenHunt, spotX = originX, spotY = originY, spotZ = originZ,
++                arrivalRadius = TRAINER_APPROACH_RADIUS, gkHopped = hopped,
++                lastMoveAt = System.currentTimeMillis())
++        walk(player, trainer.x, trainer.y, trainer.z)
++    }
++
++    /** A paid gatekeeper hop to the teleport location closest to the target. Walls, not distance, are the point. */
++    private fun teleportNear(player: Player, x: Int, y: Int): Boolean {
++        val loc = TeleportLocationData.getInstance().allTeleportLocations
++                .filter { !it.isNoble }
++                .minByOrNull { distance(x, y, it.x, it.y) }
++        if (loc == null) {
++            LOGGER.info("Offline farm: ${player.name} found no gatekeeper location near $x,$y.")
++            return false
++        }
++        if (!player.reduceAdena("Offline farm gatekeeper", loc.price, player, false)) {
++            LOGGER.info("Offline farm: ${player.name} can't afford the gatekeeper hop at ${loc.price} adena (has ${player.adena}).")
++            return false
++        }
++        player.teleportTo(loc, 20)
++        LOGGER.info("Offline farm: ${player.name} teleports to ${loc.x},${loc.y} for ${loc.price} adena.")
++        return true
++    }
++
++    /** Picks a hunting spot for the character's level and sends it there on foot. */
++    private fun goHunting(player: Player) {
++        // Safer than the population bots: the spot's monsters match a slightly lower level.
++        val level = (player.level - 2).coerceAtLeast(1)
++        // Auto hunt refuses to fight in a town or a peace zone; such spots are no targets either.
++        val excluded = mutableSetOf<Long>()
++        var spot: HuntingSpot? = null
++        for (attempt in 1..MAX_SPOT_ATTEMPTS) {
++            val candidate = HuntingSpots.choose(player, level, excluded, maxWalk = MAX_WALK_TO_SPOT) ?: break
++            if (isPeaceful(candidate.location.x, candidate.location.y, candidate.location.z)) {
++                excluded.add(candidate.key)
++                continue
++            }
++            spot = candidate
++            break
++        }
++        if (spot == null) {
++            LOGGER.info("Offline farm: ${player.name} stays online; no hunting spot within reach, idles in town.")
++            return
++        }
++        traveling[player.objectId] = Travel(Trip.TO_SPOT, spot.location.x, spot.location.y, spot.location.z,
++                lastMoveAt = System.currentTimeMillis())
++        walk(player, spot.location.x, spot.location.y, spot.location.z)
++        LOGGER.info("Offline farm: ${player.name} stays online, walks to a hunting spot at ${spot.location.x},${spot.location.y}.")
++    }
++
++    private fun isPeaceful(x: Int, y: Int, z: Int): Boolean =
++            ZoneManager.getInstance().getZone(x, y, z, TownZone::class.java) != null ||
++                    ZoneManager.getInstance().getZone(x, y, z, PeaceZone::class.java) != null
++
++    private fun tick() {
++        if (farming.isEmpty()) return
++        val now = System.currentTimeMillis()
++
++        for ((id, travel) in traveling) {
++            try {
++                val player = farming[id]
++                if (player == null || player.isDead) {
++                    // Removed already, or dead on the way: stage 1 waits for the owner (no auto-return to village yet).
++                    traveling.remove(id)
++                    continue
++                }
++                if (player.isUnderAttack()) {
++                    // Jumped by a monster on the road: fight back right here, the trip is over.
++                    traveling.remove(id)
++                    startFarmLogged(player, "jumped on the road")
++                    continue
++                }
++                if (travel.trip == Trip.TO_TRAINER && !travel.finalApproach && travel.trainer != null &&
++                        distance(player.x, player.y, travel.targetX, travel.targetY) <= TRAINER_APPROACH_RADIUS) {
++                    // Phase two, up close: walk to a validated standing point next to the trainer
++                    // (several NPCs stand on cells no path leads to), or let the server approach it.
++                    val trainer = travel.trainer
++                    val spot = Approach.pointNear(player, trainer)
++                    traveling.remove(id)
++                    val next = if (spot != null) {
++                        walk(player, spot.x, spot.y, spot.z)
++                        Travel(Trip.TO_TRAINER, spot.x, spot.y, spot.z, trainer = trainer, thenHunt = travel.thenHunt,
++                                spotX = travel.spotX, spotY = travel.spotY, spotZ = travel.spotZ,
++                                arrivalRadius = APPROACH_ARRIVAL_RADIUS, gkHopped = travel.gkHopped,
++                                finalApproach = true, lastMoveAt = now)
++                    } else {
++                        player.target = trainer
++                        player.ai.setIntention(IntentionType.INTERACT, trainer)
++                        Travel(Trip.TO_TRAINER, trainer.x, trainer.y, trainer.z, trainer = trainer, thenHunt = travel.thenHunt,
++                                spotX = travel.spotX, spotY = travel.spotY, spotZ = travel.spotZ,
++                                arrivalRadius = Npc.INTERACTION_DISTANCE - 50, gkHopped = travel.gkHopped,
++                                finalApproach = true, lastMoveAt = now)
++                    }
++                    traveling[id] = next
++                    continue
++                }
++                val arrived = distance(player.x, player.y, travel.targetX, travel.targetY) <= travel.arrivalRadius
++                if (arrived) {
++                    traveling.remove(id)
++                    onArrived(player, travel)
++                    continue
++                }
++                // A finished or lost leg (arrived mid-way, stun, a fight the movement survived): walk the next leg.
++                val remaining = distance(player.x, player.y, travel.targetX, travel.targetY)
++                if (remaining < travel.bestDistance - MIN_PROGRESS) {
++                    travel.bestDistance = remaining
++                    travel.stuckChecks = 0
++                    travel.detours = 0
++                } else if (!player.isMoving) {
++                    travel.stuckChecks++
++                }
++                if (travel.stuckChecks >= CHECKS_BEFORE_DETOUR && travel.detours < MAX_DETOURS) {
++                    // The straight line leads into an obstacle: sidestep like a player feeling its way around a building.
++                    travel.detours++
++                    travel.stuckChecks = 0
++                    travel.lastMoveAt = now
++                    walkDetour(player, travel.targetX, travel.targetY)
++                    continue
++                }
++                if (travel.stuckChecks >= MAX_STUCK_CHECKS) {
++                    // No progress even with detours: the destination is unreachable on foot from here.
++                    traveling.remove(id)
++                    onStuck(player, travel)
++                    continue
++                }
++                if (player.ai.desire.intention != IntentionType.MOVE_TO && now - travel.lastMoveAt > REISSUE_MOVE_MS) {
++                    travel.lastMoveAt = now
++                    walk(player, travel.targetX, travel.targetY, travel.targetZ)
++                }
++            } catch (e: Exception) {
++                LOGGER.warning("Offline farm tick failed for $id: $e")
++            }
++        }
++
++        // Live status, so a stuck farm is visible in the log instead of guessing from a stale DB.
++        for ((id, player) in farming) {
++            if (now - (statusLoggedAt[id] ?: 0L) < STATUS_LOG_MS) continue
++            statusLoggedAt[id] = now
++            try {
++                val target = player.target?.name ?: "-"
++                LOGGER.info("Offline farm status: ${player.name} lv ${player.level} exp ${player.exp} sp ${player.sp}" +
++                        " at ${player.x},${player.y} intention=${player.ai.desire.intention} target=$target" +
++                        " traveling=${traveling.containsKey(id)} autofarming=${AutofarmManager.isAutoFarming(player)} dead=${player.isDead}")
++            } catch (e: Exception) {
++                LOGGER.warning("Offline farm status failed for ${player.name}: $e")
++            }
++        }
++
++        // Farming characters with affordable lessons visit their class trainer between fights.
++        for ((id, player) in farming) {
++            if (traveling.containsKey(id)) continue
++            if (now - (lessonCheckedAt[id] ?: 0L) < LESSON_CHECK_MS) continue
++            lessonCheckedAt[id] = now
++            try {
++                if (player.isDead || player.isUnderAttack() || !AutofarmManager.isAutoFarming(player)) continue
++                if (learnableNow(player).isEmpty()) continue
++                val trainer = nearestTrainer(player) ?: continue
++                LOGGER.info("Offline farm: ${player.name} has skills to learn, walks to trainer ${trainer.name}.")
++                AutofarmManager.stopFarm(player, "going to the trainer")
++                goToTrainer(player, trainer, thenHunt = false)
++            } catch (e: Exception) {
++                LOGGER.warning("Offline farm lesson check failed for ${player.name}: $e")
++            }
++        }
++
++        // Watchdog: a farmer that ended up idle outside a town (a refused startFarm, a lost
++        // intention) gets the hunt restarted instead of standing around until the owner returns.
++        for ((id, player) in farming) {
++            if (traveling.containsKey(id) || player.isDead) {
++                idleSince.remove(id)
++                continue
++            }
++            if (AutofarmManager.isAutoFarming(player) || player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE)) {
++                idleSince.remove(id)
++                continue
++            }
++            val since = idleSince.getOrPut(id) { now }
++            if (now - since < IDLE_RESTART_MS) continue
++            idleSince.remove(id)
++            LOGGER.info("Offline farm: ${player.name} is idle outside a town, restarting the hunt.")
++            startFarmLogged(player, "idle watchdog")
++        }
++    }
++
++    /** The trip leads nowhere from here: give it up and fall back to farming within reach. */
++    private fun onStuck(player: Player, travel: Travel) {
++        LOGGER.info("Offline farm: ${player.name} can't reach ${travel.targetX},${travel.targetY} on foot, gives up the ${travel.trip} trip.")
++        when (travel.trip) {
++            Trip.TO_TRAINER -> {
++                val trainer = travel.trainer
++                if (!travel.gkHopped && trainer != null && teleportNear(player, trainer.x, trainer.y)) {
++                    // The village walls stopped the walk; a gatekeeper hop into the town solves it.
++                    goToTrainer(player, trainer, travel.thenHunt, gkHopped = true)
++                    return
++                }
++                // A trainer trip that led nowhere is retried after a longer pause, not in a minute.
++                lessonCheckedAt[player.objectId] = System.currentTimeMillis() + LESSON_RETRY_AFTER_FAIL_MS
++                if (travel.thenHunt) {
++                    goHunting(player)
++                } else {
++                    traveling[player.objectId] = Travel(Trip.BACK_TO_SPOT, travel.spotX, travel.spotY, travel.spotZ,
++                            lastMoveAt = System.currentTimeMillis())
++                    walk(player, travel.spotX, travel.spotY, travel.spotZ)
++                }
++            }
++            Trip.TO_SPOT, Trip.BACK_TO_SPOT -> {
++                if (!travel.gkHopped && (player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE)) &&
++                        teleportNear(player, travel.targetX, travel.targetY)) {
++                    // Walking out of a walled town failed; a gatekeeper hop to the spot's area solves it.
++                    traveling[player.objectId] = Travel(travel.trip, travel.targetX, travel.targetY, travel.targetZ,
++                            arrivalRadius = travel.arrivalRadius, gkHopped = true,
++                            lastMoveAt = System.currentTimeMillis())
++                    walk(player, travel.targetX, travel.targetY, travel.targetZ)
++                    return
++                }
++                // The spot itself is unreachable: hunt right where the character stands.
++                startFarmLogged(player, "destination unreachable")
++            }
++        }
++    }
++
++    private fun onArrived(player: Player, travel: Travel) {
++        when (travel.trip) {
++            Trip.TO_SPOT, Trip.BACK_TO_SPOT -> {
++                startFarmLogged(player, "reached the spot")
++                LOGGER.info("Offline farm: ${player.name} reached the spot, hunting.")
++            }
++            Trip.TO_TRAINER -> {
++                val learned = travel.trainer?.let { learnAll(player, it) } ?: 0
++                if (travel.thenHunt) {
++                    // A trainer visit after a town logout: off to the hunting spot now.
++                    if (learned > 0) LOGGER.info("Offline farm: ${player.name} learned $learned skill levels, goes hunting.")
++                    goHunting(player)
++                } else {
++                    if (learned > 0) LOGGER.info("Offline farm: ${player.name} learned $learned skill levels, back to the spot.")
++                    traveling[player.objectId] = Travel(Trip.BACK_TO_SPOT, travel.spotX, travel.spotY, travel.spotZ,
++                            lastMoveAt = System.currentTimeMillis())
++                    walk(player, travel.spotX, travel.spotY, travel.spotZ)
++                }
++            }
++        }
++    }
++
++    /** Next skill levels the character can take right now: enough SP, and no spellbook needed (book shopping is not in stage 1). */
++    private fun learnableNow(player: Player): List<GeneralSkillNode> =
++            SkillLearner.lessons(player).filter { SkillLearner.bookFor(it) == 0 && player.sp >= it.correctedCost }
++
++    /** The nearest visible trainer of the character's class within a walkable distance. */
++    private fun nearestTrainer(player: Player): Folk? =
++            World.getInstance().objects.filterIsInstance<Folk>()
++                    .filter { it.isVisible && it.template.canTeach(player.classId) && distance(player.x, player.y, it.x, it.y) <= MAX_WALK_TO_TRAINER }
++                    .minByOrNull { distance(player.x, player.y, it.x, it.y) }
++
++    /** Mirrors RequestAcquireSkill for general skills: level order, template, SP, then the skill is stored. */
++    private fun acquire(player: Player, trainer: Folk, node: GeneralSkillNode): Boolean {
++        if (!trainer.template.canTeach(player.classId)) return false
++        if (distance(player.x, player.y, trainer.x, trainer.y) > Npc.INTERACTION_DISTANCE * 1.5) return false
++        if (player.getSkillLevel(node.id) != node.value - 1) return false
++        val gsn = player.template.findSkill(node.id, node.value) ?: return false
++        val skill = SkillTable.getInstance().getInfo(node.id, node.value) ?: return false
++        if (player.sp < gsn.correctedCost) return false
++
++        player.removeExpAndSp(0, gsn.correctedCost)
++        player.addSkill(skill, true, true)
++        player.sendSkillList()
++        return true
++    }
++
++    /** Learning a level can open the next one (Power Strike 1, then 2...): go on while SP lasts. */
++    private fun learnAll(player: Player, trainer: Folk): Int {
++        var learned = 0
++        while (learned < MAX_LESSONS_PER_VISIT) {
++            val next = learnableNow(player).firstOrNull() ?: break
++            if (!acquire(player, trainer, next)) break
++            learned++
++        }
++        return learned
++    }
++
++    /**
++     * Walks toward the target in short legs, so pathfinding only has to solve nearby obstacles:
++     * a single move order to a far target finds no path and the character just stands there.
++     * The travel tick issues the next leg when the current one ends.
++     */
++    private fun walk(player: Player, x: Int, y: Int, z: Int) {
++        if (player.isSitting) player.standUp()
++        val remaining = distance(player.x, player.y, x, y)
++        if (remaining <= LEG_LENGTH) {
++            player.moveTo(x, y, z)
++            return
++        }
++        val ratio = LEG_LENGTH / remaining
++        val legX = player.x + ((x - player.x) * ratio).toInt()
++        val legY = player.y + ((y - player.y) * ratio).toInt()
++        val legZ = player.z + ((z - player.z) * ratio).toInt()
++        // A straight-line height is often under a floor or over a bridge; the ground under the point is reachable.
++        player.moveTo(legX, legY, GeoEngine.getInstance().getHeight(legX, legY, legZ).toInt())
++    }
++
++    /** A step to one side of the straight line, so the next leg starts from somewhere the pathfinder can solve. */
++    private fun walkDetour(player: Player, targetX: Int, targetY: Int) {
++        val heading = atan2((targetY - player.y).toDouble(), (targetX - player.x).toDouble())
++        val turn = Math.toRadians(Rnd.get(45, 120).toDouble()) * (if (Rnd.nextBoolean()) 1 else -1)
++        val length = Rnd.get(DETOUR_MIN, DETOUR_MAX)
++        val x = player.x + (cos(heading + turn) * length).toInt()
++        val y = player.y + (sin(heading + turn) * length).toInt()
++        player.moveTo(x, y, GeoEngine.getInstance().getHeight(x, y, player.z).toInt())
++    }
++
++    /** startFarm refuses silently (its message goes to the detached client); the farm log should still know. */
++    private fun startFarmLogged(player: Player, reason: String) {
++        AutofarmManager.startFarm(player)
++        if (!AutofarmManager.isAutoFarming(player))
++            LOGGER.info("Offline farm: ${player.name} could not start hunting ($reason).")
++    }
++
++    private fun distance(x1: Int, y1: Int, x2: Int, y2: Int) = hypot((x1 - x2).toDouble(), (y1 - y2).toDouble())
++
++    // ---- Restart survival: characters farming when the server went down get back up on start. ----
++
++    /**
++     * Called by AutobotsManager.start, before any client can connect, so no login can race the
++     * spawn; a login after the resume is handled by the regular reentry hook. Every marked
++     * character is restored into the world without a client and continues farming; a stale marker
++     * (character deleted, feature turned off meanwhile, spawn failure) is dropped instead of
++     * blocking anything.
++     */
++    fun onServerStart() {
++        val ids = readMarkers()
++        if (ids.isEmpty()) return
++        LOGGER.info("Offline farm: resuming ${ids.size} character(s) after a server restart.")
++        for (id in ids) {
++            try {
++                if (World.getInstance().getPlayer(id) != null) {
++                    // Already in the world somehow: drop the stale marker instead of double-spawning.
++                    unmarkFarming(id)
++                    continue
++                }
++                val player = Player.restore(id)
++                if (player == null) {
++                    unmarkFarming(id)
++                    continue
++                }
++                player.client = DetachedClient(player)
++                AutofarmManager.onEnterWorld(player)
++                if (!AutofarmManager.getSettings(player).offlineEnabled) {
++                    // The owner turned the feature off meanwhile: leave the character offline.
++                    unmarkFarming(id)
++                    continue
++                }
++                World.getInstance().addPlayer(player)
++                player.setOnlineStatus(true, true)
++                player.spawnMe(player.x, player.y, player.z)
++                player.onPlayerEnter()
++                farming[id] = player
++                LOGGER.info("Offline farm: ${player.name} is back after a server restart, keeps farming.")
++                if (player.isDead)
++                    LOGGER.info("Offline farm: ${player.name} was stored dead, waits for the owner.")
++                else
++                    beginFarm(player)
++            } catch (e: Exception) {
++                LOGGER.warning("Offline farm resume failed for $id: $e")
++                unmarkFarming(id)
++                // Never leave a half-spawned ghost behind.
++                runCatching {
++                    val ghost = World.getInstance().getPlayer(id)
++                    if (ghost != null) {
++                        reaping.add(id)
++                        try {
++                            ghost.deleteMe()
++                        } finally {
++                            reaping.remove(id)
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    private fun markFarming(id: Int) {
++        runCatching {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("INSERT INTO character_offline_farm(obj_Id, started) VALUES (?,?) ON DUPLICATE KEY UPDATE started=?").use { ps ->
++                    ps.setInt(1, id)
++                    ps.setLong(2, System.currentTimeMillis())
++                    ps.setLong(3, System.currentTimeMillis())
++                    ps.execute()
++                }
++            }
++        }.onFailure { LOGGER.warning("Offline farm marker write failed for $id: $it") }
++    }
++
++    private fun unmarkFarming(id: Int) {
++        runCatching {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("DELETE FROM character_offline_farm WHERE obj_Id=?").use { ps ->
++                    ps.setInt(1, id)
++                    ps.execute()
++                }
++            }
++        }.onFailure { LOGGER.warning("Offline farm marker delete failed for $id: $it") }
++    }
++
++    private fun readMarkers(): List<Int> {
++        return runCatching {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("SELECT obj_Id FROM character_offline_farm").use { ps ->
++                    ps.executeQuery().use { rs ->
++                        generateSequence { if (rs.next()) rs.getInt("obj_Id") else null }.toList()
++                    }
++                }
++            }
++        }.getOrElse {
++            LOGGER.warning("Offline farm markers read failed: $it")
++            emptyList()
++        }
++    }
++
++    /** How far on foot a character is willing to go from where the owner logged out. */
++    private const val MAX_WALK_TO_SPOT = 20000
++    /** How far a farming character is willing to walk for a trainer of its class. */
++    private const val MAX_WALK_TO_TRAINER = 25000
++    /** Close enough to call it arrived (a spot's centre, or a trainer's side — learning checks its own range). */
++    private const val ARRIVAL_RADIUS = 600
++    /** How close to a validated standing point next to a trainer the character must get. */
++    private const val APPROACH_ARRIVAL_RADIUS = 60
++    /** A trainer trip switches to its final approach inside this ring around the trainer. */
++    private const val TRAINER_APPROACH_RADIUS = 300
++    /** Re-issue the walk order when the current leg ended this long ago (leg finished, stun, a survived fight). */
++    private const val REISSUE_MOVE_MS = 3_000L
++    /** One walking leg: short enough for the pathfinder to solve, like WalkToSequence of the population bots. */
++    private const val LEG_LENGTH = 2000.0
++    /** Progress smaller than this between checks does not count as moving closer. */
++    private const val MIN_PROGRESS = 100.0
++    /** Standing still this many travel ticks in a row means the destination is unreachable from here. */
++    private const val MAX_STUCK_CHECKS = 10
++    /** Standing still this many checks triggers a sidestep around the obstacle. */
++    private const val CHECKS_BEFORE_DETOUR = 2
++    /** How many sidesteps one trip tries before giving up. */
++    private const val MAX_DETOURS = 6
++    private const val DETOUR_MIN = 300
++    private const val DETOUR_MAX = 900
++    /** A farmer idle outside a town for this long gets the hunt restarted. */
++    private const val IDLE_RESTART_MS = 30_000L
++    /** A trainer farther than this means a paid gatekeeper hop into its town instead of a cross-country walk. */
++    private const val GK_HOP_DISTANCE = 1500
++    /** A failed trainer trip (no path, no adena for the hop) is retried after this extra pause. */
++    private const val LESSON_RETRY_AFTER_FAIL_MS = 30 * 60_000L
++    /** How many spot candidates are tried before giving up (peaceful spots are skipped). */
++    private const val MAX_SPOT_ATTEMPTS = 5
++    /** How often a farming character is checked for lessons it can afford. */
++    private const val LESSON_CHECK_MS = 60_000L
++    /** How often a farming character logs its live status. */
++    private const val STATUS_LOG_MS = 60_000L
++    private const val MAX_LESSONS_PER_VISIT = 40
++}
