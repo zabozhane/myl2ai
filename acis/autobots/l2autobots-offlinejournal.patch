@@ -1,0 +1,359 @@
+diff --git a/sql/character_offline_journal.sql b/sql/character_offline_journal.sql
+new file mode 100644
+index 0000000..544d9d9
+--- /dev/null
++++ b/sql/character_offline_journal.sql
+@@ -0,0 +1,22 @@
++CREATE TABLE IF NOT EXISTS character_offline_journal (
++  `id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
++  `obj_Id` INT UNSIGNED NOT NULL DEFAULT 0,
++  `started` BIGINT NOT NULL DEFAULT 0,
++  `ended` BIGINT NULL DEFAULT NULL,
++  `start_level` INT NOT NULL DEFAULT 0,
++  `end_level` INT NULL DEFAULT NULL,
++  `exp_start` BIGINT NOT NULL DEFAULT 0,
++  `exp_end` BIGINT NULL DEFAULT NULL,
++  `sp_start` INT NOT NULL DEFAULT 0,
++  `sp_end` INT NULL DEFAULT NULL,
++  `adena_start` BIGINT NOT NULL DEFAULT 0,
++  `adena_end` BIGINT NULL DEFAULT NULL,
++  `kills` INT NOT NULL DEFAULT 0,
++  `deaths` INT NOT NULL DEFAULT 0,
++  `skills_learned` INT NOT NULL DEFAULT 0,
++  `adena_spent` BIGINT NOT NULL DEFAULT 0,
++  `stop_reason` VARCHAR(32) NULL DEFAULT NULL,
++  `reported` TINYINT NOT NULL DEFAULT 0,
++  PRIMARY KEY (id),
++  KEY `idx_owner` (obj_Id)
++);
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index b90f2e1..3531dff 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -218,6 +218,7 @@ object AutobotsManager {
+     
+     fun onEnterWorld(player: Player){
+         AutofarmManager.onEnterWorld(player)
++        OfflineFarmManager.onEnterWorld(player)
+     }
+     
+     fun onLogout(player: Player){
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 47039a9..bac4ea4 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -19,12 +19,18 @@ import net.sf.l2j.gameserver.enums.IntentionType
+ import net.sf.l2j.gameserver.enums.ZoneId
+ import net.sf.l2j.gameserver.geoengine.GeoEngine
+ import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Creature
+ import net.sf.l2j.gameserver.model.actor.Npc
+ import net.sf.l2j.gameserver.model.actor.Player
+ import net.sf.l2j.gameserver.model.actor.instance.Folk
++import net.sf.l2j.gameserver.model.actor.instance.Monster
+ import net.sf.l2j.gameserver.model.holder.skillnode.GeneralSkillNode
+ import net.sf.l2j.gameserver.model.zone.type.PeaceZone
+ import net.sf.l2j.gameserver.model.zone.type.TownZone
++import net.sf.l2j.gameserver.network.serverpackets.NpcHtmlMessage
++import java.sql.Statement
++import java.text.SimpleDateFormat
++import java.util.Date
+ import java.util.concurrent.ConcurrentHashMap
+ import java.util.logging.Logger
+ import kotlin.math.atan2
+@@ -42,7 +48,10 @@ import kotlin.math.sin
+  * do (SkillLearner), except spellbook skills are skipped for now (no book shopping yet). A character
+  * logging out in a town learns first and only then walks out; a farming character with lessons
+  * pending walks to the nearest trainer of its class and returns to its spot afterwards.
+- * No restock, no journal, no chat policy yet. Class change (professions) is stage 2.
++ * Every period of the offline life is journaled (character_offline_journal) and the owner gets a
++ * report window on login; the character is also stored to the DB periodically while the owner is
++ * away, so a crash loses minutes, not hours. No restock, no chat policy yet. Class change
++ * (professions) is stage 2.
+  */
+ object OfflineFarmManager {
+     private val LOGGER = Logger.getLogger(OfflineFarmManager::class.java.name)
+@@ -81,6 +90,17 @@ object OfflineFarmManager {
+     /** Since when a farming character is neither traveling nor hunting (idle watchdog). */
+     private val idleSince = ConcurrentHashMap<Int, Long>()
+ 
++    /** One journal period of the offline farm: from the owner's logout to their login or a restart. */
++    private class JournalSession(val rowId: Long, val startMillis: Long,
++                                 val startLevel: Int, val startExp: Long, val startSp: Int, val startAdena: Long,
++                                 var kills: Int = 0, var deaths: Int = 0, var skillsLearned: Int = 0,
++                                 var adenaSpent: Long = 0, var wasDead: Boolean = false,
++                                 var lastFlushAt: Long = 0L)
++    private val journal = ConcurrentHashMap<Int, JournalSession>()
++
++    /** The monster each farmer was fighting at the last tick, for approximate kill counting. */
++    private val lastTargets = ConcurrentHashMap<Int, Creature>()
++
+     @Volatile
+     private var serverShuttingDown = false
+ 
+@@ -90,6 +110,10 @@ object OfflineFarmManager {
+ 
+     fun onServerShutdown() {
+         serverShuttingDown = true
++        // A restart closes every open journal period; the resume after the start opens fresh ones.
++        for ((_, player) in farming) {
++            runCatching { flushJournal(player, close = true, reason = "restart") }
++        }
+     }
+ 
+     fun isFarming(player: Player): Boolean {
+@@ -119,6 +143,7 @@ object OfflineFarmManager {
+         player.client = DetachedClient(player)
+         farming[id] = player
+         markFarming(id)
++        openJournal(player)
+         beginFarm(player)
+         return true
+     }
+@@ -163,7 +188,11 @@ object OfflineFarmManager {
+             lessonCheckedAt.remove(id)
+             statusLoggedAt.remove(id)
+             idleSince.remove(id)
++            lastTargets.remove(id)
+             AutofarmManager.stopFarm(player, "you are back")
++            // The journal period closes before the object leaves: the snapshot is still complete here.
++            flushJournal(player, close = true, reason = "login")
++            journal.remove(id)
+             // Full cleanup + store + removal from the world. deleteMe calls tryKeepOnlineOnLogout
+             // again, but the reaping guard makes it take the normal logout path.
+             player.deleteMe()
+@@ -219,6 +248,7 @@ object OfflineFarmManager {
+             LOGGER.info("Offline farm: ${player.name} can't afford the gatekeeper hop at ${loc.price} adena (has ${player.adena}).")
+             return false
+         }
++        journal[player.objectId]?.let { it.adenaSpent += loc.price }
+         player.teleportTo(loc, 20)
+         LOGGER.info("Offline farm: ${player.name} teleports to ${loc.x},${loc.y} for ${loc.price} adena.")
+         return true
+@@ -348,6 +378,43 @@ object OfflineFarmManager {
+             }
+         }
+ 
++        // Journal: kill and death counting, and the periodic mid-period snapshot to the DB.
++        for ((id, player) in farming) {
++            val session = journal[id] ?: continue
++            try {
++                // Kill counting is approximate: the ticker only sees the target every 2-3 seconds,
++                // so a kill finished between two ticks is missed. Good enough for the report.
++                val remembered = lastTargets[id]
++                if (remembered != null && remembered.isDead) {
++                    session.kills++
++                    lastTargets.remove(id)
++                }
++                val target = player.target
++                if (target is Monster && !target.isDead)
++                    lastTargets[id] = target
++
++                // A death counts once; the flag resets when the character is alive again.
++                if (player.isDead) {
++                    if (!session.wasDead) {
++                        session.wasDead = true
++                        session.deaths++
++                    }
++                } else {
++                    session.wasDead = false
++                }
++
++                // Mid-period snapshot: the character itself is stored too, so a crash loses
++                // minutes of progress instead of everything since the logout.
++                if (now - session.lastFlushAt >= JOURNAL_FLUSH_MS) {
++                    session.lastFlushAt = now
++                    player.store()
++                    flushJournal(player)
++                }
++            } catch (e: Exception) {
++                LOGGER.warning("Offline farm journal tick failed for ${player.name}: $e")
++            }
++        }
++
+         // Farming characters with affordable lessons visit their class trainer between fights.
+         for ((id, player) in farming) {
+             if (traveling.containsKey(id)) continue
+@@ -429,6 +496,7 @@ object OfflineFarmManager {
+             }
+             Trip.TO_TRAINER -> {
+                 val learned = travel.trainer?.let { learnAll(player, it) } ?: 0
++                if (learned > 0) journal[player.objectId]?.let { it.skillsLearned += learned }
+                 if (travel.thenHunt) {
+                     // A trainer visit after a town logout: off to the hunting spot now.
+                     if (learned > 0) LOGGER.info("Offline farm: ${player.name} learned $learned skill levels, goes hunting.")
+@@ -555,6 +623,7 @@ object OfflineFarmManager {
+                 player.spawnMe(player.x, player.y, player.z)
+                 player.onPlayerEnter()
+                 farming[id] = player
++                openJournal(player)
+                 LOGGER.info("Offline farm: ${player.name} is back after a server restart, keeps farming.")
+                 if (player.isDead)
+                     LOGGER.info("Offline farm: ${player.name} was stored dead, waits for the owner.")
+@@ -618,6 +687,157 @@ object OfflineFarmManager {
+         }
+     }
+ 
++    // ---- Journal: what the character did on its own, reported to the owner on login. ----
++
++    /** One finished farm period as the report shows it: gains are precomputed from the snapshots. */
++    private class Period(val id: Long, val started: Long, val ended: Long,
++                         val startLevel: Int, val endLevel: Int, val expGain: Long, val spGain: Int,
++                         val adenaGain: Long, val kills: Int, val deaths: Int, val skills: Int,
++                         val spent: Long, val reason: String)
++
++    /** Opens a journal period for a character that just started its offline farm life. */
++    private fun openJournal(player: Player) {
++        val now = System.currentTimeMillis()
++        val session = runCatching {
++            var rowId = 0L
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement(
++                        "INSERT INTO character_offline_journal(obj_Id, started, start_level, exp_start, sp_start, adena_start) VALUES (?,?,?,?,?,?)",
++                        Statement.RETURN_GENERATED_KEYS).use { ps ->
++                    ps.setInt(1, player.objectId)
++                    ps.setLong(2, now)
++                    ps.setInt(3, player.level)
++                    ps.setLong(4, player.exp.toLong())
++                    ps.setInt(5, player.sp)
++                    ps.setLong(6, player.adena.toLong())
++                    ps.execute()
++                    ps.generatedKeys.use { rs -> if (rs.next()) rowId = rs.getLong(1) }
++                }
++            }
++            JournalSession(rowId, now, player.level, player.exp.toLong(), player.sp, player.adena.toLong(), lastFlushAt = now)
++        }.getOrElse {
++            LOGGER.warning("Offline farm journal open failed for ${player.name}: $it")
++            // rowId 0: the period runs in memory only, no DB writes are attempted for it.
++            JournalSession(0L, now, player.level, player.exp.toLong(), player.sp, player.adena.toLong(), lastFlushAt = now)
++        }
++        journal[player.objectId] = session
++    }
++
++    /** Writes the current snapshot into the journal row; close=true also ends the period. */
++    private fun flushJournal(player: Player, close: Boolean = false, reason: String = "") {
++        val session = journal[player.objectId] ?: return
++        if (session.rowId == 0L) return
++        runCatching {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                val sql = if (close)
++                    "UPDATE character_offline_journal SET end_level=?, exp_end=?, sp_end=?, adena_end=?," +
++                            " kills=?, deaths=?, skills_learned=?, adena_spent=?, ended=?, stop_reason=? WHERE id=?"
++                else
++                    "UPDATE character_offline_journal SET end_level=?, exp_end=?, sp_end=?, adena_end=?," +
++                            " kills=?, deaths=?, skills_learned=?, adena_spent=? WHERE id=?"
++                con.prepareStatement(sql).use { ps ->
++                    ps.setInt(1, player.level)
++                    ps.setLong(2, player.exp.toLong())
++                    ps.setInt(3, player.sp)
++                    ps.setLong(4, player.adena.toLong())
++                    ps.setInt(5, session.kills)
++                    ps.setInt(6, session.deaths)
++                    ps.setInt(7, session.skillsLearned)
++                    ps.setLong(8, session.adenaSpent)
++                    if (close) {
++                        ps.setLong(9, System.currentTimeMillis())
++                        ps.setString(10, reason)
++                        ps.setLong(11, session.rowId)
++                    } else {
++                        ps.setLong(9, session.rowId)
++                    }
++                    ps.execute()
++                }
++            }
++        }.onFailure { LOGGER.warning("Offline farm journal flush failed for ${player.name}: $it") }
++    }
++
++    /**
++     * Core hook from AutobotsManager.onEnterWorld: the owner is back in the world. The reentry
++     * hook already reaped the farmer object before the fresh restore; what remains here is the
++     * report of what the character did on its own, shown once per finished period.
++     */
++    fun onEnterWorld(player: Player) {
++        if (player is Autobot) return
++        showReport(player)
++    }
++
++    /** One window with the farm periods finished since the owner's last login; marks them as shown. */
++    private fun showReport(player: Player) {
++        val periods = runCatching {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement(
++                        "SELECT id, started, ended, start_level, end_level, exp_start, exp_end," +
++                                " sp_start, sp_end, adena_start, adena_end, kills, deaths," +
++                                " skills_learned, adena_spent, stop_reason" +
++                                " FROM character_offline_journal" +
++                                " WHERE obj_Id=? AND ended IS NOT NULL AND reported=0" +
++                                " ORDER BY id DESC LIMIT $REPORT_MAX_PERIODS").use { ps ->
++                    ps.setInt(1, player.objectId)
++                    ps.executeQuery().use { rs ->
++                        generateSequence {
++                            if (rs.next()) Period(
++                                    rs.getLong("id"), rs.getLong("started"), rs.getLong("ended"),
++                                    rs.getInt("start_level"), rs.getInt("end_level"),
++                                    rs.getLong("exp_end") - rs.getLong("exp_start"),
++                                    rs.getInt("sp_end") - rs.getInt("sp_start"),
++                                    rs.getLong("adena_end") - rs.getLong("adena_start"),
++                                    rs.getInt("kills"), rs.getInt("deaths"),
++                                    rs.getInt("skills_learned"), rs.getLong("adena_spent"),
++                                    rs.getString("stop_reason") ?: "")
++                            else null
++                        }.toList()
++                    }
++                }
++            }
++        }.getOrElse {
++            LOGGER.warning("Offline farm report read failed for ${player.name}: $it")
++            emptyList()
++        }
++        if (periods.isEmpty()) return
++
++        val fmt = SimpleDateFormat("dd.MM HH:mm")
++        val sb = StringBuilder()
++        sb.append("<html><body><center><font color=\"LEVEL\">While you were away</font></center><br>")
++        sb.append("Your character kept hunting on its own:<br>")
++        for (p in periods) {
++            val hours = (p.ended - p.started) / 3_600_000.0
++            sb.append("<br1><font color=\"LEVEL\">${fmt.format(Date(p.started))} - ${fmt.format(Date(p.ended))}</font>")
++            sb.append(" (${"%.1f".format(hours)} h)<br1>")
++            sb.append("Level ${p.startLevel} -> ${p.endLevel}, +${p.expGain} exp, +${p.spGain} SP<br1>")
++            val adenaLine = if (p.spent > 0) "+${p.adenaGain} adena (${p.spent} spent on teleports)" else "+${p.adenaGain} adena"
++            sb.append("$adenaLine, ${p.kills} kills<br1>")
++            val extras = StringBuilder()
++            if (p.deaths > 0) extras.append(", ${p.deaths} deaths")
++            if (p.skills > 0) extras.append(", ${p.skills} skills learned")
++            if (extras.isNotEmpty()) sb.append("${extras.substring(2)}<br1>")
++            val reason = if (p.reason == "restart") "server restart" else "you logged in"
++            sb.append("<font color=\"808080\">Stopped: $reason</font><br>")
++        }
++        sb.append("</body></html>")
++
++        val html = NpcHtmlMessage(0)
++        html.setHtml(sb.toString())
++        player.sendPacket(html)
++
++        // Mark as shown only after the window went out; a failed update just repeats the window.
++        runCatching {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("UPDATE character_offline_journal SET reported=1 WHERE id=?").use { ps ->
++                    for (p in periods) {
++                        ps.setLong(1, p.id)
++                        ps.execute()
++                    }
++                }
++            }
++        }.onFailure { LOGGER.warning("Offline farm report mark failed for ${player.name}: $it") }
++    }
++
+     /** How far on foot a character is willing to go from where the owner logged out. */
+     private const val MAX_WALK_TO_SPOT = 20000
+     /** How far a farming character is willing to walk for a trainer of its class. */
+@@ -655,4 +875,8 @@ object OfflineFarmManager {
+     /** How often a farming character logs its live status. */
+     private const val STATUS_LOG_MS = 60_000L
+     private const val MAX_LESSONS_PER_VISIT = 40
++    /** How often the journal row is refreshed and the character stored while the owner is away. */
++    private const val JOURNAL_FLUSH_MS = 5 * 60_000L
++    /** How many unshown periods the report window lists at most. */
++    private const val REPORT_MAX_PERIODS = 5
+ }
