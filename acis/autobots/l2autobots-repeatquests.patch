@@ -1,0 +1,261 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 8d7117d..1095738 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -52,6 +52,10 @@
+        class change at 20/40/76 (second and third professions are not scripted yet). questLog prints quest steps. -->
+   <questsEnabled>true</questsEnabled>
+   <questLog>true</questLog>
++  <!-- Repeatable "bring me the loot" quests as a side job: this share of the population has the quester trait.
++       A quester leaving town for a hunting spot picks up the spot's quest when the giver is in town, and hands in
++       the loot on the next trip to town. -->
++  <questerPercent>30</questerPercent>
+   <!-- Test only: a newly created population bot starts at this level (0 = level 1, like a real newbie). -->
+   <populationTestLevel>0</populationTestLevel>
+   <!-- Crafting (needs economyEnabled): dwarves learn recipes, craft and run workshops, spoilers supply them, other bots
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index d16d8e7..1e6f4d6 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -53,6 +53,7 @@ internal data class AutobotSettings(
+         @JsonProperty("crafterArtisanPercent") var crafterArtisanPercent: Int = 60,
+         @JsonProperty("questsEnabled") var questsEnabled: Boolean = true,
+         @JsonProperty("questLog") var questLog: Boolean = true,
++        @JsonProperty("questerPercent") var questerPercent: Int = 30,
+         @JsonProperty("raidsEnabled") var raidsEnabled: Boolean = true,
+         @JsonProperty("raidChancePercent") var raidChancePercent: Int = 100,
+         @JsonProperty("raidLog") var raidLog: Boolean = true,
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index d6d9019..6185f30 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -28,6 +28,9 @@ internal class HuntingSpot(val key: Long, val location: Location, private val mo
+ 
+     fun monstersFor(level: Int): Int = HuntingSpots.suitableLevels(level).let { range -> monsterLevels.count { it in range } }
+ 
++    /** Every monster kind spawning here: which repeatable quests this hunting ground feeds. */
++    fun npcIds(): List<Int> = npcIds
++
+     /** Monsters of [level] that drop (or, with [spoil], give when spoiled) any of [items]. */
+     fun monstersWith(level: Int, items: Set<Int>, spoil: Boolean): Int {
+         val range = HuntingSpots.suitableLevels(level)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 3234408..4966860 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -437,6 +437,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+         }
+ 
+         val isAway = distance(bot.location(), target.location) > SPOT_RADIUS
++        // A quester grabs the repeatable quest of this hunting ground on the way out of town.
++        if (inTown && quests.beforeLeavingTown(target)) return
+         if (inTown || (isAway && bot.target == null && !bot.isSitting)) {
+             travelTo(target, inTown)
+             return
+@@ -454,6 +456,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+     }
+ 
+     private suspend fun visitShops() {
++        // Quest loot is handed in first: its payout goes into the shopping money.
++        quests.onTownVisit()
+         TownTrip(bot, cautious = fitness.isSaving).execute()
+         tripDoneInTown = true
+         lastTripAt = System.currentTimeMillis()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 715eea9..f772e27 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -8,6 +8,7 @@ import dev.l2j.autobots.extensions.dwarfBranch
+ import dev.l2j.autobots.extensions.location
+ import dev.l2j.autobots.extensions.useMagicSkill
+ import dev.l2j.autobots.extensions.pickWeighted
++import dev.l2j.autobots.population.HuntingSpot
+ import dev.l2j.autobots.population.economy.GoToTownSequence
+ import dev.l2j.autobots.utils.distance
+ import dev.l2j.autobots.utils.getBehaviorByClassId
+@@ -82,6 +83,72 @@ internal class QuestRunner(private val bot: Autobot) {
+         QuestLog.setActive(bot, false)
+     }
+ 
++    /** The journal is restored once per login, whichever quest kind needs it first. */
++    private fun ensureLoaded() {
++        if (!loaded) {
++            QuestWorld.loadQuestStates(bot)
++            loaded = true
++        }
++    }
++
++    /**
++     * A quester leaving town for [spot] picks up the repeatable quest of that hunting ground when the giver stands
++     * in this town, like a player grabbing an errand on the way out. @return true while the errand owns the tick.
++     */
++    suspend fun beforeLeavingTown(spot: HuntingSpot): Boolean {
++        if (!AutobotData.settings.questsEnabled || bot.isInParty || !RepeatQuests.isQuester(bot)) return false
++        ensureLoaded()
++        // One side job at a time: a quest already running is farmed where its monsters are.
++        if (RepeatQuests.all.any { bot.getQuestState(it.questName)?.isStarted == true }) return false
++        val quest = RepeatQuests.matching(bot, bot.level, spot.npcIds()).firstOrNull() ?: return false
++        val giver = QuestWorld.closestNpc(bot, listOf(quest.giver)) ?: return false
++        if (distance(bot, giver) > GIVER_WITHIN) return false
++        if (!reach(giver)) return true
++
++        bot.target = giver
++        delay(Rnd.get(1500, 4000).toLong())
++        giver.onBypassFeedback(bot, "Quest ${quest.questName}")
++        for (event in quest.takeEvents) {
++            delay(Rnd.get(1500, 4000).toLong())
++            bot.processQuestEvent(quest.questName, event)
++        }
++        bot.target = null
++        if (bot.getQuestState(quest.questName)?.isStarted == true)
++            QuestLog.log(bot, QuestEvent.Taken, "${quest.questName} taken from ${giver.name} on the way out (${quest.rewardNote})")
++        return true
++    }
++
++    /**
++     * A trip to town is the time to hand in what the hunt gathered: every started repeatable quest with enough loot
++     * whose giver is in this town. The quest script itself counts the items and pays.
++     */
++    suspend fun onTownVisit() {
++        if (!AutobotData.settings.questsEnabled) return
++        ensureLoaded()
++        for (quest in RepeatQuests.all) {
++            if (bot.isDead) return
++            val state = bot.getQuestState(quest.questName) ?: continue
++            if (!state.isStarted) continue
++            val items = quest.questItems.sumOf { bot.inventory.getInventoryItemCount(it, -1) }
++            if (items < quest.turnInAt) continue
++            val giver = QuestWorld.closestNpc(bot, listOf(quest.giver)) ?: continue
++            if (distance(bot, giver) > GIVER_WITHIN) continue
++            if (!reach(giver)) continue
++
++            val before = bot.adena
++            bot.target = giver
++            delay(Rnd.get(1500, 4000).toLong())
++            giver.onBypassFeedback(bot, "Quest ${quest.questName}")
++            delay(Rnd.get(1500, 4000).toLong())
++            bot.target = null
++            val earned = bot.adena - before
++            if (earned > 0 || bot.inventory.getInventoryItemCount(quest.questItems.first(), -1) < items) {
++                QuestLog.adenaEarned(earned)
++                QuestLog.log(bot, QuestEvent.TurnedIn, "${quest.questName} handed in to ${giver.name}" + if (earned > 0) " for $earned adena" else "")
++            }
++        }
++    }
++
+     private suspend fun update(): Boolean {
+         if (bot.classId.level() != 0 || bot.level < START_LEVEL) return false
+         if (System.currentTimeMillis() < pausedUntil) return false
+@@ -363,15 +430,23 @@ internal class QuestRunner(private val bot: Autobot) {
+         private const val PAUSE_MS = 3 * 60 * 60 * 1000L
+         private const val MAX_TRAVEL_FAILURES = 8
+         private const val WALK_ONLY_MS = 10 * 60 * 1000L
++        /** A quest giver farther than this is in another town: the errand waits for a visit there. */
++        private const val GIVER_WITHIN = 6000
+     }
+ }
+ 
+-internal enum class QuestEvent { Started, Step, ClassChanged, Stuck }
++internal enum class QuestEvent { Started, Step, ClassChanged, Stuck, Taken, TurnedIn }
+ 
+ /** Quest events by kind for the periodic summary, and the bots busy with a quest right now. */
+ internal object QuestLog {
+     private val counts = ConcurrentHashMap<QuestEvent, AtomicInteger>()
+     private val active = ConcurrentHashMap.newKeySet<Int>()
++    private val adenaEarned = AtomicInteger()
++
++    /** What repeatable quest payouts brought in, for the summary. */
++    fun adenaEarned(amount: Int) {
++        if (amount > 0) adenaEarned.addAndGet(amount)
++    }
+ 
+     fun log(bot: Player, event: QuestEvent, message: String) {
+         counts.computeIfAbsent(event) { AtomicInteger() }.incrementAndGet()
+@@ -386,6 +461,6 @@ internal object QuestLog {
+         val events = QuestEvent.values().joinToString(" ") { "${it.name}=${counts[it]?.getAndSet(0) ?: 0}" }
+         // Bots past 20 still without a profession: those that haven't finished their Path quest yet.
+         val waiting = bots.count { it.level >= 20 && it.classId.level() == 0 }
+-        println("Autobots quest summary: $events questing=${active.count { id -> bots.any { it.objectId == id } }} noProfessionAt20=$waiting")
++        println("Autobots quest summary: $events questing=${active.count { id -> bots.any { it.objectId == id } }} noProfessionAt20=$waiting questAdena=${adenaEarned.getAndSet(0)}")
+     }
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/RepeatQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/RepeatQuests.kt
+new file mode 100644
+index 0000000..d7d879c
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/RepeatQuests.kt
+@@ -0,0 +1,74 @@
++package dev.l2j.autobots.population.quests
++
++import dev.l2j.autobots.AutobotData
++import net.sf.l2j.gameserver.enums.actors.ClassRace
++import net.sf.l2j.gameserver.model.actor.Player
++
++/**
++ * A repeatable "bring me the loot" quest a bot does alongside its usual hunt: it is taken when the bot leaves town
++ * for a hunting spot with the quest's monsters, and handed in on the next trip to town. The quest script does the
++ * payouts; this module only walks and talks.
++ *
++ * [turnInAt] is how many quest items make the trip to the giver worth it (for quests that finish and exit, exactly
++ * the count that completes them). [exitsOnTurnIn] quests leave the journal on payout and are taken again before the
++ * next hunt.
++ */
++internal class RepeatQuest(
++        val questName: String,
++        val giver: Int,
++        val takeEvents: List<String>,
++        val minLevel: Int,
++        val maxLevel: Int,
++        val monsters: Set<Int>,
++        val questItems: Set<Int>,
++        val turnInAt: Int,
++        val exitsOnTurnIn: Boolean,
++        val race: ClassRace? = null,
++        val rewardNote: String)
++
++/** The repeatable quests of aCis 382 worth a bot's time; npc, monster and item ids and events are the scripts' own. */
++internal object RepeatQuests {
++
++    val all: List<RepeatQuest> = listOf(
++            // Orc village: Rakeclaw Imps around the village, adena per soulstone.
++            RepeatQuest("Q273_InvadersOfTheHolyLand", 30566, listOf("30566-03.htm"), 6, 16,
++                    setOf(20311, 20312, 20313), setOf(1475, 1476), 10, exitsOnTurnIn = false, race = ClassRace.ORC,
++                    rewardNote = "adena per soulstone"),
++            // Elven village: Spore Fungi in the Elven Forest, 3500 adena for 10 sacs.
++            RepeatQuest("Q313_CollectSpores", 30150, listOf("30150-05.htm"), 8, 16,
++                    setOf(20509), setOf(1118), 10, exitsOnTurnIn = true, rewardNote = "3500 adena"),
++            // Talking Island: Tunath Orc marksmen, 1000 adena for 10 arrowheads.
++            RepeatQuest("Q303_CollectArrowheads", 30029, listOf("30029-03.htm"), 10, 17,
++                    setOf(20361), setOf(963), 10, exitsOnTurnIn = true, rewardNote = "1000 adena"),
++            // Dark elven village: skeleton hunters, 8470 adena for 10 bone fragments.
++            RepeatQuest("Q320_BonesTellTheFuture", 30359, listOf("30359-04.htm"), 10, 18,
++                    setOf(20517, 20518), setOf(809), 10, exitsOnTurnIn = true, rewardNote = "8470 adena"),
++            // Dark elven village: marsh zombies, 3350 adena and a potion for 5 skins.
++            RepeatQuest("Q319_ScentOfDeath", 30138, listOf("30138-04.htm"), 11, 18,
++                    setOf(20015, 20020), setOf(1045), 5, exitsOnTurnIn = true, rewardNote = "3350 adena + potion"),
++            // Dwarven village: Whinstone Golems, two gatekeeper tokens for 20 starstones.
++            RepeatQuest("Q297_GatekeepersFavor", 30540, listOf("30540-03.htm"), 15, 24,
++                    setOf(20521), setOf(1573), 20, exitsOnTurnIn = true, rewardNote = "2 gatekeeper tokens"),
++            // Elven village: Sukar wererats, adena per fang, the foulclaw's fang is the jackpot.
++            RepeatQuest("Q316_DestroyPlagueCarriers", 30155, listOf("30155-04.htm"), 18, 28,
++                    setOf(20040, 20047), setOf(1042, 1043), 15, exitsOnTurnIn = false, rewardNote = "adena per fang"),
++            // Dark elven village: spiders around the swamps, 5810 adena for 10 venom sacs.
++            RepeatQuest("Q324_SweetestVenom", 30351, listOf("30351-04.htm"), 18, 26,
++                    setOf(20034, 20038, 20043), setOf(1077), 10, exitsOnTurnIn = true, rewardNote = "5810 adena"),
++            // Gludin: remnant orcs of the Abandoned Camp, adena per badge.
++            RepeatQuest("Q326_VanquishRemnants", 30435, listOf("30435-03.htm"), 21, 32,
++                    setOf(20053, 20437, 20058, 20436, 20061, 20439, 20063, 20066, 20438), setOf(1359, 1360, 1361),
++                    15, exitsOnTurnIn = false, rewardNote = "adena per badge"),
++            // Giran: harpies, medusas and wyrms, adena per trophy.
++            RepeatQuest("Q331_ArrowOfVengeance", 30125, listOf("30125-03.htm"), 32, 42,
++                    setOf(20145, 20158, 20176), setOf(1452, 1453, 1454), 15, exitsOnTurnIn = false,
++                    rewardNote = "adena per trophy"))
++
++    /** A taste for errands, fixed for life like the rest of the character: about questerPercent of the population. */
++    fun isQuester(bot: Player): Boolean =
++            Math.floorMod(bot.objectId * 7349 + 29, 100) < AutobotData.settings.questerPercent
++
++    /** Quests that fit [level], [race] and whose monsters live in [spotMonsters]. */
++    fun matching(bot: Player, level: Int, spotMonsters: Collection<Int>): List<RepeatQuest> =
++            all.filter { level in it.minLevel..it.maxLevel && (it.race == null || it.race == bot.race) && it.monsters.any { m -> m in spotMonsters } }
++}
