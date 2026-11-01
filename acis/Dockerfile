@@ -26,6 +26,7 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git apply /patches/acis-382-autobots.patch \
  && git apply /patches/acis-382-trade.patch \
  && git apply /patches/acis-382-offlinefarm.patch \
+ && git apply /patches/acis-382-loginflag.patch \
  && git -C /autobots apply /patches/l2autobots-fixes.patch \
  && git -C /autobots apply /patches/l2autobots-autofarm.patch \
  && git -C /autobots apply /patches/l2autobots-craft.patch \

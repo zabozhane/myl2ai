@@ -1,0 +1,27 @@
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/LoginServerThread.java b/aCis_gameserver/java/net/sf/l2j/gameserver/LoginServerThread.java
+index 477d0af..7ee11e6 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/LoginServerThread.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/LoginServerThread.java
+@@ -46,6 +46,8 @@ import net.sf.l2j.gameserver.network.serverpackets.AuthLoginFail;
+ import net.sf.l2j.gameserver.network.serverpackets.CharSelectInfo;
+ import net.sf.l2j.loginserver.crypt.NewCrypt;
+ 
++import dev.l2j.autobots.offlinelife.OfflineFarmManager;
++
+ public class LoginServerThread extends Thread
+ {
+ 	protected static final CLogger LOGGER = new CLogger(LoginServerThread.class.getName());
+@@ -207,7 +209,12 @@ public class LoginServerThread extends Thread
+ 							{
+ 								final List<String> playerList = new ArrayList<>();
+ 								for (Player player : players)
+-									playerList.add(player.getAccountName());
++								{
++									// A character kept online by the offline farm has no client session;
++									// its account must stay free, otherwise the owner can't log in (ALREADY_ON_GS).
++									if (!OfflineFarmManager.INSTANCE.isFarming(player))
++										playerList.add(player.getAccountName());
++								}
+ 								
+ 								sendPacket(new PlayerInGame(playerList));
+ 							}
