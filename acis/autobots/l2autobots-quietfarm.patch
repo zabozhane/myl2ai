@@ -1,0 +1,97 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/Attention.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/Attention.kt
+index e3e6ad2..7bc85c9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/llm/Attention.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/Attention.kt
+@@ -2,31 +2,39 @@ package dev.l2j.autobots.population.llm
+ 
+ import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.offlinelife.OfflineFarmManager
+ import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.World
+ import java.util.concurrent.ConcurrentHashMap
+ 
+ /**
+  * Which bots a real player is paying attention to, and so which model tier they think with. A bot is near when a
+- * player is within `llmNearRange`, shares its party, or talked to it in the last 10 minutes.
++ * player is within `llmNearRange`, shares its party, or talked to it in the last 10 minutes. An offline-farm
++ * character is not an audience (its owner is away), so bots around it stay on the far tier and cost nothing.
+  */
+ internal object Attention {
+     private const val TALK_MEMORY_MS = 10 * 60_000L
+     private val talkedAt = ConcurrentHashMap<Int, Long>()
+-    private val talkedWith = ConcurrentHashMap<Int, String>()
++    private val talkedWith = ConcurrentHashMap<Int, Int>()
++
++    /** A real player actually at the keyboard: online, not a bot, and not an offline-farm ghost. */
++    fun Player.isLiveAudience(): Boolean = this !is Autobot && isOnline && !OfflineFarmManager.isFarming(this)
+ 
+     fun talked(bot: Player, player: Player) {
++        if (!player.isLiveAudience()) return
+         talkedAt[bot.objectId] = System.currentTimeMillis()
+-        talkedWith[bot.objectId] = player.name
++        talkedWith[bot.objectId] = player.objectId
+     }
+ 
+     /** The player who whispered or spoke to the bot in the last 10 minutes, if any. */
+     fun lastTalker(bot: Player): String? =
+             talkedWith[bot.objectId]?.takeIf { (talkedAt[bot.objectId] ?: 0L) > System.currentTimeMillis() - TALK_MEMORY_MS }
++                    ?.let { World.getInstance().getPlayer(it) }?.takeIf { it.isLiveAudience() }?.name
+ 
+     fun isNear(bot: Autobot): Boolean {
+-        if (bot.party?.members?.any { it !is Autobot } == true) return true
+-        if ((talkedAt[bot.objectId] ?: 0L) > System.currentTimeMillis() - TALK_MEMORY_MS) return true
+-        return bot.getKnownTypeInRadius(Player::class.java, AutobotData.settings.llmNearRange).any { it !is Autobot && it.isOnline }
++        if (bot.party?.members?.any { it.isLiveAudience() } == true) return true
++        if (lastTalker(bot) != null) return true
++        return bot.getKnownTypeInRadius(Player::class.java, AutobotData.settings.llmNearRange).any { it.isLiveAudience() }
+     }
+ 
+     fun tier(bot: Autobot): Llm.Tier = if (isNear(bot)) Llm.Tier.Near else Llm.Tier.Far
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotChatter.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotChatter.kt
+index e95cc43..ebc7bd4 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/llm/BotChatter.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/BotChatter.kt
+@@ -5,6 +5,7 @@ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.CoScopes
+ import dev.l2j.autobots.population.group.GroupFinder
+ import dev.l2j.autobots.population.group.Sociability
++import dev.l2j.autobots.population.llm.Attention.isLiveAudience
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.launch
+ import net.sf.l2j.commons.random.Rnd
+@@ -53,7 +54,7 @@ internal object BotChatter {
+         online.asSequence()
+                 .mapNotNull { it.party }
+                 .distinct()
+-                .filter { p -> p.members.any { it !is Autobot && it.isOnline } && p.members.count { it is Autobot } >= 2 }
++                .filter { p -> p.members.any { it.isLiveAudience() } && p.members.count { it is Autobot } >= 2 }
+                 .forEach { party ->
+                     if (Rnd.get(100) >= settings.llmBotSmallTalkPercent) return@forEach
+                     val bots = party.members.filterIsInstance<Autobot>().filter { it.life != null && !it.isDead }
+@@ -67,21 +68,21 @@ internal object BotChatter {
+     /** Where a real player would hear this bot, and which other bots could answer there. */
+     private fun audience(bot: Autobot, loud: Boolean): Pair<Channel, List<Autobot>>? {
+         val party = bot.party
+-        if (party != null && party.members.any { it !is Autobot && it.isOnline }) {
++        if (party != null && party.members.any { it.isLiveAudience() }) {
+             return Channel.Party to party.members.filterIsInstance<Autobot>().filter { it !== bot && it.life != null && !it.isDead }
+         }
+         val clan = bot.clan
+         if (clan != null) {
+             val online = clan.onlineMembers
+-            if (online.any { it !is Autobot }) return Channel.Clan to online.filterIsInstance<Autobot>().filter { it !== bot && it.life != null }
++            if (online.any { it.isLiveAudience() }) return Channel.Clan to online.filterIsInstance<Autobot>().filter { it !== bot && it.life != null }
+         }
+         val range = settings.llmNearRange
+-        if (bot.getKnownTypeInRadius(Player::class.java, range).any { it !is Autobot && it.isOnline }) {
++        if (bot.getKnownTypeInRadius(Player::class.java, range).any { it.isLiveAudience() }) {
+             return Channel.Nearby to bot.getKnownTypeInRadius(Autobot::class.java, range).filter { it !== bot && it.life != null && !it.isDead }
+         }
+         if (loud) {
+             val region = MapRegionData.getInstance().getMapRegion(bot.x, bot.y)
+-            val players = World.getInstance().players.filter { it !is Autobot && MapRegionData.getInstance().getMapRegion(it.x, it.y) == region }
++            val players = World.getInstance().players.filter { it.isLiveAudience() && MapRegionData.getInstance().getMapRegion(it.x, it.y) == region }
+             if (players.isNotEmpty()) return Channel.Shout to World.getInstance().players.filterIsInstance<Autobot>()
+                     .filter { it !== bot && it.life != null && MapRegionData.getInstance().getMapRegion(it.x, it.y) == region }.shuffled().take(20)
+         }
