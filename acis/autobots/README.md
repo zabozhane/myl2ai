@@ -369,3 +369,20 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
   the auto hunt settings (`character_autofarm_settings`, new `offlineEnabled` JSON field, **on by default** —
   the farm just works on every logout unless turned off). Both core hooks are
   wrapped in runCatching: a module failure can never break a login or a logout.
+
+
+- `l2autobots-audit-life.patch` — audit fixes AUD-01–AUD-06 (01.11.2026), applied after offline chores and quietfarm:
+  - Before bot login, repair case-insensitive duplicate names without changing object ids, inventories or relations.
+    Human names take priority; among bots the highest-level record keeps its name. Register all saved names,
+    reserve generated names immediately, add a unique bot-name index, and restore population members by id.
+    Group processing deduplicates members by id. Startup renames are recorded in the server log.
+  - Check the route between hunting spots as well as their endpoints: avoid water, remembered drowning places,
+    and nearby high-level aggressive spawns (including the floor below). Existing danger marks apply across floors.
+    Water death locations persist in `autobot_water_hazards`, provisioned at startup.
+  - A swimmer drops its old activity, heads for a remembered dry point or a verified shore, and retains that target
+    across ticks. Walking sequences stop when they enter water; escape movement does not cancel itself.
+  - Recovery from careful/farming mode waits an hour from the last death as well as the last mode change.
+  - Party members defend and assist nearby allies before travelling; dead members do not hold up recovery.
+    A member stalled away from the leader for five minutes (no progress for two) leaves, with a rejoin cooldown.
+  - Offline hunting anchors use spawns the character can actually target. Three minutes without prey or experience
+    while idle triggers another spot; recently unproductive spots are excluded for thirty minutes.
