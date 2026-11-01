@@ -26,6 +26,7 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git apply /patches/acis-382-autobots.patch \
  && git apply /patches/acis-382-trade.patch \
  && git apply /patches/acis-382-offlinefarm.patch \
+ && git apply /patches/acis-382-loginflag.patch \
  && git -C /autobots apply /patches/l2autobots-fixes.patch \
  && git -C /autobots apply /patches/l2autobots-autofarm.patch \
  && git -C /autobots apply /patches/l2autobots-craft.patch \
@@ -48,7 +49,8 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
      && git -C /autobots apply /patches/l2autobots-deathlog.patch \
  && git -C /autobots apply /patches/l2autobots-offlinefarm.patch \
  && git -C /autobots apply /patches/l2autobots-repeatquests.patch \
-     && git -C /autobots apply /patches/l2autobots-clans.patch
+     && git -C /autobots apply /patches/l2autobots-clans.patch \
+ && git -C /autobots apply /patches/l2autobots-offlinejournal.patch
 
 # The Kotlin module is compiled against the aCis Java sources and dropped into aCis_gameserver/lib,
 # where the stock ant build picks it up for both compilation and the dist libs.
