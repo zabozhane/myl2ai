@@ -425,3 +425,19 @@ Any player: the `AutoHunt` macro on the shortcut bar (or `.autofarm` in chat) to
 
 For an existing database, apply addon SQL from the new image before starting the upgraded game:
 `docker compose run --rm db-init` (new CREATE TABLE IF NOT EXISTS tables only).
+
+- `l2autobots-hunt-pace.patch` — empty-anchor recovery, useful rest, novice shots and confirmed support buffs:
+  - A quiet empty anchor is reconsidered after 45 seconds. Safe prey at the actual level is tried before using
+    the character's own escape scroll; a town gatekeeper ride must have a safe arrival/final walk and preserve
+    supplies. The character does not return to the known empty anchor after these recovery errands.
+  - Rest resumes at 80% HP or a larger measured fight reserve; melee characters do not wait for mana, and casters
+    that stopped for MP resume at 60%. Existing critical-attack interruption remains.
+  - Owned novice shots take priority for no-grade weapons. Optional normal shots can be bought below level 20
+    with spare money after essential purchases, retaining the reserve and recovery fare.
+  - Town logouts run errands before lessons/hunting. NPC approach uses validated NpcTravel routes. Newbie support
+    follows actual server level/class data and logs success only after effects are received; fresh buffs are kept.
+  - Offline status shows HP/MP, sitting and activity ownership; town actions log their elapsed time.
+
+Empty-anchor recovery uses owned money and the current gatekeeper's real menu. When no ride is
+affordable, a validated ground route can reach a surface hunting spot. A detour validates every
+actual link rather than requiring an unrelated straight line to the destination to be safe.
