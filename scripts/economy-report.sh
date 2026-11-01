@@ -7,6 +7,12 @@ cd "$(dirname "$0")/.."
 since="${1:-1h}"
 log="$(docker compose logs --no-color --since "$since" game 2>/dev/null)"
 
+echo "== Running build =="
+grep -E 'Server build:|Server artifact:' <<<"$log" | tail -n 4 || echo "not in this log window"
+
+echo "== Store demand and failed shopping (every 10 min) =="
+grep -o 'Autobots store audit: .*' <<<"$log" | tail -n 3 || echo "no summary yet"
+
 echo "== Summaries (every 10 min) =="
 grep -o 'Autobots economy summary: .*' <<<"$log" | tail -n 6 || echo "none yet"
 

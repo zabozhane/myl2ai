@@ -54,7 +54,8 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git -C /autobots apply /patches/l2autobots-offlinechores.patch \
  && git -C /autobots apply /patches/l2autobots-quietfarm.patch \
  && git -C /autobots apply /patches/l2autobots-audit-life.patch \
- && git -C /autobots apply /patches/l2autobots-audit-chores.patch
+ && git -C /autobots apply /patches/l2autobots-audit-chores.patch \
+ && git -C /autobots apply /patches/l2autobots-audit-market.patch
 
 # The Kotlin module is compiled against the aCis Java sources and dropped into aCis_gameserver/lib,
 # where the stock ant build picks it up for both compilation and the dist libs.
@@ -82,4 +83,12 @@ COPY --from=source /autobots/data/autobots /opt/acis/gameserver/data/autobots
 COPY --from=source /autobots/sql           /opt/acis/sql/addons
 COPY entrypoint.sh init-db.sh /opt/acis/bin/
 RUN chmod +x /opt/acis/bin/*.sh
+# Build identity is supplied by scripts/build.sh; direct compose builds remain explicitly unknown.
+ARG BUILD_REVISION=unknown
+ARG BUILD_DIRTY=unknown
+ARG ACIS_COMMIT
+ARG AUTOBOTS_COMMIT
+LABEL org.opencontainers.image.revision="${BUILD_REVISION}"
+RUN printf 'revision=%s\nworkingTreeDirty=%s\nacis=%s\nautobotsUpstream=%s\n' \
+      "$BUILD_REVISION" "$BUILD_DIRTY" "$ACIS_COMMIT" "$AUTOBOTS_COMMIT" > /opt/acis/build-info.txt
 ENTRYPOINT ["/opt/acis/bin/entrypoint.sh"]

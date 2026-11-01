@@ -100,6 +100,15 @@ cd l2aiserver
 docker compose up -d --build
 ```
 
+На macOS для сборки с идентификатором исходников используйте `bash scripts/build.sh`, затем
+`docker compose up -d`. Обёртка сохраняет коммит и наличие незакоммиченных изменений серверного кода
+(изменения только документации не помечают сервер грязным). При старте `game`/`login` строка `Server build:`
+показывает встроенные метаданные, `Server artifact:` — SHA-256 модуля ботов. Их также можно прочитать:
+`docker compose exec game cat /opt/acis/build-info.txt`. Метка образа `org.opencontainers.image.revision`
+содержит тот же коммит. Прямой запуск сборки через Compose поддерживается, но без `BUILD_REVISION` и
+`BUILD_DIRTY` покажет `unknown`, а не предполагаемую версию из текущего каталога. Пересборка сама не
+обновляет запущенный контейнер: после неё нужен `docker compose up -d --no-deps game`.
+
 Первая сборка занимает несколько минут: скачиваются исходники aCis (GitLab) и L2Autobots (GitHub), Gradle и
 зависимости, применяются патчи, собираются ядро, датапак и модуль ботов. Потом стартуют `db`, `db-init`, `login`, `game`.
 

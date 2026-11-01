@@ -1,0 +1,712 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index f9e611a..d3221df 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -195,14 +195,14 @@ object OfflineFarmManager {
+             val trainer = nearestTrainer(player)
+             if (trainer != null && learnableNow(player).isNotEmpty()) {
+                 goToTrainer(player, trainer, thenHunt = true)
+-                LOGGER.info("Offline farm: ${player.name} stays online, goes to trainer ${trainer.name} first.")
++                LOGGER.info("Offline farm: ${player.name} id=${player.objectId} stays online, goes to trainer ${trainer.name} first.")
+             } else {
+                 goHunting(player)
+             }
+         } else {
+             // The hunt anchors at the logout spot.
+             startFarmLogged(player, "field logout")
+-            LOGGER.info("Offline farm: ${player.name} stays online, hunting where the owner left.")
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} stays online, hunting where the owner left.")
+         }
+     }
+ 
+@@ -248,7 +248,7 @@ object OfflineFarmManager {
+             // Full cleanup + store + removal from the world. deleteMe calls tryKeepOnlineOnLogout
+             // again, but the reaping guard makes it take the normal logout path.
+             player.deleteMe()
+-            LOGGER.info("Offline farm: ${player.name} stored and removed for the owner's login.")
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} stored and removed for the owner's login.")
+         } finally {
+             reaping.remove(id)
+             farming.remove(id)
+@@ -273,7 +273,7 @@ object OfflineFarmManager {
+         val plan=dev.l2j.autobots.population.skills.TrainerTravel.select(player,failed.keys)
+         if(plan==null || (gkHopped && plan.exit!=null)) {
+             lessonCheckedAt[player.objectId]=System.currentTimeMillis()+LESSON_RETRY_AFTER_FAIL_MS
+-            LOGGER.info("Offline farm: ${player.name} postpones lessons: no reachable trainer within the supply budget.")
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} postpones lessons: no reachable trainer within the supply budget.")
+             if(thenHunt) goHunting(player) else startFarmLogged(player,"trainer unavailable")
+             return
+         }
+@@ -294,7 +294,7 @@ object OfflineFarmManager {
+                 route=plan.walk.points,lastMoveAt=System.currentTimeMillis())
+         val first=plan.walk.points.first()
+         walk(player,first.x,first.y,first.z)
+-        LOGGER.info("Offline farm: ${player.name} goes to trainer ${plan.trainer.name}: ${plan.walk.points.size} waypoints, fare ${exit?.price?:0}.")
++        LOGGER.info("Offline farm: ${player.name} id=${player.objectId} goes to trainer ${plan.trainer.name}: ${plan.walk.points.size} waypoints, fare ${exit?.price?:0}.")
+     }
+ 
+     /** A paid gatekeeper hop to the teleport location closest to the target. Walls, not distance, are the point. */
+@@ -303,17 +303,17 @@ object OfflineFarmManager {
+                 .filter { !it.isNoble }
+                 .minByOrNull { distance(x, y, it.x, it.y) }
+         if (loc == null) {
+-            LOGGER.info("Offline farm: ${player.name} found no gatekeeper location near $x,$y.")
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} found no gatekeeper location near $x,$y.")
+             return false
+         }
+         if (!player.reduceAdena("Offline farm gatekeeper", loc.price, player, false)) {
+-            LOGGER.info("Offline farm: ${player.name} can't afford the gatekeeper hop at ${loc.price} adena (has ${player.adena}).")
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} can't afford the gatekeeper hop at ${loc.price} adena (has ${player.adena}).")
+             return false
+         }
+         journal[player.objectId]?.let { it.adenaSpent += loc.price }
+         player.teleportTo(loc, 20)
+         player.onTeleported()
+-        LOGGER.info("Offline farm: ${player.name} teleports to ${loc.x},${loc.y} for ${loc.price} adena.")
++        LOGGER.info("Offline farm: ${player.name} id=${player.objectId} teleports to ${loc.x},${loc.y} for ${loc.price} adena.")
+         return true
+     }
+ 
+@@ -344,7 +344,7 @@ object OfflineFarmManager {
+         if (spot == null) {
+             retryAfter[player.objectId] = now + SPOT_RETRY_MS
+             failedRoundAt.putIfAbsent(player.objectId, now)
+-            LOGGER.info("Offline farm: ${player.name} exhausted reachable hunting spots; retry in 60 seconds.")
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} exhausted reachable hunting spots; retry in 60 seconds.")
+             return
+         }
+         val chosen = spot
+@@ -368,7 +368,7 @@ object OfflineFarmManager {
+         traveling[player.objectId] = Travel(Trip.TO_SPOT, anchor.x, anchor.y, anchor.z,
+                 spotKey = spot.key, lastMoveAt = System.currentTimeMillis())
+         walk(player, anchor.x, anchor.y, anchor.z)
+-        LOGGER.info("Offline farm: ${player.name} stays online, walks to a hunting spot at ${spot.location.x},${spot.location.y}.")
++        LOGGER.info("Offline farm: ${player.name} id=${player.objectId} stays online, walks to a hunting spot at ${spot.location.x},${spot.location.y}.")
+     }
+ 
+     private fun isPeaceful(x: Int, y: Int, z: Int): Boolean =
+@@ -480,11 +480,11 @@ object OfflineFarmManager {
+             statusLoggedAt[id] = now
+             try {
+                 val target = player.target?.name ?: "-"
+-                LOGGER.info("Offline farm status: ${player.name} lv ${player.level} exp ${player.exp} sp ${player.sp}" +
++                LOGGER.info("Offline farm status: ${player.name} id=${player.objectId} lv ${player.level} exp ${player.exp} sp ${player.sp}" +
+                         " at ${player.x},${player.y} intention=${player.ai.desire.intention} target=$target" +
+                         " traveling=${traveling.containsKey(id)} autofarming=${AutofarmManager.isAutoFarming(player)} dead=${player.isDead}")
+             } catch (e: Exception) {
+-                LOGGER.warning("Offline farm status failed for ${player.name}: $e")
++                LOGGER.warning("Offline farm status failed for ${player.name} id=${player.objectId}: $e")
+             }
+         }
+ 
+@@ -521,7 +521,7 @@ object OfflineFarmManager {
+                     flushJournal(player)
+                 }
+             } catch (e: Exception) {
+-                LOGGER.warning("Offline farm journal tick failed for ${player.name}: $e")
++                LOGGER.warning("Offline farm journal tick failed for ${player.name} id=${player.objectId}: $e")
+             }
+         }
+ 
+@@ -539,10 +539,10 @@ object OfflineFarmManager {
+                 if (player.isDead) continue
+                 player.teleportTo(MapRegionData.getInstance().getLocationToTeleport(player, MapRegionData.TeleportType.TOWN), 20)
+                 player.onTeleported()
+-                LOGGER.info("Offline farm: ${player.name} returned to the village after death.")
++                LOGGER.info("Offline farm: ${player.name} id=${player.objectId} returned to the village after death.")
+                 runChoresThenBack(player, null)
+             } catch (e: Exception) {
+-                LOGGER.warning("Offline farm revive failed for ${player.name}: $e")
++                LOGGER.warning("Offline farm revive failed for ${player.name} id=${player.objectId}: $e")
+             }
+         }
+ 
+@@ -562,7 +562,7 @@ object OfflineFarmManager {
+                         (dev.l2j.autobots.population.economy.Market.healingPriceAtHome(player)?:Int.MAX_VALUE)<=player.adena
+                 if (Errands.loadPercent(player) >= 45 || ready || routine || lowHealing) startTownTrip(player)
+             } catch (e: Exception) {
+-                LOGGER.warning("Offline farm town check failed for ${player.name}: $e")
++                LOGGER.warning("Offline farm town check failed for ${player.name} id=${player.objectId}: $e")
+             }
+         }
+ 
+@@ -572,7 +572,7 @@ object OfflineFarmManager {
+                     traveling.containsKey(id) || townJobs.containsKey(id) || now - (equipmentCheckedAt[id] ?: 0L) < 10_000L) continue
+             equipmentCheckedAt[id] = now
+             runCatching { OfflineEquipment.equip(player) }
+-                    .onFailure { LOGGER.warning("Offline farm equipment failed for ${player.name}: $it") }
++                    .onFailure { LOGGER.warning("Offline farm equipment failed for ${player.name} id=${player.objectId}: $it") }
+         }
+ 
+         // Farming characters with affordable lessons visit their class trainer between fights.
+@@ -586,14 +586,14 @@ object OfflineFarmManager {
+                 val trainer = nearestTrainer(player)
+                 if(trainer==null) {
+                     lessonCheckedAt[id]=now+LESSON_RETRY_AFTER_FAIL_MS
+-                    LOGGER.info("Offline farm: ${player.name} postpones lessons: no reachable trainer within supply budget.")
++                    LOGGER.info("Offline farm: ${player.name} id=${player.objectId} postpones lessons: no reachable trainer within supply budget.")
+                     continue
+                 }
+-                LOGGER.info("Offline farm: ${player.name} has skills to learn, walks to trainer ${trainer.name}.")
++                LOGGER.info("Offline farm: ${player.name} id=${player.objectId} has skills to learn, walks to trainer ${trainer.name}.")
+                 AutofarmManager.stopFarm(player, "going to the trainer")
+                 goToTrainer(player, trainer, thenHunt = false)
+             } catch (e: Exception) {
+-                LOGGER.warning("Offline farm lesson check failed for ${player.name}: $e")
++                LOGGER.warning("Offline farm lesson check failed for ${player.name} id=${player.objectId}: $e")
+             }
+         }
+ 
+@@ -611,7 +611,7 @@ object OfflineFarmManager {
+             huntedSpot[id]?.let { key -> emptySpots.getOrPut(id){mutableMapOf()}[key]=now }
+             huntProgress.remove(id)
+             AutofarmManager.stopFarm(player,"no prey or experience for three minutes")
+-            LOGGER.info("Offline farm: ${player.name} left an unproductive hunting anchor.")
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} left an unproductive hunting anchor.")
+             goHunting(player)
+         }
+ 
+@@ -632,7 +632,7 @@ object OfflineFarmManager {
+                 unreachableSpots.remove(id)
+                 failedRoundAt.remove(id)
+             }
+-            LOGGER.info("Offline farm: ${player.name} recovers an idle farm.")
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} recovers an idle farm.")
+             if (player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE)) goHunting(player)
+             else startFarmLogged(player, "idle watchdog")
+         }
+@@ -662,7 +662,7 @@ object OfflineFarmManager {
+             } catch (e: CancellationException) {
+                 throw e
+             } catch (e: Exception) {
+-                LOGGER.warning("Offline farm town action failed for ${player.name}: $e")
++                LOGGER.warning("Offline farm town action failed for ${player.name} id=${player.objectId}: $e")
+             } finally {
+                 townJobs.remove(id, coroutineContext[Job])
+                 if (pendingHunt.remove(id) && isActive(player) && !player.isDead) goHunting(player)
+@@ -677,7 +677,7 @@ object OfflineFarmManager {
+         val origin = Location(player.x, player.y, player.z)
+         townAction(player) {
+             AutofarmManager.stopFarm(player, "going to town")
+-            LOGGER.info("Offline farm: ${player.name} heads to town for errands.")
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} heads to town for errands.")
+             if (Gear.count(player, Gear.SCROLL_OF_ESCAPE) > 0) {
+                 if (player.isSitting) player.standUp()
+                 player.useItem(Gear.SCROLL_OF_ESCAPE)
+@@ -714,7 +714,7 @@ object OfflineFarmManager {
+         } catch (e: CancellationException) {
+             throw e
+         } catch (e: Exception) {
+-            LOGGER.warning("Offline farm chores failed for ${player.name}: $e")
++            LOGGER.warning("Offline farm chores failed for ${player.name} id=${player.objectId}: $e")
+         }
+         if (!isActive(player) || player.isDead) return
+         if (spot == null) pendingHunt.add(player.objectId) else {
+@@ -725,7 +725,7 @@ object OfflineFarmManager {
+ 
+     /** The trip leads nowhere from here: give it up and fall back to farming within reach. */
+     private fun onStuck(player: Player, travel: Travel) {
+-        LOGGER.info("Offline farm: ${player.name} can't reach ${travel.targetX},${travel.targetY} on foot, gives up the ${travel.trip} trip.")
++        LOGGER.info("Offline farm: ${player.name} id=${player.objectId} can't reach ${travel.targetX},${travel.targetY} on foot, gives up the ${travel.trip} trip.")
+         when (travel.trip) {
+             Trip.TO_TOWN -> startFarmLogged(player, "town unreachable")
+             Trip.TO_TRAINER -> {
+@@ -759,7 +759,7 @@ object OfflineFarmManager {
+                 // left, hunt right where the character stands.
+                 travel.spotKey?.let { unreachableSpots.getOrPut(player.objectId) { mutableSetOf() }.add(it) }
+                 if (travel.spotKey != null || player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE)) {
+-                    LOGGER.info("Offline farm: ${player.name} looks for another hunting spot.")
++                    LOGGER.info("Offline farm: ${player.name} id=${player.objectId} looks for another hunting spot.")
+                     goHunting(player)
+                     if (traveling.containsKey(player.objectId))
+                         return
+@@ -775,17 +775,17 @@ object OfflineFarmManager {
+             Trip.TO_SPOT, Trip.BACK_TO_SPOT -> {
+                 travel.spotKey?.let { huntedSpot[player.objectId]=it }
+                 startFarmLogged(player, "reached the spot")
+-                LOGGER.info("Offline farm: ${player.name} reached the spot, hunting.")
++                LOGGER.info("Offline farm: ${player.name} id=${player.objectId} reached the spot, hunting.")
+             }
+             Trip.TO_TRAINER -> {
+                 val learned = travel.trainer?.let { learnAll(player, it) } ?: 0
+                 if (learned > 0) journal[player.objectId]?.let { it.skillsLearned += learned }
+                 if (travel.thenHunt) {
+                     // A trainer visit after a town logout: off to the hunting spot now.
+-                    if (learned > 0) LOGGER.info("Offline farm: ${player.name} learned $learned skill levels, goes hunting.")
++                    if (learned > 0) LOGGER.info("Offline farm: ${player.name} id=${player.objectId} learned $learned skill levels, goes hunting.")
+                     goHunting(player)
+                 } else {
+-                    if (learned > 0) LOGGER.info("Offline farm: ${player.name} learned $learned skill levels, back to the spot.")
++                    if (learned > 0) LOGGER.info("Offline farm: ${player.name} id=${player.objectId} learned $learned skill levels, back to the spot.")
+                     traveling[player.objectId] = Travel(Trip.BACK_TO_SPOT, travel.spotX, travel.spotY, travel.spotZ,
+                             lastMoveAt = System.currentTimeMillis())
+                     walk(player, travel.spotX, travel.spotY, travel.spotZ)
+@@ -874,7 +874,7 @@ object OfflineFarmManager {
+             retryAfter.remove(player.objectId)
+         } else {
+             retryAfter[player.objectId] = System.currentTimeMillis() + SPOT_RETRY_MS
+-            LOGGER.info("Offline farm: ${player.name} could not start hunting ($reason): ${AutofarmManager.forbiddenReason(player) ?: "class or state rejected"}; retry scheduled.")
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} could not start hunting ($reason): ${AutofarmManager.forbiddenReason(player) ?: "class or state rejected"}; retry scheduled.")
+         }
+     }
+ 
+@@ -919,9 +919,9 @@ object OfflineFarmManager {
+                 farming[id] = player
+                 lastTownTripAt[id] = System.currentTimeMillis()
+                 openJournal(player)
+-                LOGGER.info("Offline farm: ${player.name} is back after a server restart, keeps farming.")
++                LOGGER.info("Offline farm: ${player.name} id=${player.objectId} is back after a server restart, keeps farming.")
+                 if (player.isDead)
+-                    LOGGER.info("Offline farm: ${player.name} was stored dead; will return to the village.")
++                    LOGGER.info("Offline farm: ${player.name} id=${player.objectId} was stored dead; will return to the village.")
+                 else
+                     beginFarm(player)
+             } catch (e: Exception) {
+@@ -1011,7 +1011,7 @@ object OfflineFarmManager {
+             }
+             JournalSession(rowId, now, player.level, player.exp.toLong(), player.sp, player.adena.toLong(), lastFlushAt = now)
+         }.getOrElse {
+-            LOGGER.warning("Offline farm journal open failed for ${player.name}: $it")
++            LOGGER.warning("Offline farm journal open failed for ${player.name} id=${player.objectId}: $it")
+             // rowId 0: the period runs in memory only, no DB writes are attempted for it.
+             JournalSession(0L, now, player.level, player.exp.toLong(), player.sp, player.adena.toLong(), lastFlushAt = now)
+         }
+@@ -1049,7 +1049,7 @@ object OfflineFarmManager {
+                     ps.execute()
+                 }
+             }
+-        }.onFailure { LOGGER.warning("Offline farm journal flush failed for ${player.name}: $it") }
++        }.onFailure { LOGGER.warning("Offline farm journal flush failed for ${player.name} id=${player.objectId}: $it") }
+     }
+ 
+     /**
+@@ -1091,7 +1091,7 @@ object OfflineFarmManager {
+                 }
+             }
+         }.getOrElse {
+-            LOGGER.warning("Offline farm report read failed for ${player.name}: $it")
++            LOGGER.warning("Offline farm report read failed for ${player.name} id=${player.objectId}: $it")
+             emptyList()
+         }
+         if (periods.isEmpty()) return
+@@ -1130,7 +1130,7 @@ object OfflineFarmManager {
+                     }
+                 }
+             }
+-        }.onFailure { LOGGER.warning("Offline farm report mark failed for ${player.name}: $it") }
++        }.onFailure { LOGGER.warning("Offline farm report mark failed for ${player.name} id=${player.objectId}: $it") }
+     }
+ 
+     private const val SPOT_RETRY_MS = 60_000L
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 67fd2cd..f9d0772 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -290,7 +290,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+             } else if (!goToTown(HOME_MAX_WALK) && !bot.isInsideZone(ZoneId.TOWN)) {
+                 // A scroll can report a failure while the teleport into town is still settling.
+                 homeUnreachable = true
+-                if (AutobotData.settings.populationSessionLog) println("Autobots session: ${bot.name} lv ${bot.level} can't get to town, logs out at ${bot.x},${bot.y}")
++                if (AutobotData.settings.populationSessionLog) println("Autobots session: ${bot.name} id=${bot.objectId} lv ${bot.level} can't get to town, logs out at ${bot.x},${bot.y}")
+             }
+             return
+         }
+@@ -343,7 +343,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+                 else -> "${killer.name} lv ${killer.level}"
+             }
+             val potions = dev.l2j.autobots.population.economy.Gear.HEALING_POTIONS.sumOf { dev.l2j.autobots.population.economy.Gear.count(bot, it) }
+-            println("Autobots death: ${bot.name} (lv ${bot.level} ${bot.classId}) ${if (killer === bot) "drowned" else "killed by $by"}, attackers ${attackers.size}" +
++            println("Autobots death: ${bot.name} id=${bot.objectId} (lv ${bot.level} ${bot.classId}) ${if (killer === bot) "drowned" else "killed by $by"}, attackers ${attackers.size}" +
+                     " [${attackers.joinToString(" ") { "${it.name}/${it.level}" }}], potions $potions, mode ${fitness.mode}," +
+                     " hunt lv $spotLevel, spot ${spot?.key ?: "-"}, party ${bot.party?.membersCount ?: 0}," +
+                     " weapon ${bot.activeWeaponItem?.let { "${it.name}/${it.crystalType}" } ?: "fists"}, at ${bot.x},${bot.y},${bot.z}" +
+@@ -374,7 +374,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private fun checkFall() {
+         val dz = lastZ - bot.z
+         if (lastZ != 0 && dz > FALL_LOG_Z && hypot((bot.x - lastX).toDouble(), (bot.y - lastY).toDouble()) < FALL_LOG_XY) {
+-            println("Autobots population: ${bot.name} lv ${bot.level} dropped ${dz}z from $lastX,$lastY,$lastZ to ${bot.x},${bot.y},${bot.z}," +
++            println("Autobots population: ${bot.name} id=${bot.objectId} lv ${bot.level} dropped ${dz}z from $lastX,$lastY,$lastZ to ${bot.x},${bot.y},${bot.z}," +
+                     " activity ${session.activity}, spot ${spot?.key ?: "-"}")
+             HuntingSpots.reportFallAt(Location(lastX, lastY, lastZ))
+             if (bot.getActiveSequence() != null) bot.cancelSequence()
+@@ -403,7 +403,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         val threat = bot.getKnownTypeInRadius(Monster::class.java, LOGIN_DANGER_RADIUS)
+                 .firstOrNull { !it.isDead && it.isAggressive && HuntingSpots.isDeadly(it.level, bot.level) } ?: return
+         val town = MapRegionData.getInstance().getLocationToTeleport(bot, TeleportType.TOWN)
+-        println("Autobots session: ${bot.name} lv ${bot.level} logged in next to ${threat.name} lv ${threat.level} at ${bot.x},${bot.y},${bot.z}, back to town")
++        println("Autobots session: ${bot.name} id=${bot.objectId} lv ${bot.level} logged in next to ${threat.name} lv ${threat.level} at ${bot.x},${bot.y},${bot.z}, back to town")
+         bot.teleportTo(town.x, town.y, town.z, 20)
+     }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+index 040965b..476f251 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+@@ -156,7 +156,7 @@ internal object Market {
+         val request = ItemRequest(offer.tradeItem.objectId, count, offer.tradeItem.price)
+         if (!owner.sellList.privateStoreBuy(bot, mutableSetOf(request))) return false
+         closeIfEmpty(owner)
+-        EconomyLog.log(bot, Deal.StoreBuy, "bought ${count}x ${offer.tradeItem.item.name} for ${count.toLong() * offer.tradeItem.price} from store of ${owner.name}")
++        EconomyLog.log(bot, Deal.StoreBuy, "bought ${count}x ${offer.tradeItem.item.name} for ${count.toLong() * offer.tradeItem.price} from store of ${owner.name} id=${owner.objectId}")
+         return true
+     }
+ 
+@@ -167,7 +167,7 @@ internal object Market {
+         val request = ItemRequest(item.objectId, item.itemId, count, offer.tradeItem.price)
+         if (!owner.buyList.privateStoreSell(bot, arrayOf(request))) return false
+         closeIfEmpty(owner)
+-        EconomyLog.log(bot, Deal.StoreSell, "sold ${count}x ${item.itemName} for ${count.toLong() * offer.tradeItem.price} to store of ${owner.name}")
++        EconomyLog.log(bot, Deal.StoreSell, "sold ${count}x ${item.itemName} for ${count.toLong() * offer.tradeItem.price} to store of ${owner.name} id=${owner.objectId}")
+         return true
+     }
+ 
+@@ -208,17 +208,17 @@ internal object EconomyLog {
+ 
+     fun log(bot: Player, deal: Deal, message: String) {
+         counts.computeIfAbsent(deal) { AtomicInteger() }.incrementAndGet()
+-        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): $message")
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} id=${bot.objectId} (lv ${bot.level}): $message")
+     }
+ 
+     /** A planned deal that didn't happen, and why: shows what holds the economy back. */
+     fun skip(bot: Player, reason: String) {
+-        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): skipped: $reason")
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} id=${bot.objectId} (lv ${bot.level}): skipped: $reason")
+     }
+ 
+     /** A decision worth seeing in the log (which route a bot chose and why), not counted as a deal. */
+     fun note(bot: Player, message: String) {
+-        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): $message")
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} id=${bot.objectId} (lv ${bot.level}): $message")
+     }
+ 
+     /**
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt
+index e80077f..21f7ae0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt
+@@ -172,7 +172,7 @@ internal object MarketBook {
+ 
+         searches.values.forEach { who -> who.values.removeIf { now - it > DEMAND_WINDOW_MS } }
+         save()
+-        if (++snapshots % SUMMARY_EVERY_SNAPSHOTS == 0) summary()
++        if (++snapshots == 1 || snapshots % SUMMARY_EVERY_SNAPSHOTS == 0) summary()
+     }
+ 
+     /** One line every 10 minutes: sales since the last line and the items whose price moved most from book value. */
+@@ -187,6 +187,7 @@ internal object MarketBook {
+                 "sought=${searches.count { (_, who) -> who.isNotEmpty() }} moved: " + moved.joinToString { (itemId, book, value) ->
+             "${ItemTable.getInstance().getTemplate(itemId)?.name ?: itemId} $book->$value (demand ${demand(itemId)}, supply ${supply[itemId] ?: 0})"
+         })
++        StoreAudit.summary()
+         salesSinceSummary = 0
+         haggles = 0
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreAudit.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreAudit.kt
+new file mode 100644
+index 0000000..c4c9e28
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreAudit.kt
+@@ -0,0 +1,48 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.population.economy.craft.CraftBook
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.gameserver.enums.actors.StoreType
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Player
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
++
++/** Potential online bot buyers, not promised sales; human demand is deliberately not guessed. */
++internal object StoreAudit {
++    private val attempts=ConcurrentHashMap<String,AtomicInteger>()
++    fun attempt(reason: String) { attempts.computeIfAbsent(reason){AtomicInteger()}.incrementAndGet() }
++
++    /** Each sell listing has one reason, tested in order: need -> nearby -> price -> money. */
++    fun diagnose(bots: Collection<Autobot>,owners: Collection<Player>): Map<String,Int> {
++        val needs=bots.associateWith { StoreKeeper.shoppingNeeds(it) }
++        val result=linkedMapOf("noNeed" to 0,"elsewhere" to 0,"price" to 0,"budget" to 0,"potential" to 0)
++        for(owner in owners.filter { it.storeType==StoreType.SELL }) for(item in owner.sellList.items) {
++            val buyers=needs.filter { (bot,wants) -> bot.objectId!=owner.objectId && (wants[item.item.itemId]?:0)>0 }.keys
++            val nearby=buyers.filter { distance(it,owner)<=Market.STORE_RADIUS }
++            val priced=nearby.filter { buyer ->
++                val limit=dev.l2j.autobots.population.economy.craft.Sourcing.storeLimit(buyer,item.item.itemId,StoreKeeper.buyLimit(buyer,item.item.itemId))
++                item.price<=limit || (owner is Autobot && item.price<limit*MarketHaggle.REACH)
++            }
++            val reason=when {
++                buyers.isEmpty() -> "noNeed"
++                nearby.isEmpty() -> "elsewhere"
++                priced.isEmpty() -> "price"
++                priced.none { Errands.spendable(it)>=item.price } -> "budget"
++                else -> "potential"
++            }
++            result[reason]=result.getValue(reason)+1
++        }
++        return result
++    }
++
++    fun summary() {
++        val online=World.getInstance().players.filter { it.isOnline && !it.isDead }
++        val bots=online.filterIsInstance<Autobot>().filter { it.life!=null }
++        val reasons=diagnose(bots,online).entries.joinToString(" "){ "${it.key}=${it.value}" }
++        val tries=listOf("NoOffer","Price","Budget","Route","Haggle","Rejected","Bought")
++                .joinToString(" "){ "attempt$it=${attempts[it]?.getAndSet(0)?:0}" }
++        println("Autobots store audit: botBuyers=${bots.size} crafters=${bots.count { CraftBook.isCrafter(it) }} $reasons $tries")
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
+index 25a0df8..a6b912c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
+@@ -61,6 +61,23 @@ internal object StoreKeeper {
+         return (gear + books + crystals + scrolls + craftWants(bot).keys).distinct()
+     }
+ 
++    /** Actual missing items, shared by the buyer and the market diagnostic. Gear must not hide needed books. */
++    fun shoppingNeeds(bot: Autobot): Map<Int, Int> {
++        val needs=linkedMapOf<Int,Int>()
++        Gear.wishes(bot).forEach { needs[it.itemId]=1 }
++        SkillLearner.missingBooks(bot).forEach { needs[it]=1 }
++        wanted(bot).filter { Gear.count(bot,it)==0 }.forEach { needs.putIfAbsent(it,1) }
++        craftWants(bot).forEach { (id,count) -> if(count>0) needs[id]=count }
++        val shots=Gear.shotId(bot)
++        if((bot.level>=20 || Errands.spendable(bot)>=5000) && Gear.count(bot,shots)<1000/3)
++            needs[shots]=(1000-Gear.count(bot,shots)).coerceAtLeast(0)
++        Gear.summonCrystal(bot)?.let { id ->
++            val missing=Crystals.WANTED-Gear.count(bot,id)
++            if(missing>0) needs[id]=missing
++        }
++        return needs.filterValues { it>0 }
++    }
++
+     /** A crafter's buy store bids on the materials of its next crafts and on recipes in demand it could learn. */
+     private fun craftWants(bot: Autobot): Map<Int, Int> {
+         if (!CraftBook.isCrafter(bot)) return emptyMap()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index bdee913..2e7d63c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -143,7 +143,7 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         val guide = Market.newbieGuideNear(bot) ?: return
+         if (!walkTo(guide, "for newbie buffs")) return
+         guide.onBypassFeedback(bot, "SupportMagic")
+-        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): got newbie buffs from ${guide.name}")
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} id=${bot.objectId} (lv ${bot.level}): got newbie buffs from ${guide.name}")
+         delay(Rnd.get(1000, 3000).toLong())
+     }
+ 
+@@ -168,29 +168,29 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         }
+ 
+         // Buy what the bot needs from sell stores cheaper than the shops (or at a fair price if shops don't have it).
+-        val needs = Gear.wishes(bot).map { it.itemId to 1 }.toMutableList()
+-        needs += Gear.shotId(bot) to SHOTS_PER_TRIP
+-        Gear.summonCrystal(bot)?.let { crystal -> (Crystals.WANTED - Gear.count(bot, crystal)).takeIf { it > 0 }?.let { needs += crystal to it } }
+-        if (Gear.wishes(bot).isEmpty()) needs += StoreKeeper.wanted(bot).map { it to 1 }
++        val needs = StoreKeeper.shoppingNeeds(bot)
+         for ((itemId, wantedCount) in needs) {
+             if (visits >= MAX_STORE_VISITS) return
+             val limit = Sourcing.storeLimit(bot, itemId, StoreKeeper.buyLimit(bot, itemId))
+             val offers = Market.sellOffers(bot, itemId)
+             MarketBook.searched(bot, itemId)
+             // A store a bit over the limit is worth a word with its owner: bots haggle with each other.
+-            val offer = offers.firstOrNull { it.tradeItem.price < limit }
++            val offer = offers.firstOrNull { it.tradeItem.price <= limit }
+                     ?: offers.firstOrNull { it.owner is Autobot && it.tradeItem.price < limit * MarketHaggle.REACH }
+-                    ?: continue
++
++            if(offer==null) { StoreAudit.attempt(if(offers.isEmpty()) "NoOffer" else "Price"); continue }
+             val count = minOf(offer.tradeItem.count, wantedCount, Errands.spendable(bot) / minOf(offer.tradeItem.price, limit).coerceAtLeast(1))
+-            if (count <= 0 || !walkTo(offer.owner, "to buy ${offer.tradeItem.item.name}")) continue
++            if(count<=0) { StoreAudit.attempt("Budget"); continue }
++            if(!walkTo(offer.owner,"to buy ${offer.tradeItem.item.name}")) { StoreAudit.attempt("Route"); continue }
+             visits++
+-            if (offer.tradeItem.price >= limit && !haggle(offer, limit)) continue
++            if (offer.tradeItem.price > limit && !haggle(offer, limit)) { StoreAudit.attempt("Haggle"); continue }
+             if (Market.buyFromStore(bot, offer, count)) {
++                StoreAudit.attempt("Bought")
+                 bot.inventory.getItemByItemId(itemId)?.takeIf { it.isEquipable && !it.isEquipped }?.let {
+                     Gear.equip(bot, it)
+                     Chatter.maybeSay(bot, Chatter.BOUGHT_UPGRADE, it.itemName)
+                 }
+-            }
++            } else StoreAudit.attempt("Rejected")
+         }
+     }
+ 
+@@ -205,7 +205,7 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         }
+         if (owner.storeType != net.sf.l2j.gameserver.enums.actors.StoreType.SELL || offer.tradeItem !in owner.sellList.items) return false
+         MarketBook.haggled()
+-        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} (lv ${bot.level}): haggled ${owner.name} down from ${offer.tradeItem.price} to $price for ${offer.tradeItem.item.name}")
++        if (AutobotData.settings.economyLog) println("Autobots economy: ${bot.name} id=${bot.objectId} (lv ${bot.level}): haggled ${owner.name} down from ${offer.tradeItem.price} to $price for ${offer.tradeItem.item.name}")
+         offer.tradeItem.price = price
+         return true
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt
+index a715715..04cddd1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt
+@@ -49,7 +49,7 @@ internal object Clans {
+             if (friends < FRIENDS_TO_FOUND || Rnd.get(100) >= FOUND_PERCENT) continue
+             val name = nameFor() ?: continue
+             if (ClanTable.getInstance().createClan(bot, name) == null) continue
+-            println("Autobots clans: ${bot.name} (lv ${bot.level}) founded \"$name\"")
++            println("Autobots clans: ${bot.name} id=${bot.objectId} (lv ${bot.level}) founded \"$name\"")
+         }
+     }
+ 
+@@ -72,12 +72,12 @@ internal object Clans {
+             val score = sympathy(leader, bot, rel.affinity, rel.trust)
+             // The invited decides by how the leader looks to it; a borderline offer is a coin flip.
+             if (score < ACCEPT_SCORE + Rnd.get(20)) {
+-                if (AutobotData.settings.groupLog) println("Autobots clans: ${bot.name} declined ${clan.name} (score $score)")
++                if (AutobotData.settings.groupLog) println("Autobots clans: ${bot.name} id=${bot.objectId} declined ${clan.name} (score $score)")
+                 continue
+             }
+             clan.addClanMember(bot)
+             invited++
+-            println("Autobots clans: ${bot.name} (lv ${bot.level}) joined ${clan.name} (${clan.membersCount} members)")
++            println("Autobots clans: ${bot.name} id=${bot.objectId} (lv ${bot.level}) joined ${clan.name} (${clan.membersCount} members)")
+             if (Rnd.get(100) < 60) bot.clanSay(listOf("hi!", "glad to be here", "привет!", "рад быть с вами").random())
+         }
+     }
+@@ -90,7 +90,7 @@ internal object Clans {
+             if (clan.leaderId == bot.objectId) continue
+             if ((Relations.of(bot, clan.leaderId)?.affinity ?: 0) > Relations.AVOID || Rnd.get(100) >= LEAVE_PERCENT) continue
+             clan.removeClanMember(bot.objectId, System.currentTimeMillis() + LEAVE_PENALTY_MS)
+-            println("Autobots clans: ${bot.name} left ${clan.name}")
++            println("Autobots clans: ${bot.name} id=${bot.objectId} left ${clan.name}")
+         }
+     }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+index 2efe8e1..4b053b2 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+@@ -180,8 +180,8 @@ internal object GroupFinder {
+         wipes = 0
+         for (party in parties) {
+             val leader = party.leader
+-            println("  ${PartyPlan.state(party).kind.name.lowercase()} party ${leader.name} lv ${leader.level} size ${party.membersCount}/${PartySize.target(party)}${PartySize.describe(party)}: " + party.members.filter { it !== leader }.joinToString {
+-                "${it.name} ${Role.of(it.classId)} ${distance(leader, it).toInt()}${if (it.isDead) " dead" else ""} ${(it as? Autobot)?.activeSequence?.javaClass?.simpleName ?: it.ai.desire.intention}"
++            println("  ${PartyPlan.state(party).kind.name.lowercase()} party ${leader.name} id=${leader.objectId} lv ${leader.level} size ${party.membersCount}/${PartySize.target(party)}${PartySize.describe(party)}: " + party.members.filter { it !== leader }.joinToString {
++                "${it.name} id=${it.objectId} ${Role.of(it.classId)} ${distance(leader, it).toInt()}${if (it.isDead) " dead" else ""} ${(it as? Autobot)?.activeSequence?.javaClass?.simpleName ?: it.ai.desire.intention}"
+             } + " | leader ${(leader as? Autobot)?.activeSequence?.javaClass?.simpleName ?: leader.ai.desire.intention}" + if (leader.isDead) " (leader dead)" else "")
+         }
+     }
+@@ -268,8 +268,8 @@ internal object GroupFinder {
+             state.breakUpAt = if (kind == PartyKind.Casual) System.currentTimeMillis() + Rnd.get(CASUAL_MIN_MS, CASUAL_MAX_MS) else null
+         }
+         nextShout[leader.objectId] = System.currentTimeMillis() + Rnd.get(SHOUT_MIN_MS, SHOUT_MAX_MS)
+-        if (settings.groupLog) println("Autobots groups: ${leader.name} (lv ${leader.level}) formed a ${kind.name.lowercase()} party: " +
+-                (listOf(leader) + members).joinToString { "${it.name} ${it.level} ${Role.of(it.classId)}" })
++        if (settings.groupLog) println("Autobots groups: ${leader.name} id=${leader.objectId} (lv ${leader.level}) formed a ${kind.name.lowercase()} party: " +
++                (listOf(leader) + members).joinToString { "${it.name} id=${it.objectId} ${it.level} ${Role.of(it.classId)}" })
+     }
+ 
+     /**
+@@ -303,7 +303,7 @@ internal object GroupFinder {
+ 
+         when (PartySize.update(party, now)) {
+             PartySize.Change.Shrink -> letGo(party)
+-            PartySize.Change.Grow -> if (settings.groupLog) println("Autobots groups: ${leader.name}'s party tries ${PartySize.target(party)} people")
++            PartySize.Change.Grow -> if (settings.groupLog) println("Autobots groups: ${leader.name} id=${leader.objectId}'s party tries ${PartySize.target(party)} people")
+             null -> {}
+         }
+         if (party.membersCount >= PartySize.target(party) || now < (nextShout[leader.objectId] ?: 0)) return
+@@ -335,7 +335,7 @@ internal object GroupFinder {
+         lookers.remove(member)
+         looking.remove(member.objectId)
+         fullSeekers.remove(member.objectId)
+-        if (settings.groupLog) println("Autobots groups: ${member.name} (lv ${member.level} ${Role.of(member.classId)}) joined ${leader.name}'s party, " +
++        if (settings.groupLog) println("Autobots groups: ${member.name} id=${member.objectId} (lv ${member.level} ${Role.of(member.classId)}) joined ${leader.name} id=${leader.objectId}'s party, " +
+                 "${party.membersCount}/${PartySize.target(party)}")
+         return true
+     }
+@@ -365,7 +365,7 @@ internal object GroupFinder {
+             party.removePartyMember(leaving, MessageType.LEFT)
+             leftParty[leaving.objectId] = leader.objectId to System.currentTimeMillis() + NO_RETURN_MS
+             startLooking(leaving)
+-            if (settings.groupLog) println("Autobots groups: ${leaving.name} (${Role.of(leaving.classId)}) left ${leader.name}'s party on its own, now ${PartySize.target(party)}")
++            if (settings.groupLog) println("Autobots groups: ${leaving.name} id=${leaving.objectId} (${Role.of(leaving.classId)}) left ${leader.name} id=${leader.objectId}'s party on its own, now ${PartySize.target(party)}")
+             return
+         }
+         val candidates = others.filter { !isOnly(it) }
+@@ -393,7 +393,7 @@ internal object GroupFinder {
+         party.removePartyMember(member, MessageType.EXPELLED)
+         leftParty[member.objectId] = leader.objectId to System.currentTimeMillis() + NO_RETURN_MS
+         if (member is Autobot) startLooking(member)
+-        if (settings.groupLog) println("Autobots groups: ${leader.name} sent ${member.name} away to make the party smaller, now ${PartySize.target(party)}")
++        if (settings.groupLog) println("Autobots groups: ${leader.name} id=${leader.objectId} sent ${member.name} id=${member.objectId} away to make the party smaller, now ${PartySize.target(party)}")
+     }
+ 
+     /** What the party lacks most, as a player would put it in a shout. A casual party takes anybody. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index f0dab2a..76e0572 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -486,7 +486,7 @@ internal object QuestLog {
+ 
+     fun log(bot: Player, event: QuestEvent, message: String) {
+         counts.computeIfAbsent(event) { AtomicInteger() }.incrementAndGet()
+-        if (AutobotData.settings.questLog) println("Autobots quests: ${bot.name} (lv ${bot.level} ${bot.classId}): $message")
++        if (AutobotData.settings.questLog) println("Autobots quests: ${bot.name} id=${bot.objectId} (lv ${bot.level} ${bot.classId}): $message")
+     }
+ 
+     fun setActive(bot: Player, isActive: Boolean) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidLog.kt b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidLog.kt
+index 2f440df..d73cc87 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidLog.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidLog.kt
+@@ -17,7 +17,7 @@ internal object RaidLog {
+     }
+ 
+     fun note(bot: Player, text: String) {
+-        if (AutobotData.settings.raidLog) println("Autobots raids: ${bot.name} (lv ${bot.level}) $text")
++        if (AutobotData.settings.raidLog) println("Autobots raids: ${bot.name} id=${bot.objectId} (lv ${bot.level}) $text")
+     }
+ 
+     fun summary(online: Collection<Autobot>) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt b/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt
+index cd00621..12fbc13 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt
+@@ -168,7 +168,7 @@ internal object SkillLearner {
+                 }
+             }
+         } catch (e: Exception) {
+-            println("Autobots skills: couldn't restore skills of ${bot.name}: $e")
++            println("Autobots skills: couldn't restore skills of ${bot.name} id=${bot.objectId}: $e")
+         }
+     }
+ 
+@@ -191,7 +191,7 @@ internal object SkillLog {
+     }
+ 
+     fun note(bot: Player, message: String) {
+-        if (AutobotData.settings.questLog) println("Autobots skills: ${bot.name} (lv ${bot.level} ${bot.classId}): $message")
++        if (AutobotData.settings.questLog) println("Autobots skills: ${bot.name} id=${bot.objectId} (lv ${bot.level} ${bot.classId}): $message")
+     }
+ 
+     fun summary(bots: Collection<Autobot>) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/TradeLog.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeLog.kt
+index 683d357..1746690 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/trade/TradeLog.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeLog.kt
+@@ -14,11 +14,11 @@ internal object TradeLog {
+ 
+     fun log(bot: Player, deal: TradeDeal, message: String) {
+         counts.computeIfAbsent(deal) { AtomicInteger() }.incrementAndGet()
+-        if (AutobotData.settings.tradeLog) println("Autobots trade: ${bot.name} (lv ${bot.level}): $message")
++        if (AutobotData.settings.tradeLog) println("Autobots trade: ${bot.name} id=${bot.objectId} (lv ${bot.level}): $message")
+     }
+ 
+     fun note(bot: Player, message: String) {
+-        if (AutobotData.settings.tradeLog) println("Autobots trade: ${bot.name} (lv ${bot.level}): $message")
++        if (AutobotData.settings.tradeLog) println("Autobots trade: ${bot.name} id=${bot.objectId} (lv ${bot.level}): $message")
+     }
+ 
+     fun summary(online: Collection<Autobot>) {
