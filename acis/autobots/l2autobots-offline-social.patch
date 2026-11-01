@@ -1,0 +1,1085 @@
+diff --git a/sql/autobot_statics.sql b/sql/autobot_statics.sql
+new file mode 100644
+index 0000000..2037f27
+--- /dev/null
++++ b/sql/autobot_statics.sql
+@@ -0,0 +1,10 @@
++CREATE TABLE IF NOT EXISTS autobot_statics (
++  id INT NOT NULL PRIMARY KEY,
++  leader_id INT NOT NULL,
++  created BIGINT NOT NULL
++);
++CREATE TABLE IF NOT EXISTS autobot_static_members (
++  bot_id INT NOT NULL PRIMARY KEY,
++  static_id INT NOT NULL,
++  KEY static_id (static_id)
++);
+diff --git a/sql/character_offline_events.sql b/sql/character_offline_events.sql
+new file mode 100644
+index 0000000..9928074
+--- /dev/null
++++ b/sql/character_offline_events.sql
+@@ -0,0 +1,9 @@
++CREATE TABLE IF NOT EXISTS character_offline_events (
++  id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
++  journal_id BIGINT NOT NULL,
++  obj_Id INT NOT NULL,
++  event_time BIGINT NOT NULL,
++  kind VARCHAR(32) NOT NULL,
++  detail VARCHAR(200) NOT NULL,
++  KEY journal_events (journal_id)
++);
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 348efe1..46ae0e2 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -154,11 +154,21 @@ object AutobotsManager {
+ 
+     /** Called by RequestJoinParty once a player invited a bot: the bot answers like the client would. */
+     fun onPartyInvite(requestor: Player, target: Player) {
++        if(dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(target)) {
++            dev.l2j.autobots.offlinelife.OfflineLife.onInvite(requestor,target)
++            return
++        }
+         if (target is Autobot) PartyInvites.onInvite(requestor, target)
+     }
+ 
+     /** Called by TradeRequest once a player asked a bot to trade: a bot never sees the request window. */
+     fun onTradeRequest(requestor: Player, target: Player) {
++        if(dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(target)) {
++            target.activeRequester=null
++            requestor.onTransactionResponse()
++            requestor.sendPacket(net.sf.l2j.gameserver.network.serverpackets.SendTradeDone(0))
++            return
++        }
+         if (target is Autobot) PlayerTrade.onTradeRequest(requestor, target)
+     }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt
+index cec5667..7bbf298 100644
+--- a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmManager.kt
+@@ -20,6 +20,10 @@ import dev.l2j.autobots.utils.getHealthPercentage
+ import dev.l2j.autobots.utils.getManaPercentage
+ import dev.l2j.autobots.utils.supportedCombatPrefs
+ import kotlinx.coroutines.launch
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.CoroutineStart
++import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.cancelAndJoin
+ import net.sf.l2j.L2DatabaseFactory
+ import net.sf.l2j.gameserver.enums.IntentionType
+ import net.sf.l2j.gameserver.enums.ZoneId
+@@ -44,12 +48,13 @@ object AutofarmManager {
+     private val activePlayers = ConcurrentHashMap<Int, Player>()
+     internal val combatBehaviors = ConcurrentHashMap<Int, CombatBehavior>()
+     internal val socialBehaviors = ConcurrentHashMap<Int, SocialBehavior>()
+-    internal val sequences = HashMap<Int, Sequence?>()
+-    private val busyStates = ConcurrentHashMap<Int, Boolean>()
++    internal val sequences = ConcurrentHashMap<Int, Sequence>()
++    private val updates = ConcurrentHashMap<Int,Job>()
+     private val combatPreferences = ConcurrentHashMap<Int, HashMap<Int, CombatPreferences>>()
+     private val skillPreferences = ConcurrentHashMap<Int, HashMap<Int, SkillPreferences?>>()
+     private val settings = ConcurrentHashMap<Int, AutofarmSettings>()
+     private val sessions = ConcurrentHashMap<Int, Session>()
++    private val offlinePotions = ConcurrentHashMap<Int, Session>()
+ 
+     private class Session(val anchor: Location, val classId: Int) {
+         @Volatile var pausedUntil = 0L
+@@ -59,18 +64,16 @@ object AutofarmManager {
+ 
+     internal var onUpdateTask =
+             Klock.start("autofarmOnUpdate", 1000, 500, CoScopes.onUpdateScope, action = {
+-                activePlayers.values.forEach {
+-                    CoScopes.onUpdateScope.launch {
+-                        // putIfAbsent: one think at a time per player, a slow tick is skipped instead of piling up.
+-                        if (busyStates.putIfAbsent(it.objectId, true) != null) return@launch
++                activePlayers.values.forEach { player ->
++                    val task=CoScopes.onUpdateScope.launch(start=CoroutineStart.LAZY) {
+                         try {
+-                            onUpdate(it)
+-                        } catch (e: Exception) {
+-                            e.printStackTrace()
+-                        } finally {
+-                            busyStates.remove(it.objectId)
+-                        }
++                            if(activePlayers[player.objectId]!==player) return@launch
++                            onUpdate(player)
++                        } catch(e: kotlinx.coroutines.CancellationException) { throw e }
++                        catch(e: Exception) { e.printStackTrace() }
++                        finally { updates.remove(player.objectId,coroutineContext[Job]) }
+                     }
++                    if(updates.putIfAbsent(player.objectId,task)==null) task.start() else task.cancel()
+                 }
+             })
+     
+@@ -81,7 +84,24 @@ object AutofarmManager {
+     /** Economy helpers need class preferences even while hunting is stopped in town. */
+     @Synchronized
+     internal fun prepareOfflineBehavior(player: Player) {
+-        combatBehaviors.getOrPut(player.objectId) { getBehaviorForActiveClass(player) }
++        val behavior=combatBehaviors.getOrPut(player.objectId) { getBehaviorForActiveClass(player) }
++        if(dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(player)) {
++            behavior.combatPreferences.attackPlayerType=AttackPlayerType.None
++            behavior.combatPreferences.targetingPreference=TargetingPreference.Closest
++        }
++    }
++
++    internal fun useOfflinePotions(player: Player) {
++        usePotions(player,offlinePotions.getOrPut(player.objectId){Session(Location(player.x,player.y,player.z),player.activeClass)})
++    }
++    internal fun clearOfflinePotions(player: Player) { offlinePotions.remove(player.objectId) }
++
++    /** Owner handoff removes future ticks first, then waits for the current combat coroutine. */
++    internal fun quiesce(player: Player) {
++        activePlayers.remove(player.objectId)
++        updates.remove(player.objectId)?.let { runBlocking { it.cancelAndJoin() } }
++        synchronized(this) { cleanUpStates(player) }
++        player.abortAttack();player.abortCast();player.stopMove(null);player.target=null
+     }
+ 
+     fun toggleFarm(player: Player) {
+@@ -247,14 +267,16 @@ object AutofarmManager {
+         return distance2d(target, session.anchor) <= s.radius
+     }
+ 
+-    internal fun allowsRest(player: Player) = !sessions.containsKey(player.objectId) || getSettings(player).rest
++    internal fun allowsRest(player: Player) = !hasOwnSettings(player) || getSettings(player).rest
+ 
+-    internal fun allowsLoot(player: Player) = !sessions.containsKey(player.objectId) || getSettings(player).loot
++    internal fun allowsLoot(player: Player) = !hasOwnSettings(player) || getSettings(player).loot
+ 
+     internal fun isSkillDisabled(player: Player, skillId: Int) =
+-            sessions.containsKey(player.objectId) && getSettings(player).disabledSkills.contains(skillId)
++            hasOwnSettings(player) && getSettings(player).disabledSkills.contains(skillId)
++
++    private fun hasOwnSettings(player: Player) = sessions.containsKey(player.objectId) || dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(player)
+ 
+-    internal fun usesOwnPotions(player: Player) = player !is Autobot && sessions.containsKey(player.objectId)
++    internal fun usesOwnPotions(player: Player) = player !is Autobot && (sessions.containsKey(player.objectId) || dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(player))
+ 
+     internal fun getSettings(player: Player): AutofarmSettings = settings.getOrPut(player.objectId) { AutofarmSettings() }
+ 
+@@ -368,7 +390,6 @@ object AutofarmManager {
+         combatBehaviors.remove(player.objectId)
+         socialBehaviors.remove(player.objectId)
+         sequences.remove(player.objectId)
+-        busyStates.remove(player.objectId)
+         if(includeBehaviors) {
+             combatPreferences.remove(player.objectId)
+             skillPreferences.remove(player.objectId)
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/Sequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/Sequence.kt
+index f651bc5..610c906 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/Sequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/Sequence.kt
+@@ -5,6 +5,9 @@ import dev.l2j.autobots.extensions.getActiveSequence
+ import dev.l2j.autobots.extensions.setActiveSequence
+ import dev.l2j.autobots.utils.CancellationToken
+ import kotlinx.coroutines.async
++import kotlinx.coroutines.coroutineScope
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.CoroutineStart
+ import net.sf.l2j.gameserver.model.actor.Player
+ 
+ internal interface Sequence {
+@@ -20,12 +23,16 @@ internal interface Sequence {
+             bot.setActiveSequence(null)
+         }
+         
+-        val job = CoScopes.sequenceScope.async { definition() }
+-        cancellationToken = CancellationToken({ job.cancel() })
+-        job.invokeOnCompletion { 
+-            bot.setActiveSequence(null)
++        val sequence=this
++        coroutineScope {
++            val job = async(CoScopes.sequenceScope.coroutineContext.minusKey(Job),start=CoroutineStart.LAZY) { definition() }
++            cancellationToken = CancellationToken({ job.cancel() })
++            job.invokeOnCompletion {
++                if(bot.getActiveSequence()===sequence) bot.setActiveSequence(null)
++            }
++            bot.setActiveSequence(sequence)
++            job.start()
++            job.await()
+         }
+-        bot.setActiveSequence(this)
+-        job.await()
+     }
+ }
+\ No newline at end of file
+diff --git a/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt b/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
+index 765d56c..fc81ab7 100644
+--- a/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
++++ b/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
+@@ -236,7 +236,7 @@ internal fun Player.setActiveSequence(sequence: Sequence?){
+         activeSequence = sequence
+         return
+     }
+-    AutofarmManager.sequences[objectId] = sequence
++    if(sequence==null) AutofarmManager.sequences.remove(objectId) else AutofarmManager.sequences[objectId] = sequence
+ }
+ 
+ internal fun Player.getCombatBehaviorForClass() : CombatBehavior {
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index d3221df..cfb6339 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -147,12 +147,16 @@ object OfflineFarmManager {
+         townJobs.values.forEach { it.cancel() }
+         // A restart closes every open journal period; the resume after the start opens fresh ones.
+         for ((_, player) in farming) {
++            OfflineLife.stop(player)
++            AutofarmManager.quiesce(player)
+             runCatching { flushJournal(player, close = true, reason = "restart") }
+         }
+     }
+ 
+     fun isFarming(player: Player): Boolean = farming[player.objectId] === player
+ 
++    internal fun activityAvailable(player: Player): Boolean = isActive(player) && !traveling.containsKey(player.objectId) && !townJobs.containsKey(player.objectId)
++
+     internal fun isActive(player: Player): Boolean = !serverShuttingDown &&
+             farming[player.objectId] === player && !reaping.contains(player.objectId)
+ 
+@@ -191,6 +195,14 @@ object OfflineFarmManager {
+      * character can afford before leaving the town; a field logout anchors the hunt right there.
+      */
+     private fun beginFarm(player: Player) {
++        if(player.isInParty) {
++            if(OfflineLife.validParty(player)) {
++                recordEvent(player,"PartyJoined","preserved bot party on logout")
++                OfflineLife.schedule(player)
++                return
++            }
++            OfflineLife.leave(player,"offline life accepts bot-led parties only")
++        }
+         if (player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE)) {
+             val trainer = nearestTrainer(player)
+             if (trainer != null && learnableNow(player).isNotEmpty()) {
+@@ -222,7 +234,9 @@ object OfflineFarmManager {
+         val id = player.objectId
+         if (!reaping.add(id)) return
+         try {
+-            townJobs.remove(id)?.cancel()
++            OfflineLife.stop(player)
++            AutofarmManager.quiesce(player)
++            townJobs.remove(id)?.let { kotlinx.coroutines.runBlocking { it.cancel();it.join() } }
+             equipmentCheckedAt.remove(id)
+             townCheckedAt.remove(id)
+             lastTownTripAt.remove(id)
+@@ -385,6 +399,10 @@ object OfflineFarmManager {
+             if (isActive(player) && player.isTeleporting) player.onTeleported()
+         }
+ 
++        for((id,player) in farming) {
++            if(isActive(player) && !player.isDead && !traveling.containsKey(id) && !townJobs.containsKey(id)) OfflineLife.schedule(player)
++        }
++
+         for ((id, travel) in traveling) {
+             try {
+                 val player = farming[id]
+@@ -528,6 +546,7 @@ object OfflineFarmManager {
+         for ((id, player) in farming) {
+             if (!isActive(player)) continue
+             if (!player.isDead) { diedAt.remove(id); continue }
++            OfflineLife.stop(player)
+             townJobs.remove(id)?.cancel()
+             val since = diedAt.getOrPut(id) { now }
+             if (now - since < DEATH_WAIT_MS || townJobs.containsKey(id)) continue
+@@ -547,7 +566,7 @@ object OfflineFarmManager {
+         }
+ 
+         for ((id, player) in farming) {
+-            if (!isActive(player) || player.isDead || traveling.containsKey(id) || townJobs.containsKey(id)) continue
++            if (!isActive(player) || player.isDead || OfflineLife.owns(player) || traveling.containsKey(id) || townJobs.containsKey(id)) continue
+             if (now - (townCheckedAt[id] ?: 0L) < TOWN_CHECK_MS) continue
+             townCheckedAt[id] = now
+             try {
+@@ -569,7 +588,7 @@ object OfflineFarmManager {
+         // Equip collected loot between fights; never interfere with a walk or a town dialogue.
+         for ((id, player) in farming) {
+             if (!isActive(player) || player.isDead || player.isUnderAttack() || player.isAttackingNow || player.isCastingNow ||
+-                    traveling.containsKey(id) || townJobs.containsKey(id) || now - (equipmentCheckedAt[id] ?: 0L) < 10_000L) continue
++                    OfflineLife.owns(player) || traveling.containsKey(id) || townJobs.containsKey(id) || now - (equipmentCheckedAt[id] ?: 0L) < 10_000L) continue
+             equipmentCheckedAt[id] = now
+             runCatching { OfflineEquipment.equip(player) }
+                     .onFailure { LOGGER.warning("Offline farm equipment failed for ${player.name} id=${player.objectId}: $it") }
+@@ -577,7 +596,7 @@ object OfflineFarmManager {
+ 
+         // Farming characters with affordable lessons visit their class trainer between fights.
+         for ((id, player) in farming) {
+-            if (traveling.containsKey(id) || townJobs.containsKey(id) || !isActive(player) || now < (retryAfter[id] ?: 0L)) continue
++            if (OfflineLife.owns(player) || traveling.containsKey(id) || townJobs.containsKey(id) || !isActive(player) || now < (retryAfter[id] ?: 0L)) continue
+             if (now - (lessonCheckedAt[id] ?: 0L) < LESSON_CHECK_MS) continue
+             lessonCheckedAt[id] = now
+             try {
+@@ -599,7 +618,7 @@ object OfflineFarmManager {
+ 
+         // An enabled farm with no prey is also a stall; the anchor may be empty or all prey too low level.
+         for ((id,player) in farming) {
+-            if (!isActive(player) || player.isDead || traveling.containsKey(id) || townJobs.containsKey(id) ||
++            if (!isActive(player) || player.isDead || OfflineLife.owns(player) || traveling.containsKey(id) || townJobs.containsKey(id) ||
+                     !AutofarmManager.isAutoFarming(player)) { huntProgress.remove(id); continue }
+             val previous=huntProgress[id]
+             if (previous==null || previous.first!=player.exp.toLong()) {
+@@ -617,7 +636,7 @@ object OfflineFarmManager {
+ 
+         // Recover idle farmers both in town and in the field, with backoff when no route works.
+         for ((id, player) in farming) {
+-            if (traveling.containsKey(id) || townJobs.containsKey(id) || player.isDead || !isActive(player)) {
++            if (OfflineLife.owns(player) || traveling.containsKey(id) || townJobs.containsKey(id) || player.isDead || !isActive(player)) {
+                 idleSince.remove(id)
+                 continue
+             }
+@@ -865,6 +884,12 @@ object OfflineFarmManager {
+     }
+ 
+     /** startFarm refuses silently (its message goes to the detached client); the farm log should still know. */
++    internal fun resumeHunting(player: Player) {
++        if(!isActive(player) || player.isDead) return
++        if(player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE)) goHunting(player)
++        else startFarmLogged(player,"party or quest action completed")
++    }
++
+     private fun startFarmLogged(player: Player, reason: String) {
+         if (!isActive(player) || player.isDead) return
+         AutofarmManager.startFarm(player)
+@@ -984,6 +1009,34 @@ object OfflineFarmManager {
+ 
+     // ---- Journal: what the character did on its own, reported to the owner on login. ----
+ 
++    internal fun recordEvent(player: Player,kind: String,detail: String) {
++        val session=journal[player.objectId] ?: return
++        if(session.rowId==0L) return
++        runCatching {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("INSERT INTO character_offline_events(journal_id,obj_Id,event_time,kind,detail) VALUES(?,?,?,?,?)").use { ps ->
++                    ps.setLong(1,session.rowId);ps.setInt(2,player.objectId);ps.setLong(3,System.currentTimeMillis())
++                    ps.setString(4,kind.take(32));ps.setString(5,detail.take(200));ps.executeUpdate()
++                }
++            }
++        }.onFailure { LOGGER.warning("Offline life journal event failed for ${player.objectId}: $it") }
++        LOGGER.info("Offline life: ${player.name} id=${player.objectId} $kind: $detail")
++    }
++
++    private fun eventSummary(rowId: Long): String = runCatching {
++        L2DatabaseFactory.getInstance().connection.use { con ->
++            con.prepareStatement("SELECT kind,COUNT(*) FROM character_offline_events WHERE journal_id=? GROUP BY kind").use { ps ->
++                ps.setLong(1,rowId)
++                ps.executeQuery().use { rs ->
++                    val labels=mapOf("PartyJoined" to "parties joined","Taken" to "quests taken","Started" to "profession quests started", "TurnedIn" to "quests completed","ClassChanged" to "class changes")
++                    val parts=mutableListOf<String>()
++                    while(rs.next()) labels[rs.getString(1)]?.let { parts+="${rs.getInt(2)} $it" }
++                    parts.joinToString(", ")
++                }
++            }
++        }
++    }.getOrElse { "" }
++
+     /** One finished farm period as the report shows it: gains are precomputed from the snapshots. */
+     private class Period(val id: Long, val started: Long, val ended: Long,
+                          val startLevel: Int, val endLevel: Int, val expGain: Long, val spGain: Int,
+@@ -1111,6 +1164,8 @@ object OfflineFarmManager {
+             if (p.deaths > 0) extras.append(", ${p.deaths} deaths")
+             if (p.skills > 0) extras.append(", ${p.skills} skills learned")
+             if (extras.isNotEmpty()) sb.append("${extras.substring(2)}<br1>")
++            val activities=eventSummary(p.id)
++            if(activities.isNotEmpty()) sb.append("$activities<br1>")
+             val reason = if (p.reason == "restart") "server restart" else "you logged in"
+             sb.append("<font color=\"808080\">Stopped: $reason</font><br>")
+         }
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineLife.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineLife.kt
+new file mode 100644
+index 0000000..f1d3d28
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineLife.kt
+@@ -0,0 +1,143 @@
++package dev.l2j.autobots.offlinelife
++
++import dev.l2j.autobots.*
++import dev.l2j.autobots.autofarm.AutofarmManager
++import dev.l2j.autobots.extensions.*
++import dev.l2j.autobots.population.economy.*
++import dev.l2j.autobots.population.group.*
++import dev.l2j.autobots.population.isUnderAttack
++import dev.l2j.autobots.population.quests.QuestRunner
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.*
++import net.sf.l2j.gameserver.enums.IntentionType
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
++import net.sf.l2j.gameserver.model.group.Party
++import net.sf.l2j.gameserver.enums.MessageType
++import java.util.concurrent.ConcurrentHashMap
++
++/** The same Player object keeps its inventory/quests. It is never replaced with a population Autobot. */
++internal object OfflineLife {
++    private val runners=ConcurrentHashMap<Int,QuestRunner>()
++    private val parties=ConcurrentHashMap<Int,PartyBehavior>()
++    private val jobs=ConcurrentHashMap<Int,Job>()
++    private val prey=ConcurrentHashMap<Int,Set<Int>>()
++    private val checked=ConcurrentHashMap<Int,Long>()
++    private val retryQuest=ConcurrentHashMap<Int,Long>()
++    private val retryJoin=ConcurrentHashMap<Int,Long>()
++    fun targets(player: Player): Set<Int>? = prey[player.objectId]
++    fun setTargets(player: Player,ids: Set<Int>?) { if(ids==null) prey.remove(player.objectId) else prey[player.objectId]=ids }
++    fun owns(player: Player): Boolean = jobs.containsKey(player.objectId) || player.isInParty ||
++            runners[player.objectId]?.let { professionReady(player,it) }==true
++    private fun professionReady(player: Player,runner: QuestRunner): Boolean =
++            System.currentTimeMillis()>=(retryQuest[player.objectId]?:0L) && runner.professionBusiness()
++
++    fun allowsTarget(player: Player,target: Monster): Boolean {
++        if(target.isRaidRelated) return false
++        val party=player.party ?: return true
++        if(target.target===player) return true
++        return party.members.any { it!==player && !it.isDead && distance(player,it)<PartyPlan.RANGE &&
++                (target.target===it || (it.target===target && it.isInCombat)) }
++    }
++
++    fun validParty(player: Player): Boolean {
++        if(!AutobotData.settings.groupsEnabled) return false
++        val party=player.party ?: return false
++        val leader=party.leader as? Autobot ?: return false
++        return leader!==player && leader.life!=null && leader.controller==null && leader.isOnline &&
++                party.members.all { it===player || (it is Autobot && it.life!=null && it.controller==null && it.karma==0) } &&
++                PartyPlan.state(party).raid==null
++    }
++
++    fun join(player: Player,leader: Autobot): Boolean {
++        if(!AutobotData.settings.groupsEnabled || !OfflineFarmManager.activityAvailable(player) || jobs.containsKey(player.objectId) || player.isInParty || player.isDead ||
++                player.isUnderAttack() || player.isAttackingNow || player.isCastingNow || player.classId.level()==0 && player.level>=18) return false
++        val party=leader.party ?: return false
++        if(party.leader!==leader || leader.life==null || leader.controller!=null || leader.isDead || !leader.isOnline ||
++                StaticParties.groupOf(leader.objectId)!=null || party.membersCount>=PartySize.target(party).coerceIn(3,9) ||
++                distance(player,leader)>3000 || kotlin.math.abs(leader.level-player.level)>5 || PartyPlan.state(party).raid!=null ||
++                party.members.any { it !is Autobot || it.life==null || it.controller!=null || it.karma>0 || kotlin.math.abs(it.level-player.level)>5 }) return false
++        player.getActiveSequence()?.cancellationToken?.cancelLambda?.invoke()
++        party.addPartyMember(player)
++        if(player.party!==party) return false
++        AutofarmManager.stopFarm(player,"joined a bot party")
++        AutofarmManager.prepareOfflineBehavior(player)
++        prey.remove(player.objectId)
++        OfflineFarmManager.recordEvent(player,"PartyJoined","leader=${leader.name} id=${leader.objectId}")
++        return true
++    }
++
++    fun onInvite(requestor: Player,player: Player) {
++        // A human can neither move the offline character nor make it a leader through an invitation.
++        val accept=requestor is Autobot && join(player,requestor)
++        PartyInvites.answer(player,requestor,accept)
++    }
++
++    fun leave(player: Player,reason: String) {
++        player.party?.removePartyMember(player,MessageType.LEFT)
++        player.getActiveSequence()?.cancellationToken?.cancelLambda?.invoke()
++        prey.remove(player.objectId)
++        parties.remove(player.objectId)
++        retryJoin[player.objectId]=System.currentTimeMillis()+30*60_000L
++        println("Offline life: ${player.name} id=${player.objectId} left party: $reason")
++    }
++
++    /** Invoked only when no town chore or route owns the character; one structured action at a time. */
++    fun schedule(player: Player): Boolean {
++        if(!OfflineFarmManager.activityAvailable(player) || player.isDead) return false
++        val id=player.objectId
++        if(jobs.containsKey(id)) return true
++        val runner=runners.getOrPut(id){QuestRunner(player)}
++        val now=System.currentTimeMillis()
++        if(!player.isInParty && now-(checked[id]?:0L)>=30_000L && now>=(retryJoin[id]?:0L) && !professionReady(player,runner)) {
++            checked[id]=now
++            World.getInstance().players.filterIsInstance<Autobot>().filter { it.isInParty && it.party.leader===it }
++                    .sortedBy { distance(player,it) }.firstOrNull { join(player,it) }
++        }
++        if(!player.isInParty && !professionReady(player,runner)) return false
++        val job=CoScopes.onUpdateScope.launch(start=CoroutineStart.LAZY) {
++            try {
++                AutofarmManager.stopFarm(player,"offline party or profession quest")
++                AutofarmManager.prepareOfflineBehavior(player)
++                if(player.isInParty) {
++                    if(!validParty(player)) { leave(player,"party is no longer bot-led"); return@launch }
++                    if(player.party.leader===player) { leave(player,"offline characters never lead"); return@launch }
++                    if(!player.isUnderAttack() && !player.isAttackingNow && !player.isCastingNow &&
++                            (Errands.loadPercent(player)>=45 || runner.repeatReady() || player.classId.level()==0 && player.level>=19 ||
++                                    Healing.count(player)==0 && (Market.healingPriceAtHome(player)?:Int.MAX_VALUE)<=player.adena)) {
++                        leave(player,"town errands or profession");return@launch
++                    }
++                    AutofarmManager.useOfflinePotions(player)
++                    parties.getOrPut(id){PartyBehavior(player)}.onUpdate()
++                } else {
++                    AutofarmManager.useOfflinePotions(player)
++                    runner.onUpdate()
++                }
++            } catch(e: CancellationException) { throw e }
++            catch(e: Exception) {
++                println("Offline life: ${player.name} id=$id action failed: $e")
++                retryQuest[id]=System.currentTimeMillis()+5*60_000L
++                runner.onLogout()
++            } finally {
++                try {
++                    if(OfflineFarmManager.isActive(player) && !player.isDead && !player.isInParty && !professionReady(player,runner))
++                        OfflineFarmManager.resumeHunting(player)
++                } finally { jobs.remove(id,coroutineContext[Job]) }
++            }
++        }
++        if(jobs.putIfAbsent(id,job)==null) job.start() else job.cancel()
++        return true
++    }
++
++    /** Cancel and join before storage: no delayed dialog, movement or class change can write after handoff. */
++    fun stop(player: Player) {
++        player.getActiveSequence()?.cancellationToken?.cancelLambda?.invoke()
++        jobs.remove(player.objectId)?.let { runBlocking { it.cancelAndJoin() } }
++        if(player.isInParty) leave(player,"owner login, death or restart")
++        player.abortAttack();player.abortCast();player.stopMove(null);player.target=null
++        runners.remove(player.objectId)?.onLogout()
++        parties.remove(player.objectId);prey.remove(player.objectId);checked.remove(player.objectId);retryJoin.remove(player.objectId);retryQuest.remove(player.objectId)
++        AutofarmManager.clearOfflinePotions(player)
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index f28ce92..81e41ef 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -60,6 +60,7 @@ internal object PopulationManager {
+         if (settings.populationSize <= 0) return
+ 
+         CoScopes.generalScope.launch {
++            dev.l2j.autobots.population.group.StaticParties.load()
+             if (settings.socialTradeEnabled) Loans.load()
+             AutobotsDao.loadPopulationMembers().forEach {
+                 addMember(it.objectId, it.name, Instant.ofEpochMilli(it.creationTime).atZone(zone).toLocalDate())
+@@ -77,7 +78,7 @@ internal object PopulationManager {
+             welcomeNewbies(now)
+ 
+             val today = now.toLocalDate()
+-            val (playing, offline) = members.values.partition { it.career.isActiveOn(today) && (settings.populationAlwaysOnline || it.schedule.isPlaying(now)) }
++            val (playing, offline) = members.values.partition { it.career.isActiveOn(today) && (settings.populationAlwaysOnline || (it.schedule.isPlaying(now) || dev.l2j.autobots.population.group.StaticParties.isPlaying(it.id,now))) }
+ 
+             offline.mapNotNull { active(it) }
+                     .filter { it.controller == null && !it.isInCombat && it.life?.keepsOnline() != true }
+@@ -90,7 +91,7 @@ internal object PopulationManager {
+             val nowMillis = System.currentTimeMillis()
+             playing.forEach { member ->
+                 active(member)?.life?.sessionEndsAt =
+-                        if (settings.populationAlwaysOnline) 0L else nowMillis + member.schedule.minutesLeft(now) * 60_000L
++                        if (settings.populationAlwaysOnline) 0L else nowMillis + maxOf(member.schedule.minutesLeft(now),dev.l2j.autobots.population.group.StaticParties.minutesLeft(member.id,now)) * 60_000L
+             }
+ 
+             playing.filter { active(it) == null }
+@@ -109,10 +110,11 @@ internal object PopulationManager {
+                 GroupFinder.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 SessionPlan.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 RaidLog.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
++                dev.l2j.autobots.population.group.StaticParties.summary()
+                 dev.l2j.autobots.population.llm.Llm.summary()
+             }
+             val online = members.values.mapNotNull { active(it) }.distinctBy { it.objectId }
+-            if (ticks % GROUPS_EVERY_TICKS == 0) GroupFinder.tick(online)
++            if (ticks % GROUPS_EVERY_TICKS == 0) { dev.l2j.autobots.population.group.StaticParties.tick(online,now);GroupFinder.tick(online) }
+             if (ticks % GROUPS_EVERY_TICKS == 1) SocialTrade.tick(online)
+             if (ticks % CLANS_EVERY_TICKS == 3) dev.l2j.autobots.population.group.Clans.tick(online)
+             if (ticks % GROUPS_EVERY_TICKS == 0) dev.l2j.autobots.population.llm.BotChatter.tick(online)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index 2e7d63c..d74f5fe 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -73,7 +73,7 @@ internal object Errands {
+ }
+ 
+ /** Gets the bot to town: a Scroll of Escape if it has one, on foot if town is close. */
+-internal class GoToTownSequence(override val bot: Autobot, private val maxWalk: Int = MAX_WALK_TO_TOWN, private val onFail: () -> Unit) : Sequence {
++internal class GoToTownSequence(override val bot: Player, private val maxWalk: Int = MAX_WALK_TO_TOWN, private val onFail: () -> Unit) : Sequence {
+     override var cancellationToken: CancellationToken? = null
+ 
+     override suspend fun definition() {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+index 4b053b2..968be3e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+@@ -206,7 +206,7 @@ internal object GroupFinder {
+     }
+ 
+     // A bot away from the keyboard or about to log out does not answer party searches.
+-    private fun isFree(bot: Autobot) = !bot.isInParty && !bot.isDead && !bot.isInStoreMode && bot.life != null && bot.controller == null &&
++    private fun isFree(bot: Autobot) = !StaticParties.reserved(bot.objectId) && !bot.isInParty && !bot.isDead && !bot.isInStoreMode && bot.life != null && bot.controller == null &&
+             bot.life?.activity.let { it != SessionPlan.Activity.Afk && it != SessionPlan.Activity.Home }
+ 
+     /** Lookers around the leader's level it doesn't avoid, the ones it likes best first. */
+@@ -240,7 +240,7 @@ internal object GroupFinder {
+         return if (chosen.size + 1 >= MIN_SIZE) chosen else null
+     }
+ 
+-    private fun form(leader: Autobot, candidates: List<Autobot>, kind: PartyKind) {
++    internal fun form(leader: Autobot, candidates: List<Autobot>, kind: PartyKind) {
+         if (leader.isInParty) return
+         val members = candidates.distinctBy { it.objectId }.filter { it.objectId != leader.objectId && !it.isInParty }
+         if (members.size + 1 < kind.minSize) return
+@@ -278,6 +278,7 @@ internal object GroupFinder {
+      */
+     private fun recruit(leader: Autobot, now: Long) {
+         val party = leader.party ?: return
++        if(StaticParties.isStatic(party)) return
+         val state = PartyPlan.state(party)
+         val breakUpAt = state.breakUpAt
+         // A party on a raid finishes it before anyone goes their way; it fills itself up for the boss (RaidPlanner.fill).
+@@ -317,6 +318,7 @@ internal object GroupFinder {
+      * tank or healer for a full party. A bot holding out for a full party joins full ones only.
+      */
+     private fun fill(leader: Autobot, lookers: MutableList<Autobot>, now: Long): Boolean {
++        if(leader.party?.let { StaticParties.isStatic(it) }==true) return false
+         val party = leader.party ?: return false
+         if (RaidPlanner.raidOf(party) != null) return false
+         if (party.membersCount >= PartySize.target(party).coerceAtMost(PartySize.MAX)) return false
+@@ -341,6 +343,7 @@ internal object GroupFinder {
+     }
+ 
+     fun leaveUnreachable(bot: Autobot) {
++        if(StaticParties.groupOf(bot.objectId)!=null) StaticParties.failed(bot.objectId)
+         val party=bot.party ?: return
+         val leader=party.leader ?: return
+         party.removePartyMember(bot,MessageType.LEFT)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+index 029274d..71c4fc4 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+@@ -1,6 +1,8 @@
+ package dev.l2j.autobots.population.group
+ 
+ import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.extensions.getCombatBehavior
++import dev.l2j.autobots.offlinelife.OfflineLife
+ import dev.l2j.autobots.behaviors.sequences.TravelByGatekeeperSequence
+ import dev.l2j.autobots.behaviors.sequences.WalkToSequence
+ import dev.l2j.autobots.extensions.getActiveSequence
+@@ -27,7 +29,7 @@ import net.sf.l2j.gameserver.model.location.Location
+  * A bot leading the party hunts as usual (its spot fits the party, see [huntLevel]) and stops for the party to rest.
+  * A player leading the party is followed the same way; nothing a player does is an order, see the group chat.
+  */
+-internal class PartyBehavior(private val bot: Autobot) {
++internal class PartyBehavior(private val bot: Player) {
+ 
+     private var lastGreetedParty: Party? = null
+     private var travelFailedAt = 0L
+@@ -41,17 +43,17 @@ internal class PartyBehavior(private val bot: Autobot) {
+         greet(party)
+ 
+         if (bot.isDead) {
+-            bot.combatBehavior.onUpdate()
++            bot.getCombatBehavior().onUpdate()
+             return true
+         }
+ 
+         val leader = party.leader ?: return false
+-        if (RaidBehavior.update(bot, party)) return true
++        if (bot is Autobot && RaidBehavior.update(bot, party)) return true
+         if (leader === bot) return lead(party)
+ 
+         if (bot.isUnderAttack()) {
+             if (bot.isSitting) bot.standUp()
+-            bot.combatBehavior.onUpdate()
++            bot.getCombatBehavior().onUpdate()
+             return true
+         }
+         if (lostTooLong(party,leader)) return false
+@@ -60,29 +62,32 @@ internal class PartyBehavior(private val bot: Autobot) {
+             if (bot.isSitting) bot.standUp()
+             if (bot.target !== target) {
+                 bot.target = target
+-                bot.combatBehavior.committedTarget = target
++                bot.getCombatBehavior().committedTarget = target
+             }
+-            bot.combatBehavior.onUpdate()
++            bot.getCombatBehavior().onUpdate()
+             return true
+         }
+ 
+         if (followFar(leader)) return true
+ 
+         if (leader.isSitting && !bot.isMoving) {
+-            bot.combatBehavior.idleUpdate()
++            bot.getCombatBehavior().idleUpdate()
+             if (!bot.isSitting && !bot.isCastingNow) bot.sitDown()
+             return true
+         }
+ 
+         if (stayClose(leader)) return true
+-        bot.combatBehavior.idleUpdate()
++        bot.getCombatBehavior().idleUpdate()
+         return true
+     }
+ 
++    private fun say(text: String) { if(bot is Autobot) bot.partySay(text) }
++    private fun cancelTravel() { bot.getActiveSequence()?.cancellationToken?.cancelLambda?.invoke() }
++
+     private fun greet(party: Party) {
+         if (lastGreetedParty === party) return
+         lastGreetedParty = party
+-        if (Rnd.get(100) < GREET_PERCENT) bot.partySay(listOf("hi", "hey all", "hello", "o/", "hi guys").random())
++        if (Rnd.get(100) < GREET_PERCENT) say(listOf("hi", "hey all", "hello", "o/", "hi guys").random())
+     }
+ 
+     /** The leader hunts on its own terms; it only holds the party back while the healer drinks mana or someone heals up. */
+@@ -110,7 +115,7 @@ internal class PartyBehavior(private val bot: Autobot) {
+             return true
+         }
+         if ((tired || state.restUntilFull) && !hasLiveTarget() && !nearbyMemberFighting(party)) {
+-            if (Rnd.get(100) < REST_SAY_PERCENT) bot.partySay(listOf("rest", "sit for mp", "lets rest a bit", "med").random())
++            if (Rnd.get(100) < REST_SAY_PERCENT) say(listOf("rest", "sit for mp", "lets rest a bit", "med").random())
+             bot.sitDown()
+             return true
+         }
+@@ -132,12 +137,12 @@ internal class PartyBehavior(private val bot: Autobot) {
+         val now = System.currentTimeMillis()
+         val since = state.gatheringSince ?: now.also {
+             state.gatheringSince = it
+-            bot.partySay(listOf("waiting for everyone", "come to me", "ждём всех", "подтягивайтесь").random())
++            say(listOf("waiting for everyone", "come to me", "ждём всех", "подтягивайтесь").random())
+         }
+         // After a wait the leader goes on for a while and lets the late ones catch up, then waits again.
+         if (now - since > GATHER_MAX_MS + GATHER_MOVE_MS) state.gatheringSince = now
+         else if (now - since > GATHER_MAX_MS) return false
+-        if (bot.getActiveSequence() != null) bot.cancelSequence()
++        if (bot.getActiveSequence() != null) cancelTravel()
+         if (bot.isMoving) bot.stopMove(null)
+         return true
+     }
+@@ -161,7 +166,7 @@ internal class PartyBehavior(private val bot: Autobot) {
+         val gap = distance(bot, leader)
+         if (gap <= FAR) return false
+         if (System.currentTimeMillis() - travelFailedAt < TRAVEL_RETRY_MS) {
+-            bot.combatBehavior.idleUpdate()
++            bot.getCombatBehavior().idleUpdate()
+             return true
+         }
+         if (bot.isSitting) bot.standUp()
+@@ -170,7 +175,7 @@ internal class PartyBehavior(private val bot: Autobot) {
+         var failed = false
+         when {
+             inTown && !leader.isInsideZone(ZoneId.TOWN) -> {
+-                val exit = TeleportLocationData.getInstance().allTeleportLocations.filter { !it.isNoble }.minByOrNull { distance(it, leader.location()) }
++                val exit = TeleportLocationData.getInstance().allTeleportLocations.filter { !it.isNoble && (bot is Autobot || it.price<=dev.l2j.autobots.population.economy.Errands.spendable(bot)) }.minByOrNull { distance(it, leader.location()) }
+                 if (exit != null && distance(bot.location(), leader.location()) - distance(exit, leader.location()) > MIN_WALK_SAVED_BY_TELEPORT) {
+                     TravelByGatekeeperSequence(bot, exit) { failed = true }.execute()
+                 } else {
+@@ -195,9 +200,9 @@ internal class PartyBehavior(private val bot: Autobot) {
+         if (separatedSince==0L) { separatedSince=now;stalledSince=now }
+         if (gap<lastGap-100) { lastGap=gap;stalledSince=now }
+         if (now-separatedSince<5*60_000L || now-stalledSince<2*60_000L) return false
+-        bot.cancelSequence()
++        cancelTravel()
+         println("Autobots groups: ${bot.name} id=${bot.objectId} leaves unreachable leader ${leader.name}, gap=${gap.toInt()}")
+-        GroupFinder.leaveUnreachable(bot)
++        if(bot is Autobot) GroupFinder.leaveUnreachable(bot) else OfflineLife.leave(bot,"leader unreachable")
+         separatedSince=0;stalledSince=0;lastGap=Double.MAX_VALUE
+         return true
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
+index 62b592d..5da8fec 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
+@@ -76,6 +76,10 @@ internal object PartyInvites {
+         if (partyLevel - bot.level > MAX_LEVEL_GAP) return false to GroupChat.Line.TooHigh
+         if (bot.level - partyLevel > MAX_LEVEL_GAP) return false to GroupChat.Line.TooLow
+ 
++        if(StaticParties.reserved(bot.objectId)) {
++            if(!StaticParties.same(bot.objectId,requestor.objectId)) return false to GroupChat.Line.Busy
++            return true to null
++        }
+         val eager = bot.needsGroup || Role.of(bot.classId) == Role.Healer
+         val chance = if (eager) 98 else Sociability.of(bot).acceptPercent
+         return if (Rnd.get(100) < chance) true to null else false to GroupChat.Line.NotNow
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
+index 2a1df52..bba18a5 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
+@@ -57,9 +57,9 @@ internal object Relations {
+                 val relation = relation(bot, other.objectId)
+                 relation.minutesTogether += kotlin.math.ceil(minutes).toInt()
+                 // Liking grows slower the more there is of it: an hour together is about +10.
+-                if (relation.affinity < MAX_AFFINITY && Math.random() < minutes / 6) relation.affinity++
++                if (relation.affinity < MAX_AFFINITY && Math.random() < minutes / 6 * if(StaticParties.same(bot.objectId,other.objectId)) 1.5 else 1.0) relation.affinity++
+                 // Playing together makes someone "not a stranger"; deeper trust is only earned in deals (stage 2g).
+-                if (relation.trust < ACQUAINTED_TRUST && Math.random() < minutes / 6) relation.trust++
++                if (relation.trust < ACQUAINTED_TRUST && Math.random() < minutes / 6 * if(StaticParties.same(bot.objectId,other.objectId)) 1.5 else 1.0) relation.trust++
+                 relation.lastSeen = now
+                 relation.dirty = true
+             }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/StaticParties.kt b/src/main/kotlin/dev/l2j/autobots/population/group/StaticParties.kt
+new file mode 100644
+index 0000000..c7baf04
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/StaticParties.kt
+@@ -0,0 +1,133 @@
++package dev.l2j.autobots.population.group
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.population.DailySchedule
++import dev.l2j.autobots.population.isUnderAttack
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.model.group.Party
++import java.time.ZonedDateTime
++import java.util.concurrent.ConcurrentHashMap
++
++/** A persistent circle of actual friends. Membership survives logout; only the live Party is transient. */
++internal object StaticParties {
++    data class Group(val id: Int,val leader: Int,val created: Long,val members: List<Int>)
++    private val groups=ConcurrentHashMap<Int,Group>()
++    private val membership=ConcurrentHashMap<Int,Int>()
++    private val retry=ConcurrentHashMap<Int,Long>()
++    private val schedules=ConcurrentHashMap<Int,DailySchedule>()
++    private var consideredAt=0L
++    fun groupOf(id: Int): Int? = membership[id]
++    fun same(a: Int,b: Int): Boolean = groupOf(a)?.let { it==groupOf(b) }?:false
++    fun all(): List<Group> = groups.values.sortedBy { it.id }
++    private fun schedule(group: Int): DailySchedule = schedules.getOrPut(group) {
++        val s=AutobotData.settings
++        DailySchedule(group,s.populationSleepHours,s.populationMinSessions..s.populationMaxSessions,s.populationMinSessionMinutes..s.populationMaxSessionMinutes)
++    }
++    fun minutesLeft(id: Int,now: ZonedDateTime): Int = if(!AutobotData.settings.groupsEnabled || !AutobotData.settings.groupFinderEnabled) 0 else groupOf(id)?.let { schedule(it).minutesLeft(now) }?:0
++    fun isPlaying(id: Int,now: ZonedDateTime): Boolean = if(!AutobotData.settings.groupsEnabled || !AutobotData.settings.groupFinderEnabled) false else groupOf(id)?.let { schedule(it).isPlaying(now) }?:false
++    fun reserved(id: Int): Boolean = isPlaying(id,ZonedDateTime.now(java.time.ZoneId.of(AutobotData.settings.populationTimeZone))) && System.currentTimeMillis()>=(retry[id]?:0L)
++    fun isStatic(party: Party): Boolean = groupOf(party.leader.objectId)?.let { group ->
++        party.members.all { it is Autobot && groupOf(it.objectId)==group }
++    }?:false
++    fun failed(id: Int) { retry[id]=System.currentTimeMillis()+30*60_000L }
++
++    fun load() {
++        val loaded=mutableListOf<Group>()
++        L2DatabaseFactory.getInstance().connection.use { con ->
++            con.prepareStatement("SELECT s.id,s.leader_id,s.created,m.bot_id FROM autobot_statics s JOIN autobot_static_members m ON m.static_id=s.id JOIN autobots b ON b.obj_Id=m.bot_id ORDER BY s.id,m.bot_id").use { ps ->
++                ps.executeQuery().use { rs ->
++                    val rows=linkedMapOf<Int,MutableList<Int>>()
++                    val headers=mutableMapOf<Int,Pair<Int,Long>>()
++                    while(rs.next()) { val id=rs.getInt(1);headers[id]=rs.getInt(2) to rs.getLong(3);rows.getOrPut(id){mutableListOf()}.add(rs.getInt(4)) }
++                    rows.forEach { (id,members) -> val h=headers.getValue(id);loaded+=Group(id,h.first,h.second,members) }
++                }
++            }
++        }
++        groups.clear();membership.clear();schedules.clear()
++        loaded.forEach { groups[it.id]=it;it.members.forEach { member -> membership[member]=it.id } }
++        println("Autobots statics: loaded ${groups.size} groups, ${membership.size} members")
++    }
++
++    /** Existing party mates only, with mutual liking and actual shared playtime; no friendship is minted here. */
++    @Synchronized fun create(candidates: List<Autobot>): Group? {
++        val members=candidates.distinctBy { it.objectId }.take(9)
++        if(members.size<3 || members.any { groupOf(it.objectId)!=null } || members.maxOf { it.level }-members.minOf { it.level }>5) return null
++        val leader=members.first()
++        if(leader.party==null || members.any { it.party!==leader.party }) return null
++        if(members.drop(1).any { other ->
++            val a=Relations.of(leader,other.objectId);val b=Relations.of(other,leader.objectId)
++            a==null || b==null || a.affinity<30 || b.affinity<30 || a.minutesTogether<120 || b.minutesTogether<120
++        }) return null
++        val group=Group(leader.objectId,leader.objectId,System.currentTimeMillis(),members.map { it.objectId })
++        L2DatabaseFactory.getInstance().connection.use { con ->
++            con.autoCommit=false
++            try {
++                con.prepareStatement("INSERT INTO autobot_statics(id,leader_id,created) VALUES(?,?,?)").use { ps ->
++                    ps.setInt(1,group.id);ps.setInt(2,group.leader);ps.setLong(3,group.created);ps.executeUpdate()
++                }
++                con.prepareStatement("INSERT INTO autobot_static_members(bot_id,static_id) VALUES(?,?)").use { ps ->
++                    group.members.forEach { ps.setInt(1,it);ps.setInt(2,group.id);ps.addBatch() };ps.executeBatch()
++                }
++                con.commit()
++            } catch(e: Exception) { con.rollback();throw e }
++        }
++        groups[group.id]=group;group.members.forEach { membership[it]=group.id }
++        println("Autobots statics: founded id=${group.id} members=${group.members.joinToString()}")
++        return group
++    }
++
++    fun tick(online: List<Autobot>,now: ZonedDateTime=ZonedDateTime.now(java.time.ZoneId.of(AutobotData.settings.populationTimeZone))) {
++        if(!AutobotData.settings.groupsEnabled || !AutobotData.settings.groupFinderEnabled) return
++        val time=System.currentTimeMillis()
++        if(time-consideredAt>=5*60_000L) {
++            consideredAt=time
++            online.filter { it.isInParty && it.party.leader===it }.forEach { leader ->
++                val friends=leader.party.members.filterIsInstance<Autobot>().filter { other ->
++                    other.life!=null && groupOf(other.objectId)==null && (other===leader ||
++                            (Relations.of(leader,other.objectId)?.let { it.affinity>=30 && it.minutesTogether>=120 }==true &&
++                             Relations.of(other,leader.objectId)?.let { it.affinity>=30 && it.minutesTogether>=120 }==true))
++                }
++                if(leader in friends && groupOf(leader.objectId)==null) create(listOf(leader)+friends.filter { it!==leader })
++            }
++        }
++        val byId=online.associateBy { it.objectId }
++        for(group in groups.values) {
++            if(!schedule(group.id).isPlaying(now)) continue
++            val ready=group.members.mapNotNull { byId[it] }.filter { it.isOnline && !it.isDead && !it.isInStoreMode &&
++                    it.controller==null && it.life?.quests?.isActive!=true && !it.isUnderAttack() && !it.isCastingNow && !it.isAttackingNow && time>=(retry[it.objectId]?:0L) }
++            // A shared appointment takes priority over casual bot groups, but never interrupts combat or a player-led party.
++            if(ready.size>=3 && ready.maxOf { it.level }-ready.minOf { it.level }<=5) ready.forEach { member ->
++                val old=member.party
++                if(old!=null && !isStatic(old) && PartyPlan.state(old).raid==null &&
++                        old.members.all { it is Autobot && it.controller==null && !it.isInCombat }) {
++                    member.cancelSequence()
++                    old.removePartyMember(member,net.sf.l2j.gameserver.enums.MessageType.LEFT)
++                }
++            }
++            val existing=ready.mapNotNull { it.party }.firstOrNull { isStatic(it) }
++            if(existing!=null) {
++                ready.filter { !it.isInParty && existing.membersCount<9 && (existing.members.map { member -> member.level }+it.level).let { levels -> levels.maxOrNull()!!-levels.minOrNull()!!<=5 } }.forEach {
++                    it.cancelSequence();existing.addPartyMember(it)
++                }
++                PartyPlan.state(existing).apply { breakUpAt=null;targetSize=group.members.size.coerceIn(3,9) }
++                continue
++            }
++            val free=ready.filter { !it.isInParty }
++            val leader=free.firstOrNull { it.objectId==group.leader } ?: free.firstOrNull() ?: continue
++            val companions=mutableListOf<Autobot>()
++            for(candidate in free.filter { it!==leader }.sortedBy { kotlin.math.abs(it.level-leader.level) }) {
++                val levels=(companions+leader+candidate).map { it.level }
++                if(levels.maxOrNull()!!-levels.minOrNull()!!<=5) companions+=candidate
++            }
++            if(companions.size<2) continue
++            val roles=(companions+leader).map { Role.of(it.classId) }
++            val kind=if(free.size>=5 && Role.Healer in roles && Role.Tank in roles && leader.level>=20) PartyKind.Full else PartyKind.Casual
++            GroupFinder.form(leader,companions,kind)
++            leader.party?.let { PartyPlan.state(it).apply { breakUpAt=null;targetSize=group.members.size.coerceIn(3,9) } }
++            println("Autobots statics: assembled id=${group.id} leader=${leader.objectId} size=${leader.party?.membersCount?:0}")
++        }
++    }
++
++    fun summary() { println("Autobots statics summary: groups=${groups.size} members=${membership.size}") }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 76e0572..63d44df 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -4,7 +4,8 @@ import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.behaviors.sequences.TravelByGatekeeperSequence
+ import dev.l2j.autobots.behaviors.sequences.WalkToSequence
+-import dev.l2j.autobots.extensions.dwarfBranch
++import dev.l2j.autobots.extensions.*
++import dev.l2j.autobots.offlinelife.OfflineLife
+ import dev.l2j.autobots.extensions.location
+ import dev.l2j.autobots.extensions.useMagicSkill
+ import dev.l2j.autobots.extensions.pickWeighted
+@@ -35,7 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger
+  * branch it chose, plays it step by step through the script (dialogs as bypasses, kills through onKill), and at 20
+  * with the mark goes to a guild master of its race, who changes the class. Nothing is given by this module.
+  */
+-internal class QuestRunner(private val bot: Autobot) {
++internal class QuestRunner(private val bot: Player) {
+ 
+     private var loaded = false
+     private var chosen: PathQuest? = null
+@@ -75,7 +76,9 @@ internal class QuestRunner(private val bot: Autobot) {
+     }
+ 
+     /** A bot due for its profession quest plays this session rather than idling or trading, as a player would. */
+-    fun hasBusiness(): Boolean = repeatReady() || AutobotData.settings.questsEnabled && bot.classId.level() == 0 && bot.level >= START_LEVEL &&
++    fun hasBusiness(): Boolean = repeatReady() || professionBusiness()
++
++    fun professionBusiness(): Boolean = AutobotData.settings.questsEnabled && bot.classId.level() == 0 && bot.level >= START_LEVEL &&
+             !bot.isInParty && System.currentTimeMillis() >= pausedUntil && PathQuests.forBaseClass(bot.classId).any { it.to in getSupportedClasses }
+ 
+     fun repeatReady(): Boolean {
+@@ -221,7 +224,7 @@ internal class QuestRunner(private val bot: Autobot) {
+         paths.firstOrNull { bot.getQuestState(it.questName)?.isStarted == true || QuestView(bot, null).has(it.mark) }?.let { return it }
+         chosen?.takeIf { it in paths }?.let { return it }
+         // Dwarves split into crafters and spoilers the way the craft economy expects.
+-        val target = (if (bot.classId == ClassId.DWARVEN_FIGHTER) bot.dwarfBranch().takeIf { b -> paths.any { it.to == b } } else null)
++        val target = (if (bot is Autobot && bot.classId == ClassId.DWARVEN_FIGHTER) bot.dwarfBranch().takeIf { b -> paths.any { it.to == b } } else null)
+                 ?: pickWeighted(paths.map { it.to }) ?: return null
+         return paths.first { it.to == target }.also { chosen = it }
+     }
+@@ -230,7 +233,7 @@ internal class QuestRunner(private val bot: Autobot) {
+         when (action) {
+             is Talk -> {
+                 holdWeapon(null)
+-                bot.questTargets = null
++                setTargets(null)
+                 talk(path, action)
+             }
+             is Hunt -> hunt(path, action)
+@@ -261,14 +264,14 @@ internal class QuestRunner(private val bot: Autobot) {
+ 
+     private suspend fun hunt(path: PathQuest, hunt: Hunt) {
+         holdWeapon(hunt.weapon)
+-        bot.questTargets = hunt.monsterIds
++        setTargets(hunt.monsterIds)
+         if (hunt.spoil.isNotEmpty() && bot.getSkill(SPOIL_SKILL) == null) return giveUp(path, "can't spoil yet")
+         if (spoilTarget(hunt)) return
+ 
+         val near = bot.getKnownTypeInRadius(Monster::class.java, NEAR_RADIUS).any { !it.isDead && it.npcId in hunt.monsterIds }
+         if (near || bot.target != null) {
+             idleTicks = 0
+-            bot.combatBehavior.onUpdate()
++            bot.getCombatBehavior().onUpdate()
+             return
+         }
+ 
+@@ -283,7 +286,7 @@ internal class QuestRunner(private val bot: Autobot) {
+         }
+ 
+         // At the spot with nothing in sight: wait for a respawn a little, then try another spawn point.
+-        bot.combatBehavior.onUpdate()
++        bot.getCombatBehavior().onUpdate()
+         if (bot.target == null && !bot.isMoving && !bot.isSitting && ++idleTicks >= MAX_IDLE_TICKS) {
+             idleTicks = 0
+             emptySpots[spot] = System.currentTimeMillis()
+@@ -339,9 +342,12 @@ internal class QuestRunner(private val bot: Autobot) {
+ 
+         if (bot.classId != path.to) return giveUp(path, "${master.name} did not change the class")
+         bot.rewardSkills()
+-        val attackPlayerType = bot.combatBehavior.combatPreferences.attackPlayerType
+-        supportedCombatPrefs[bot.classId]?.let { bot.combatBehavior = getBehaviorByClassId(bot.classId, bot, it.invoke()) }
+-        bot.combatBehavior.combatPreferences.attackPlayerType = attackPlayerType
++        val attackPlayerType = bot.getCombatBehavior().combatPreferences.attackPlayerType
++        supportedCombatPrefs[bot.classId]?.let {
++            val behavior=getBehaviorByClassId(bot.classId,bot,it.invoke())
++            if(bot is Autobot) bot.combatBehavior=behavior else bot.setCombatBehavior(behavior)
++        }
++        bot.getCombatBehavior().combatPreferences.attackPlayerType = attackPlayerType
+         chosen = null
+         QuestLog.log(bot, QuestEvent.ClassChanged, "became ${bot.classId} at ${master.name}")
+     }
+@@ -381,7 +387,7 @@ internal class QuestRunner(private val bot: Autobot) {
+ 
+     private fun gatekeeperExitFor(destination: Location): TeleportLocation? {
+         val exit = TeleportLocationData.getInstance().allTeleportLocations
+-                .filter { !it.isNoble }
++                .filter { !it.isNoble && (bot is Autobot || it.price<=dev.l2j.autobots.population.economy.Errands.spendable(bot)) }
+                 .minByOrNull { distance(it, destination) } ?: return null
+         val walkSaved = distance(bot.location(), destination) - distance(exit, destination)
+         return if (walkSaved > MIN_WALK_SAVED_BY_TELEPORT) exit else null
+@@ -410,8 +416,12 @@ internal class QuestRunner(private val bot: Autobot) {
+     }
+ 
+     /** Back to normal hunting: own weapon, any monster. */
++    private fun setTargets(ids: Set<Int>?) {
++        if(bot is Autobot) bot.questTargets=ids else OfflineLife.setTargets(bot,ids)
++    }
++
+     private fun relax() {
+-        bot.questTargets = null
++        setTargets(null)
+         holdWeapon(null)
+         huntSpot = null
+         liveTarget = null
+@@ -485,6 +495,7 @@ internal object QuestLog {
+     }
+ 
+     fun log(bot: Player, event: QuestEvent, message: String) {
++        dev.l2j.autobots.offlinelife.OfflineFarmManager.recordEvent(bot,event.name,message)
+         counts.computeIfAbsent(event) { AtomicInteger() }.incrementAndGet()
+         if (AutobotData.settings.questLog) println("Autobots quests: ${bot.name} id=${bot.objectId} (lv ${bot.level} ${bot.classId}): $message")
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+index cc4c4ec..263c14f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
++++ b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+@@ -475,6 +475,10 @@ private fun Creature.isWorthTargeting(target: Creature): Boolean {
+     // A raid boss or its minion is no prey for a bot on its own: a passing hunter would only die to it.
+     if (this is Autobot && target.isRaidRelated) return false
+     (this as? Autobot)?.questTargets?.let { return target.npcId in it }
++    if(this is net.sf.l2j.gameserver.model.actor.Player && dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(this)) {
++        if(!dev.l2j.autobots.offlinelife.OfflineLife.allowsTarget(this,target)) return false
++        dev.l2j.autobots.offlinelife.OfflineLife.targets(this)?.let { return target.npcId in it }
++    }
+     val above = if (this is Autobot && level <= NEWBIE_MAX_LEVEL) NEWBIE_TARGET_LEVEL_ABOVE else TARGET_LEVEL_ABOVE
+     return target.level in (level - TARGET_LEVEL_BELOW)..(level + above)
+ }
