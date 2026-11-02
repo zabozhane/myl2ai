@@ -1,0 +1,27 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 1ab013a..a450741 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -328,7 +328,8 @@ object OfflineFarmManager {
+                     unreachableSpots.remove(player.objectId)
+                     failedRoundAt.remove(player.objectId)
+                     huntJourneys.remove(player.objectId)
+-                    pendingHunt.add(player.objectId)
++                    LOGGER.info("Offline farm: ${player.name} id=${player.objectId} retries town preparation after unstuck.")
++                    choresThenBack(player,null)
+                 } else retryAfter[player.objectId]=System.currentTimeMillis()+SPOT_RETRY_MS
+             }
+             return
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 72b4eaf..e4f1aa8 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -488,6 +488,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+             if(dev.l2j.autobots.movement.TownUnstuck.recover(bot) { bot.isOnline && !bot.isDead }) {
+                 badSpots.clear()
+                 recovery=null
++                // The old town stay may have failed its shops/support from the sealed cell.
++                tripDoneInTown=false
+             }
+             return
+         }
