@@ -1,0 +1,42 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
+index 811bb3d..950eb06 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
+@@ -33,7 +33,9 @@ internal object HuntRecovery {
+     }
+ 
+     /** A stranded hunter can walk farther once, rather than waiting forever in an empty region. */
+-    fun walkPlan(player: Player,excluded: Set<Long>): WalkPlan? {
++    fun walkPlan(player: Player,excluded: Set<Long>): WalkPlan? = walkPlan(player,excluded) { }
++
++    fun walkPlan(player: Player,excluded: Set<Long>,onRejected: (HuntingSpot) -> Unit): WalkPlan? {
+         if(!walkingSearches.tryAcquire()) return null
+         try {
+             val origin=player.location()
+@@ -41,6 +43,9 @@ internal object HuntRecovery {
+             for(spot in HuntingSpots.nearArrival(player,origin,excluded,100000,surfaceOnly=true)) {
+                 if(System.nanoTime()>=deadline) break
+                 checkedWalk(player,spot,origin)?.let { return it }
++                // Only an attempted route failed. Busy permits and an elapsed search
++                // deadline must not blacklist candidates that were never examined.
++                onRejected(spot)
+             }
+             return null
+         } finally { walkingSearches.release() }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index c876adc..009257c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -619,7 +619,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+                 ?: HuntingSpots.choose(bot, level, excludedSpots, wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide)
+                 ?: if(now>=nextRecoveryRetryAt) {
+                     nextRecoveryRetryAt=now+60_000L
+-                    dev.l2j.autobots.offlinelife.HuntRecovery.walkPlan(bot,excludedSpots)?.let {
++                    dev.l2j.autobots.offlinelife.HuntRecovery.walkPlan(bot,excludedSpots) { failed ->
++                        badSpots[failed.key]=System.currentTimeMillis()
++                        println("Autobots movement: ${bot.name} id=${bot.objectId} rejected hunt candidate=${failed.key}" +
++                                " reason=no_safe_walk_or_budget from=${bot.x},${bot.y},${bot.z}")
++                    }?.let {
+                         recovery=it
+                         println("Autobots movement: ${bot.name} id=${bot.objectId} recovery reason=no_local_hunt" +
+                                 " to=${it.anchor.x},${it.anchor.y},${it.anchor.z} length=${it.walk.length.toInt()} waypoints=${it.walk.points.size}")
