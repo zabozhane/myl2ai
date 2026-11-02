@@ -1,0 +1,118 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/movement/TownUnstuck.kt b/src/main/kotlin/dev/l2j/autobots/movement/TownUnstuck.kt
+index 25c72ac..69e3dad 100644
+--- a/src/main/kotlin/dev/l2j/autobots/movement/TownUnstuck.kt
++++ b/src/main/kotlin/dev/l2j/autobots/movement/TownUnstuck.kt
+@@ -14,7 +14,7 @@ import net.sf.l2j.gameserver.model.location.Location
+ import java.util.Collections
+ import java.util.WeakHashMap
+ 
+-/** Confirm a sealed geodata pocket before using the same unstuck options as a player. */
++/** Confirm an unusable geodata origin before using the same escape options as a player. */
+ internal object TownUnstuck {
+     private val checkedUntil=Collections.synchronizedMap(WeakHashMap<Player,Long>())
+ 
+@@ -23,19 +23,28 @@ internal object TownUnstuck {
+         val now=System.currentTimeMillis()
+         if(now<(checkedUntil[player]?:0L)) return false
+         checkedUntil[player]=now+60_000
+-        val trapped=isSealed(player)
++        val trapped=needsEscape(player)
+         if(trapped) checkedUntil[player]=now+5*60_000
+         return trapped
+     }
+ 
+-    private fun eligible(player: Player)=player.isInsideZone(ZoneId.TOWN) && !player.isDead &&
++    private fun eligible(player: Player)=!player.isDead && !player.isAttackingNow &&
+             !player.isCastingNow && !player.isTeleporting && !player.isUnderAttack() &&
++            !player.isInBoat && !player.isFlying && !dev.l2j.autobots.population.RouteSafety.isWater(player.location()) &&
+             !player.isInStoreMode && player.activeTradeList==null
+ 
++    private fun offGround(player: Player): Boolean {
++        val geo=GeoEngine.getInstance()
++        return geo.hasGeo(player.x,player.y) && kotlin.math.abs(geo.getHeight(player.x,player.y,player.z).toInt()-player.z)>256
++    }
++
++    private fun needsEscape(player: Player)=eligible(player) && (offGround(player) || isSealed(player))
++
+     /** No large search: uncertainty, timeout or reaching the surrounding street means no recovery. */
+     fun isSealed(player: Player): Boolean {
+         if(!eligible(player)) return false
+         val geo=GeoEngine.getInstance()
++        if(!geo.hasGeo(player.x,player.y)) return false
+         val origin=player.location()
+         val queue=java.util.ArrayDeque<Location>()
+         val seen=HashSet<Triple<Int,Int,Int>>()
+@@ -59,12 +68,13 @@ internal object TownUnstuck {
+     }
+ 
+     suspend fun recover(player: Player,active: () -> Boolean): Boolean {
+-        if(!active() || !eligible(player) || !isSealed(player)) return false
++        if(!active() || !needsEscape(player)) return false
+         val origin=player.location()
++        val reason=if(offGround(player)) "invalid_ground_origin" else if(player.isInsideZone(ZoneId.TOWN)) "sealed_town_cell" else "sealed_field_cell"
+         if(player.isSitting) { player.standUp();delay(2700) }
+         if(!active() || !eligible(player)) return false
+         val scroll=Gear.count(player,Gear.SCROLL_OF_ESCAPE)>0
+-        println("Autobots movement: ${player.name} id=${player.objectId} recovery reason=sealed_town_cell method=${if(scroll) "own_scroll" else "unstuck_5min"} from=${origin.x},${origin.y},${origin.z}")
++        println("Autobots movement: ${player.name} id=${player.objectId} recovery reason=$reason method=${if(scroll) "own_scroll" else "unstuck_5min"} from=${origin.x},${origin.y},${origin.z}")
+         if(scroll) player.useItem(Gear.SCROLL_OF_ESCAPE)
+         else {
+             // Escape's GM shortcut must never be used by an automated character.
+@@ -75,8 +85,8 @@ internal object TownUnstuck {
+             delay(500)
+             if(!active() || player.isDead) return false
+             if(!player.isCastingNow && !player.isTeleporting && distance(origin,player.location())>32) {
+-                val recovered=player.isInsideZone(ZoneId.TOWN) && !isSealed(player)
+-                println("Autobots movement: ${player.name} id=${player.objectId} recovery reason=sealed_town_cell completed=$recovered at=${player.x},${player.y},${player.z}")
++                val recovered=player.isInsideZone(ZoneId.TOWN) && !needsEscape(player)
++                println("Autobots movement: ${player.name} id=${player.objectId} recovery reason=$reason completed=$recovered at=${player.x},${player.y},${player.z}")
+                 return recovered
+             }
+             if(System.currentTimeMillis()>until-(if(scroll) 32_000 else 312_000) && !player.isCastingNow && !player.isTeleporting) return false
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index e4f1aa8..c876adc 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -482,17 +482,20 @@ internal class LifeBehavior(private val bot: Autobot) {
+         nextSegment(canTrade = false, reason = "nothing to trade")
+     }
+ 
++    private suspend fun recoverUnusableOrigin(): Boolean {
++        if(!dev.l2j.autobots.movement.TownUnstuck.needsRecovery(bot)) return false
++        if(dev.l2j.autobots.movement.TownUnstuck.recover(bot) { bot.isOnline && !bot.isDead }) {
++            badSpots.clear()
++            recovery=null
++            // Recovery starts a new normal town stay, including missed shops/support.
++            tripDoneInTown=false
++        }
++        return true
++    }
++
+     private suspend fun hunt() {
+         val inTown = bot.isInsideZone(ZoneId.TOWN)
+-        if(inTown && dev.l2j.autobots.movement.TownUnstuck.needsRecovery(bot)) {
+-            if(dev.l2j.autobots.movement.TownUnstuck.recover(bot) { bot.isOnline && !bot.isDead }) {
+-                badSpots.clear()
+-                recovery=null
+-                // The old town stay may have failed its shops/support from the sealed cell.
+-                tripDoneInTown=false
+-            }
+-            return
+-        }
++        if(inTown && recoverUnusableOrigin()) return
+         if (inTown && economy && !tripDoneInTown) {
+             visitShops()
+             return
+@@ -529,7 +532,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+         }
+         val target = currentSpot()
+         if (target == null) {
+-            if (!inTown) bot.combatBehavior.onUpdate()
++            if (!inTown) {
++                // Give available prey its usual chance before considering a field escape.
++                bot.combatBehavior.onUpdate()
++                if(bot.target==null) recoverUnusableOrigin()
++            }
+             return
+         }
+ 
