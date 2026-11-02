@@ -312,3 +312,12 @@ python3 -m unittest discover -s scripts -p 'test_movement_report.py'
   без GM, выдачи ресурсов или установки HP. Если обычный план выбирает торговлю/AFK,
   в тесте подставляется окончание только этих пауз, затем обычный контроллер продолжает охоту.
   Маркер `DRY ORIGIN RECOVERY ALL PASSED`, timeout 960 с.
+
+- `ElongatedOriginRecoveryVerify --plan-only` — CyberF 10 в записанном вытянутом
+  тупике `-100200,220024,-3376`: 312 сухих клеток, максимальное удаление 599.
+  Прежний порог 384 ошибочно прекращал проверку.
+  Маркер `ELONGATED ORIGIN PLAN ALL PASSED`.
+- `ElongatedOriginRecoveryVerify` — полный штатный выход, город с исходными
+  899 аденами, обычная подготовка и новая охота с XP. Без GM/выдачи ресурсов/HP;
+  начальная позиция задана по записи сбоя, время торговли/AFK подставляется.
+  Маркер `ELONGATED ORIGIN RECOVERY ALL PASSED`, timeout 960 с.
