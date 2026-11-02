@@ -29,7 +29,19 @@ public class NoviceTargetsVerify extends OfflineTownVerify {
   if(args.length>0&&args[0].equals("--policy-only")){System.out.println("NOVICE TARGET POLICY ALL PASSED");System.exit(0);}
   long xp=p.getExp(),started=System.currentTimeMillis(),reported=started,deadline=started+900000;Location origin=location(p),goal=null;boolean departed=false,arrived=false;Set<Integer> defenders=new HashSet<>();
   for(String field:new String[]{"lessonCheckedAt","equipmentCheckedAt"})((Map<Integer,Long>)member(m,field).get(m)).put(p.getObjectId(),started+3600000);
+  boolean fieldRecovery=Arrays.asList(args).contains("--exclude-local");
+  if(fieldRecovery){
+   check(!p.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN)&&p.getInventory().getInventoryItemCount(736,-1)==0,"actual saved field actor has no escape scroll or remote town service");
+   Set<Long> excluded=new HashSet<>();for(Object spot:(List<?>)invoke(singleton("population.HuntingSpots"),"getSpots")){
+    Location at=(Location)invoke(spot,"getLocation");if(Math.hypot(at.getX()-origin.getX(),at.getY()-origin.getY())<=20000)excluded.add((Long)invoke(spot,"getKey"));
+   }
+   check(!excluded.isEmpty(),"controlled unavailable-path fixture excludes nearby hunting cells");((Map<Integer,Set<Long>>)member(m,"unreachableSpots").get(m)).put(p.getObjectId(),excluded);
+  }
   System.out.println("NOVICE TARGET INFO origin="+origin+" cash="+p.getAdena()+" healing="+invoke(singleton("population.economy.Healing"),"count",p)+" weapon="+p.getActiveWeaponItem().getItemId());invoke(m,"goHunting",p);
+  if(fieldRecovery){
+   Object recovery=((Map<?,?>)member(m,"traveling").get(m)).get(p.getObjectId());check(recovery!=null&&invoke(recovery,"getTrip").toString().equals("TO_SPOT"),"stranded field hunter installs a distant walking recovery");check(Boolean.TRUE.equals(invoke(recovery,"getGkHopped"))&&!((List<?>)invoke(recovery,"getRoute")).isEmpty(),"field recovery uses a validated road without a remote gatekeeper hop");
+   if(Arrays.asList(args).contains("--plan-only")){System.out.println("FIELD HUNT RECOVERY PLAN ALL PASSED");System.exit(0);}
+  }
   while(System.currentTimeMillis()<deadline){
    invoke(m,"tick");Object travel=((Map<?,?>)member(m,"traveling").get(m)).get(p.getObjectId());
    if(travel!=null&&invoke(travel,"getTrip").toString().equals("TO_SPOT"))goal=new Location((Integer)invoke(travel,"getTargetX"),(Integer)invoke(travel,"getTargetY"),(Integer)invoke(travel,"getTargetZ"));
@@ -43,6 +55,6 @@ public class NoviceTargetsVerify extends OfflineTownVerify {
    if(System.currentTimeMillis()-reported>=20000){reported=System.currentTimeMillis();System.out.println("NOVICE TARGET INFO seconds="+(reported-started)/1000+" at="+location(p)+" goal="+goal+" xp="+p.getExp()+" hp="+(int)p.getCurrentHp()+" target="+p.getTarget()+" arrived="+arrived);}
    Thread.sleep(500);
   }
-  check(departed&&arrived,"novice physically leaves the recorded position and arrives at its chosen hunting goal");check(p.getExp()-xp>=1000,"real combat gains experience under the same novice window");check(!p.isGM()&&!p.isInvul(),"selection/arrival/combat use ordinary rules");System.out.println("NOVICE TARGET INFO xp="+xp+"->"+p.getExp()+" seconds="+(System.currentTimeMillis()-started)/1000);System.out.println("NOVICE TARGETS ALL PASSED");System.exit(0);
+  check(departed&&arrived,"novice physically leaves the recorded position and arrives at its chosen hunting goal");check(p.getExp()-xp>=1000,"real combat gains experience under the same novice window");check(!p.isGM()&&!p.isInvul(),"selection/arrival/combat use ordinary rules");System.out.println("NOVICE TARGET INFO xp="+xp+"->"+p.getExp()+" seconds="+(System.currentTimeMillis()-started)/1000);System.out.println(fieldRecovery?"FIELD HUNT RECOVERY ALL PASSED":"NOVICE TARGETS ALL PASSED");System.exit(0);
  }catch(Throwable t){t.printStackTrace();System.exit(1);}}
 }

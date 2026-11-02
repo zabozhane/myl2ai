@@ -1,0 +1,43 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index c4be765..cfce4a6 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -452,21 +452,23 @@ object OfflineFarmManager {
+                 startTownTrip(player,returnToSpot=false,reason="no_safe_local_prey")
+                 return
+             }
+-            if(player.isInsideZone(ZoneId.TOWN)) {
+-                val distant=HuntingSpots.nearArrival(player,player.location(),excluded,100000,surfaceOnly=true).firstNotNullOfOrNull { candidate ->
+-                    val anchor=HuntingSpots.huntAnchor(player,candidate,validateDirect=false)
+-                    val route=anchor?.let { dev.l2j.autobots.population.economy.NpcTravel.toPoint(player,player.location(),it,100000) }
+-                    if(route==null) {
+-                        excluded.add(candidate.key)
+-                        LOGGER.info("Offline farm: ${player.name} id=${player.objectId} rejected hunt candidate=${candidate.key} reason=no_safe_path from=${player.x},${player.y},${player.z}")
+-                        null
+-                    } else candidate to route
+-                }
+-                if(distant!=null) {
+-                    LOGGER.info("Offline farm: ${player.name} id=${player.objectId} cannot afford a local hunting ride; walks ${distant.second.length.toInt()} units to safe prey, ${distant.second.points.size} waypoints.")
+-                    startSpotTrip(player,distant.first,distant.second.points,noMoreHops=true)
+-                    return
+-                }
++            // A hunter without a scroll can be stranded in the field too. Keep this
++            // recovery bounded and retain failed candidates across later attempts.
++            val planningDeadline=System.nanoTime()+8_000_000_000L
++            val distant=HuntingSpots.nearArrival(player,player.location(),excluded,100000,surfaceOnly=true)
++                    .asSequence().takeWhile { System.nanoTime()<planningDeadline }.firstNotNullOfOrNull { candidate ->
++                val anchor=HuntingSpots.huntAnchor(player,candidate,validateDirect=false)
++                val route=anchor?.let { dev.l2j.autobots.population.economy.NpcTravel.toPoint(player,player.location(),it,100000) }
++                if(route==null) {
++                    excluded.add(candidate.key)
++                    LOGGER.info("Offline farm: ${player.name} id=${player.objectId} rejected hunt candidate=${candidate.key} reason=no_safe_path from=${player.x},${player.y},${player.z}")
++                    null
++                } else candidate to route
++            }
++            if(distant!=null) {
++                LOGGER.info("Offline farm: ${player.name} id=${player.objectId} has no safe local prey; walks ${distant.second.length.toInt()} units to safe prey, ${distant.second.points.size} waypoints.")
++                startSpotTrip(player,distant.first,distant.second.points,noMoreHops=true)
++                return
+             }
+             retryAfter[player.objectId] = now + SPOT_RETRY_MS
+             failedRoundAt.putIfAbsent(player.objectId, now)
