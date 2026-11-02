@@ -1,0 +1,37 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index f9d0772..ddbb48f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -98,6 +98,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private val badSpotTtlMs = Rnd.get(BAD_SPOT_TTL_MIN_MINUTES, BAD_SPOT_TTL_MAX_MINUTES) * 60_000L
+     private var idleTicks = 0
+     private var gatekeeperFailed = false
++    private var nextSpotRetryAt = 0L
+ 
+     // Diagnostics: where hunters end up a floor below their spot (a geodata hole, a chase, a bad anchor).
+     private var lastX = 0
+@@ -555,6 +556,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+             dropSpot()
+         }
+         val level = if (group != null) PartyPlan.huntLevel(group) else fitness.huntLevel()
++        val now = System.currentTimeMillis()
++        if (spot == null && level == spotLevel && now < nextSpotRetryAt) return null
+         val repeatTargets=if(bot.isInParty) emptySet() else quests.repeatTargets()
+         val current = spot
+         val repeatSuitable=current!=null && repeatTargets.isNotEmpty() && current.npcIds().any { it in repeatTargets } &&
+@@ -573,11 +576,14 @@ internal class LifeBehavior(private val bot: Autobot) {
+         val next = (if(repeatTargets.isNotEmpty()) HuntingSpots.choose(bot,repeatLevel,excludedSpots,wanted,MAX_TRAVEL_ON_FOOT,
+                 useExits=canRide,preferredNpcIds=repeatTargets) else null)
+                 ?: HuntingSpots.choose(bot, level, excludedSpots, wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide)
+-                ?: HuntingSpots.choose(bot, level, emptySet(), wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide)
++
+         if (next != null && wanted != null) EconomyLog.note(bot, "farming for ${if (wanted.spoil) "spoil" else "drops"} " +
+                 "${wanted.items.take(5).joinToString { ItemTable.getInstance().getTemplate(it)?.name ?: "$it" }} at ${next.location}")
+         next?.let { HuntingSpots.join(it) }
+         spot = next
++        nextSpotRetryAt = if (next == null) now + 30_000L else 0L
++        if (next == null && AutobotData.settings.populationSessionLog)
++            println("Autobots movement: ${bot.name} id=${bot.objectId} no non-excluded hunting spot; retry in 30 seconds, excluded=${excludedSpots.size}, at ${bot.x},${bot.y},${bot.z}")
+         spotLevel = level
+         idleTicks = 0
+         gatekeeperFailed = false

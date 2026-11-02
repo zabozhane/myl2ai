@@ -1,0 +1,109 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
+index 36973b4..971aaa0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
+@@ -18,38 +18,26 @@ internal object HuntRecovery {
+     data class Ride(val gatekeeper: net.sf.l2j.gameserver.model.actor.Npc,val exitId: Int,
+                     val exit: TeleportLocation,val spot: HuntingSpot,val walk: NpcTravel.Walk,var paid: Int=0)
+     fun plan(player: Player,excluded: Set<Long>): Ride? {
+-        val gk=player.findClosestGatekeeper() ?: return null
+-        if(distance(player,gk)>8000) return null
+-        val budget=Errands.spendable(player)
+-        val menu=(listOf("data/html/teleporter/${gk.npcId}.htm","data/html/teleporter/${gk.npcId}-1.htm")
+-                .mapNotNull { net.sf.l2j.gameserver.data.cache.HtmCache.getInstance().getHtm(it) }).joinToString(" ")
+-        val ids=Regex("""_goto\s+(\d+)""").findAll(menu).map { it.groupValues[1].toInt() }.distinct()
+-        return ids.mapNotNull { id -> TeleportLocationData.getInstance().getTeleportLocation(id)?.let { id to it } }
+-                .filter { (_,exit) -> !exit.isNoble && exit.price>0 && exit.price<=budget &&
+-                        dev.l2j.autobots.population.RouteSafety.safeDestination(player,exit) &&
+-                        dev.l2j.autobots.population.RouteSafety.safeSegment(player,exit,exit) }
++        return dev.l2j.autobots.population.economy.GatekeeperTravel.offers(player)
++                .map { it.id to it.exit }
+                 .mapNotNull { (id,exit) ->
+                     HuntingSpots.nearArrival(player,exit,excluded).firstNotNullOfOrNull { spot ->
+                         HuntingSpots.huntAnchor(player,spot,exit,validateDirect=false)?.let { anchor ->
+-                            NpcTravel.toPoint(player,exit,anchor,8000)?.let { Ride(gk,id,exit,spot,it) }
++                            NpcTravel.toPoint(player,exit,anchor,8000)?.let {
++                                val gk=player.findClosestGatekeeper() ?: return@let null
++                                Ride(gk,id,exit,spot,it)
++                            }
+                         }
+                     }
+                 }.minByOrNull { it.exit.price+it.walk.length/10 }
+     }
+     suspend fun travel(player: Player,ride: Ride): Boolean {
+-        val gk=ride.gatekeeper
+-        if(!gk.isVisible) return false
+-        if(!NpcTravel.reach(player,gk,8000) || !OfflineFarmManager.isActive(player)) return false
+-        if(ride.exit.price>Errands.spendable(player)) return false
++        if(!OfflineFarmManager.isActive(player)) return false
++        val service=dev.l2j.autobots.population.economy.GatekeeperTravel
++        val offer=dev.l2j.autobots.population.economy.GatekeeperTravel.Offer(ride.gatekeeper,ride.exitId,ride.exit,service.price(ride.exit))
+         val before=player.adena
+-        player.target=gk
+-        gk.onBypassFeedback(player,"goto ${ride.exitId}")
+-        player.onTeleported()
+-        if(distance(player.location(),ride.exit)>200) return false
+-        ride.paid=before-player.adena
+-        player.target=null
+-        EconomyLog.note(player,"paid ${ride.paid} at ${gk.name} for a reachable hunting region (menu ${ride.exitId})")
+-        delay(250)
++        if(!service.travel(player,offer)) return false
++        ride.paid=(before-player.adena).coerceAtLeast(0)
+         return OfflineFarmManager.isActive(player) && !player.isDead
+     }
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+index d33307c..90dd035 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -100,7 +100,7 @@ internal object OfflineChores {
+         if(potion!=null) buy(player,potion,target=10,onlyBelow=3,budgetShare=1.0,have=potions)
+         if (Gear.isArcher(player)) buy(player, Gear.arrowId(player), target = 1500, onlyBelow = 500, budgetShare = 0.6)
+         // No town shop sells mana potions in Interlude: mages rest, as players did.
+-        buy(player, Gear.SCROLL_OF_ESCAPE, target = 2, onlyBelow = 1, budgetShare = 1.0)
++        buy(player, Gear.SCROLL_OF_ESCAPE, target = if(player.level<20) 1 else 2, onlyBelow = 1, budgetShare = 1.0)
+         if (Gear.canBuyShots(player)) {
+             val shotId = Gear.shotId(player)
+             if (shotId > 0) buy(player, shotId, target = if(player.level<20) 200 else 500, onlyBelow = if(player.level<20) 50 else 150, budgetShare = 0.4, essential=false)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+index d3873a2..c7b1a0c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+@@ -36,7 +36,7 @@ internal object GatekeeperTravel {
+         if(!npc.isVisible || distance(player,npc)>8000 || NpcTravel.plan(player,npc,maxDistance=8000)==null) return emptyList()
+         return menuIds(npc).mapNotNull { id ->
+             TeleportLocationData.getInstance().getTeleportLocation(id)?.let { Offer(npc,id,it,price(it)) }
+-        }.filter { !it.exit.isNoble && it.price<=Errands.spendable(player) &&
++        }.filter { !it.exit.isNoble && it.price<=Errands.travelSpendable(player) &&
+                 RouteSafety.safeDestination(player,it.exit) && RouteSafety.safeSegment(player,it.exit,it.exit) }
+     }
+ 
+@@ -47,11 +47,11 @@ internal object GatekeeperTravel {
+     suspend fun travel(player: Player,offer: Offer): Boolean {
+         val npc=offer.gatekeeper
+         if(!npc.isVisible || offer.id !in menuIds(npc) || offer.exit.isNoble ||
+-                price(offer.exit)>Errands.spendable(player)) return false
++                price(offer.exit)>Errands.travelSpendable(player)) return false
+         if(!NpcTravel.reach(player,npc,8000) || player.isDead ||
+                 player !is Autobot && !OfflineFarmManager.isActive(player)) return false
+         // Balance, fare and menu can change during the walk. No manual charge or direct teleport.
+-        if(offer.id !in menuIds(npc) || price(offer.exit)>Errands.spendable(player)) return false
++        if(offer.id !in menuIds(npc) || price(offer.exit)>Errands.travelSpendable(player)) return false
+         val before=player.adena
+         player.target=npc
+         try {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index af76166..44869c8 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -44,6 +44,10 @@ internal object Errands {
+ 
+     fun spendable(bot: Player): Int = (bot.adena - reserve(bot)).coerceAtLeast(0)
+ 
++    /** Prepared novices may use cash for an actual ride: emergency supplies are already in the bag. */
++    fun travelSpendable(bot: Player): Int = if(bot.level<20 && Healing.count(bot)>=10 && Gear.count(bot,Gear.SCROLL_OF_ESCAPE)>0)
++        bot.adena else spendable(bot)
++
+     fun loadPercent(bot: Player): Int = if (bot.maxLoad <= 0) 0 else (bot.currentLoad.toLong() * 100 / bot.maxLoad).toInt()
+ 
+     fun shouldLeaveSpot(bot: Autobot,lastTripAt: Long): Boolean = leaveReason(bot,lastTripAt)!=null

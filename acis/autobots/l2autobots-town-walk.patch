@@ -1,0 +1,152 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/movement/TownWalk.kt b/src/main/kotlin/dev/l2j/autobots/movement/TownWalk.kt
+new file mode 100644
+index 0000000..1691801
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/movement/TownWalk.kt
+@@ -0,0 +1,24 @@
++package dev.l2j.autobots.movement
++
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.population.economy.NpcTravel
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.gameserver.data.manager.ZoneManager
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.location.Location
++import net.sf.l2j.gameserver.model.zone.type.TownZone
++
++/** A missing escape scroll can mean a longer walk, never a blind move across the map. */
++internal object TownWalk {
++    const val MAX_DISTANCE=60000
++
++    fun plan(player: Player,destination: Location,maxDistance: Int=MAX_DISTANCE): NpcTravel.Walk? {
++        val origin=player.location()
++        val direct=distance(origin,destination)
++        if(direct>maxDistance || ZoneManager.getInstance().getZone(destination.x,destination.y,destination.z,TownZone::class.java)==null)
++            return null
++        val local=if(direct<=20000) NpcTravel.toPoint(player,origin,destination,minOf(maxDistance,20000)) else null
++        val route=local ?: NpcTravel.toPoint(player,origin,destination,maxDistance) ?: return null
++        return route.takeIf { it.length/player.moveSpeed.coerceAtLeast(30)*2000+15_000<=900_000 }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 6ebb0b3..6d55946 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -106,6 +106,7 @@ object OfflineFarmManager {
+ 
+     private val equipmentCheckedAt = ConcurrentHashMap<Int, Long>()
+     private val townCheckedAt = ConcurrentHashMap<Int, Long>()
++    private val townRetryAfter=ConcurrentHashMap<Int,Long>()
+     private val lastTownTripAt = ConcurrentHashMap<Int, Long>()
+     private val diedAt = ConcurrentHashMap<Int, Long>()
+     private val townJobs = ConcurrentHashMap<Int, Job>()
+@@ -239,6 +240,7 @@ object OfflineFarmManager {
+             townJobs.remove(id)?.let { kotlinx.coroutines.runBlocking { it.cancel();it.join() } }
+             equipmentCheckedAt.remove(id)
+             townCheckedAt.remove(id)
++            townRetryAfter.remove(id)
+             lastTownTripAt.remove(id)
+             diedAt.remove(id)
+             questsLoaded.remove(id)
+@@ -490,7 +492,7 @@ object OfflineFarmManager {
+                     // A stranded novice may have no affordable ride out of an unsuitable region.
+                     // This is one validated recovery walk, not repeated blind attempts. Keep the
+                     // 20s progress watchdog and calculate a finite budget from real path length.
+-                    val maxBudget=if((travel.trip==Trip.TO_SPOT && travel.gkHopped || travel.trip==Trip.BACK_TO_SPOT) && length>MAX_WALK_TO_SPOT) 900_000L else 300_000L
++                    val maxBudget=if((travel.trip==Trip.TO_SPOT && travel.gkHopped || travel.trip==Trip.BACK_TO_SPOT || travel.trip==Trip.TO_TOWN) && length>MAX_WALK_TO_SPOT) 900_000L else 300_000L
+                     val budget=minOf((length/player.moveSpeed.coerceAtLeast(30)*2000+15_000).toLong().coerceIn(30_000L,maxBudget),huntDeadline-travel.startedAt)
+                     travel.progress=dev.l2j.autobots.movement.RouteProgress(travel.startedAt,budget)
+                     LOGGER.info("Offline farm: ${player.name} id=$id route planned trip=${travel.trip}" +
+@@ -634,6 +636,7 @@ object OfflineFarmManager {
+ 
+         for ((id, player) in farming) {
+             if (!isActive(player) || player.isDead || OfflineLife.owns(player) || traveling.containsKey(id) || townJobs.containsKey(id)) continue
++            if(now<(townRetryAfter[id]?:0L)) continue
+             if (now - (townCheckedAt[id] ?: 0L) < TOWN_CHECK_MS) continue
+             townCheckedAt[id] = now
+             try {
+@@ -775,8 +778,8 @@ object OfflineFarmManager {
+ 
+     private fun startTownTrip(player: Player,returnToSpot: Boolean=true,reason: String) {
+         val id = player.objectId
+-        val productiveSeconds=(System.currentTimeMillis()-(productiveSince.remove(id)?:System.currentTimeMillis()))/1000
+-        lastTownTripAt[id] = System.currentTimeMillis()
++        if(System.currentTimeMillis()<(townRetryAfter[id]?:0L)) return
++        val productiveSeconds=(System.currentTimeMillis()-(productiveSince[id]?:System.currentTimeMillis()))/1000
+         val origin = if(returnToSpot) Location(player.x, player.y, player.z) else null
+         townAction(player) {
+             AutofarmManager.stopFarm(player, "going to town")
+@@ -795,11 +798,18 @@ object OfflineFarmManager {
+                 choresThenBack(player, origin)
+             } else {
+                 val town = MapRegionData.getInstance().getLocationToTeleport(player, MapRegionData.TeleportType.TOWN)
+-                if (distance(player.x, player.y, town.x, town.y) <= MAX_WALK_TO_TOWN) {
++                val route=if(!player.isUnderAttack()) dev.l2j.autobots.movement.TownWalk.plan(player,town,MAX_WALK_TO_TOWN) else null
++                if (route!=null) {
+                     traveling[id] = Travel(Trip.TO_TOWN, town.x, town.y, town.z,
+-                            spotX = origin?.x?:0, spotY = origin?.y?:0, spotZ = origin?.z?:0, thenHunt=!returnToSpot, lastMoveAt = System.currentTimeMillis())
++                            spotX = origin?.x?:0, spotY = origin?.y?:0, spotZ = origin?.z?:0, thenHunt=!returnToSpot,
++                            route=route.points,lastMoveAt = System.currentTimeMillis())
++                    LOGGER.info("Offline farm: ${player.name} id=$id returns to town on a checked walk without SoE length=${route.length.toInt()} waypoints=${route.points.size}.")
+                     walk(player, town.x, town.y, town.z)
+-                } else startFarmLogged(player, "town too far without a scroll")
++                } else {
++                    townRetryAfter[id]=System.currentTimeMillis()+TOWN_TRAVEL_RETRY_MS
++                    LOGGER.info("Offline farm: ${player.name} id=$id postpones town reason=no_safe_route_or_attacked retryAt=${townRetryAfter[id]}; productive hunting time preserved.")
++                    startFarmLogged(player,"no safe town walk without a scroll")
++                }
+             }
+         }
+     }
+@@ -810,6 +820,8 @@ object OfflineFarmManager {
+         try {
+             if (!isActive(player) || player.isDead) return
+             huntJourneys.remove(player.objectId)
++            townRetryAfter.remove(player.objectId)
++            productiveSince.remove(player.objectId)
+             AutofarmManager.stopFarm(player, "town errands")
+             lastTownTripAt[player.objectId] = System.currentTimeMillis()
+             AutofarmManager.prepareOfflineBehavior(player)
+@@ -834,7 +846,10 @@ object OfflineFarmManager {
+     private fun onStuck(player: Player, travel: Travel) {
+         LOGGER.info("Offline farm: ${player.name} id=${player.objectId} can't reach ${travel.targetX},${travel.targetY} on foot, gives up the ${travel.trip} trip.")
+         when (travel.trip) {
+-            Trip.TO_TOWN -> startFarmLogged(player, "town unreachable")
++            Trip.TO_TOWN -> {
++                townRetryAfter[player.objectId]=System.currentTimeMillis()+TOWN_TRAVEL_RETRY_MS
++                startFarmLogged(player, "town unreachable")
++            }
+             Trip.TO_TRAINER -> {
+                 travel.trainer?.let { trainerFailures.getOrPut(player.objectId){mutableMapOf()}[it.objectId]=System.currentTimeMillis() }
+                 val alternative=nearestTrainer(player)
+@@ -1287,7 +1302,8 @@ object OfflineFarmManager {
+     private const val TOWN_CHECK_MS = 60_000L
+     private const val MIN_TRIP_GAP_MS = 15 * 60_000L
+     private const val ROUTINE_TRIP_MS = 90 * 60_000L
+-    private const val MAX_WALK_TO_TOWN = 6000
++    private const val MAX_WALK_TO_TOWN = dev.l2j.autobots.movement.TownWalk.MAX_DISTANCE
++    private const val TOWN_TRAVEL_RETRY_MS=2*60_000L
+     internal const val GIVER_WITHIN = 6000
+ 
+     /** How far on foot a character is willing to go from where the owner logged out. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index 44869c8..96933d3 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -96,12 +96,13 @@ internal class GoToTownSequence(override val bot: Player, private val maxWalk: I
+ 
+         val town = MapRegionData.getInstance().getLocationToTeleport(bot, MapRegionData.TeleportType.TOWN)
+         if (distance(bot.location(), town) > maxWalk) return onFail()
+-        EconomyLog.note(bot,"town trip reason=$purpose by=walk to=${town.x},${town.y},${town.z}")
+-        WalkToSequence(bot, town, 300, onFail).definition()
++        val route=dev.l2j.autobots.movement.TownWalk.plan(bot,town,maxWalk) ?: return onFail()
++        EconomyLog.note(bot,"town trip reason=$purpose by=walk to=${town.x},${town.y},${town.z} length=${route.length.toInt()} waypoints=${route.points.size}")
++        WalkToSequence(bot, town, 300, onFail).withRecoveryRoute(route).definition()
+     }
+ 
+     companion object {
+-        const val MAX_WALK_TO_TOWN = 6000
++        const val MAX_WALK_TO_TOWN = dev.l2j.autobots.movement.TownWalk.MAX_DISTANCE
+     }
+ }
+ 

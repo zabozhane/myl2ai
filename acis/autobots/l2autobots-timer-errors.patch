@@ -1,0 +1,21 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/utils/Klock.kt b/src/main/kotlin/dev/l2j/autobots/utils/Klock.kt
+index e978b54..aeef3ea 100644
+--- a/src/main/kotlin/dev/l2j/autobots/utils/Klock.kt
++++ b/src/main/kotlin/dev/l2j/autobots/utils/Klock.kt
+@@ -16,7 +16,8 @@ internal class Klock internal constructor(
+         try {
+             action()
+         } catch (e: Throwable) {
+-            println("$name timer action failed: $action")
++            println("$name timer action failed: ${e.javaClass.name}: ${e.message}")
++            e.printStackTrace()
+         }
+     }
+ 
+@@ -48,4 +49,4 @@ internal class Klock internal constructor(
+                 action: suspend () -> Unit
+         ): Klock = Klock(name, delay, repeat, coroutineScope, action).also { it.start() }
+     }
+-}
+\ No newline at end of file
++}

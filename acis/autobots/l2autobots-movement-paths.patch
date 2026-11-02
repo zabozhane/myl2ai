@@ -1,0 +1,362 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TravelByGatekeeperSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TravelByGatekeeperSequence.kt
+index 8536d63..6775758 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TravelByGatekeeperSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TravelByGatekeeperSequence.kt
+@@ -17,8 +17,7 @@ internal class TravelByGatekeeperSequence(override val bot: Player, private val
+     override suspend fun definition() {
+         val gatekeeper = bot.findClosestGatekeeper() ?: return onFail()
+ 
+-        WalkToSequence(bot, gatekeeper.location(), INTERACTION_RADIUS, onFail).definition()
+-        if (distance(bot, gatekeeper) > INTERACTION_RADIUS * 2) return
++        if (!dev.l2j.autobots.population.economy.NpcTravel.reach(bot,gatekeeper)) return onFail()
+ 
+         bot.target = gatekeeper
+         delay(Rnd.get(2000, 4000).toLong())
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+index 5897fdd..dcb0665 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+@@ -2,97 +2,75 @@ package dev.l2j.autobots.behaviors.sequences
+ 
+ import dev.l2j.autobots.extensions.location
+ import dev.l2j.autobots.extensions.moveTo
++import dev.l2j.autobots.movement.RouteProgress
++import dev.l2j.autobots.population.RouteSafety
++import dev.l2j.autobots.population.economy.NpcTravel
+ import dev.l2j.autobots.population.isUnderAttack
+ import dev.l2j.autobots.utils.CancellationToken
+ import dev.l2j.autobots.utils.distance
+ import kotlinx.coroutines.delay
+-import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.enums.ZoneId
+ import net.sf.l2j.gameserver.geoengine.GeoEngine
+ import net.sf.l2j.gameserver.model.actor.Player
+ import net.sf.l2j.gameserver.model.location.Location
+-import kotlin.math.atan2
+-import kotlin.math.cos
+-import kotlin.math.sin
+-
+-/**
+- * Walks to [destination] in short legs, so pathfinding only has to solve nearby obstacles.
+- * When a leg leads nowhere (the server finds no path to it, as with a point inside a wall or on another floor),
+- * the bot sidesteps a few times like a player feeling its way around a building, then goes on.
+- * Stops when the bot is attacked, and calls [onStuck] when it stops getting closer.
+- */
+-internal class WalkToSequence(override val bot: Player, private val destination: Location, private val arrivalRadius: Int, private val onStuck: () -> Unit) : Sequence {
++import kotlin.math.abs
++import kotlin.math.ceil
+ 
++/** Shared errands follow geodata waypoints, including detours away from the final goal. */
++internal class WalkToSequence(override val bot: Player, private val destination: Location,
++                              private val arrivalRadius: Int, private val onStuck: () -> Unit) : Sequence {
+     override var cancellationToken: CancellationToken? = null
+ 
+     override suspend fun definition() {
+-        var bestDistance = Double.MAX_VALUE
+-        var checksWithoutProgress = 0
+-        var detours = 0
+-
+-        while (true) {
+-            if (bot.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.WATER)) {
+-                bot.stopMove(null)
+-                onStuck()
+-                return
+-            }
+-            val remaining = distance(bot.location(), destination)
+-            if (remaining <= arrivalRadius || bot.isDead || bot.isUnderAttack()) return
+-
+-            if (remaining < bestDistance - MIN_PROGRESS) {
+-                bestDistance = remaining
+-                checksWithoutProgress = 0
+-            } else if (++checksWithoutProgress >= MAX_CHECKS_WITHOUT_PROGRESS) {
+-                onStuck()
+-                return
+-            }
+-
+-            if (!bot.isMoving) {
+-                val leg = if (checksWithoutProgress >= CHECKS_BEFORE_DETOUR && detours < MAX_DETOURS) {
+-                    detours++
+-                    checksWithoutProgress = 0
+-                    detour()
+-                } else {
+-                    nextLeg(remaining)
+-                }
+-                if (!dev.l2j.autobots.population.RouteSafety.safeSegment(bot,bot.location(),leg)) {
+-                    println("Autobots route: ${bot.name} id=${bot.objectId} refused unsafe leg to ${leg.x},${leg.y},${leg.z}")
+-                    onStuck()
++        val started = System.currentTimeMillis()
++        fun arrived() = distance(bot.location(), destination) <= arrivalRadius && abs(bot.z-destination.z) < 200
++        fun failed(reason: String) {
++            bot.stopMove(null)
++            println("Autobots movement: ${bot.name} id=${bot.objectId} failed reason=$reason" +
++                    " to=${destination.x},${destination.y},${destination.z} at=${bot.x},${bot.y},${bot.z}" +
++                    " elapsedMs=${System.currentTimeMillis()-started}")
++            onStuck()
++        }
++        if (bot.isDead || bot.isUnderAttack()) return
++        if (arrived()) return
++        if (bot.isInsideZone(ZoneId.WATER)) return failed("water")
++        if (bot.isSitting) { bot.standUp(); delay(2700) }
++        val maxWalk = ceil(distance(bot.location(),destination)).toInt().coerceIn(12000,100000)
++        val route = NpcTravel.toPoint(bot,bot.location(),destination,maxWalk) ?: return failed("no_safe_path")
++        val watch = RouteProgress(started,(route.length/bot.moveSpeed.coerceAtLeast(30)*2000+15_000)
++                .toLong().coerceIn(30_000L,300_000L))
++        println("Autobots movement: ${bot.name} id=${bot.objectId} planned to=${destination.x},${destination.y},${destination.z}" +
++                " from=${bot.x},${bot.y},${bot.z} waypoints=${route.points.size} length=${route.length.toInt()}")
++        var index = 0
++        var lastMoveAt = 0L
++        try {
++            while (true) {
++                if (bot.isDead || bot.isUnderAttack()) return
++                if (arrived()) {
++                    println("Autobots movement: ${bot.name} id=${bot.objectId} arrived to=${destination.x},${destination.y},${destination.z}" +
++                            " elapsedMs=${System.currentTimeMillis()-started}")
+                     return
+                 }
+-                bot.moveTo(leg.x, leg.y, leg.z)
++                if (bot.isInsideZone(ZoneId.WATER)) return failed("water")
++                var point = route.points[index]
++                if (index < route.points.lastIndex && distance(bot.location(),point) <= 4 && abs(bot.z-point.z) < 200) {
++                    index++
++                    point = route.points[index]
++                    lastMoveAt = 0L
++                }
++                val now = System.currentTimeMillis()
++                watch.observe(index,distance(bot.location(),point),now)?.let { return failed(it) }
++                if (now-lastMoveAt >= 3000 || !bot.isMoving) {
++                    if (!RouteSafety.safeSegment(bot,bot.location(),point) ||
++                            !GeoEngine.getInstance().canMoveToTarget(bot.x,bot.y,bot.z,point.x,point.y,point.z))
++                        return failed("leg_changed")
++                    bot.moveTo(point.x,point.y,point.z)
++                    lastMoveAt = now
++                }
++                delay(1000)
+             }
+-            delay(CHECK_INTERVAL_MS)
++        } finally {
++            bot.stopMove(null)
+         }
+     }
+-
+-    private fun nextLeg(remaining: Double): Location {
+-        if (remaining <= LEG_LENGTH) return destination
+-        val ratio = LEG_LENGTH / remaining
+-        val x = bot.x + ((destination.x - bot.x) * ratio).toInt()
+-        val y = bot.y + ((destination.y - bot.y) * ratio).toInt()
+-        // A straight-line height is often under a floor or over a bridge; the ground under the point is reachable.
+-        val z = bot.z + ((destination.z - bot.z) * ratio).toInt()
+-        return Location(x, y, GeoEngine.getInstance().getHeight(x, y, z).toInt())
+-    }
+-
+-    /** A step to one side of the straight line, so the next leg starts from somewhere the pathfinder can solve. */
+-    private fun detour(): Location {
+-        val heading = atan2((destination.y - bot.y).toDouble(), (destination.x - bot.x).toDouble())
+-        val turn = Math.toRadians(Rnd.get(45, 120).toDouble()) * (if (Rnd.nextBoolean()) 1 else -1)
+-        val length = Rnd.get(DETOUR_MIN, DETOUR_MAX)
+-        val x = bot.x + (cos(heading + turn) * length).toInt()
+-        val y = bot.y + (sin(heading + turn) * length).toInt()
+-        return Location(x, y, GeoEngine.getInstance().getHeight(x, y, bot.z).toInt())
+-    }
+-
+-    companion object {
+-        private const val LEG_LENGTH = 2000.0
+-        private const val CHECKS_BEFORE_DETOUR = 2
+-        private const val MAX_DETOURS = 6
+-        private const val DETOUR_MIN = 300
+-        private const val DETOUR_MAX = 900
+-        private const val MIN_PROGRESS = 100
+-        private const val CHECK_INTERVAL_MS = 2000L
+-        private const val MAX_CHECKS_WITHOUT_PROGRESS = 15
+-    }
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/movement/RouteProgress.kt b/src/main/kotlin/dev/l2j/autobots/movement/RouteProgress.kt
+new file mode 100644
+index 0000000..660ba89
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/movement/RouteProgress.kt
+@@ -0,0 +1,21 @@
++package dev.l2j.autobots.movement
++
++/** Progress along waypoints, independent of the moving flag or distance to the final destination. */
++internal class RouteProgress(private val startedAt: Long, private val budgetMs: Long) {
++    private var waypoint = -1
++    private var best = Double.MAX_VALUE
++    private var progressedAt = startedAt
++
++    fun observe(index: Int, remaining: Double, now: Long): String? {
++        if (now - startedAt >= budgetMs) return "journey_timeout"
++        if (index > waypoint) {
++            waypoint = index
++            best = remaining
++            progressedAt = now
++        } else if (remaining < best - 16.0) {
++            best = remaining
++            progressedAt = now
++        }
++        return if (now - progressedAt >= 20_000L) "no_progress" else null
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index f3f86b4..a3a31e4 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -92,7 +92,9 @@ object OfflineFarmManager {
+                          val spotKey: Long? = null,
+                          /** A trainer trip already reached the ring around the trainer and walks to a standing point. */
+                          val finalApproach: Boolean = false,
+-                         val route: List<Location> = emptyList(),
++                         var route: List<Location> = emptyList(),
++                         val startedAt: Long = System.currentTimeMillis(),
++                         var progress: dev.l2j.autobots.movement.RouteProgress? = null,
+                          var routeIndex: Int = 0,
+                          var lastMoveAt: Long = 0L,
+                          /** Stuck detection: closest approach so far, checks without progress, sidesteps tried. */
+@@ -459,6 +461,27 @@ object OfflineFarmManager {
+                     startFarmLogged(player, "jumped on the road")
+                     continue
+                 }
++                if(travel.route.isEmpty()) {
++                    val target=Location(travel.targetX,travel.targetY,travel.targetZ)
++                    val maxWalk=kotlin.math.ceil(dev.l2j.autobots.utils.distance(player.location(),target)).toInt().coerceIn(20000,100000)
++                    val plan=dev.l2j.autobots.population.economy.NpcTravel.toPoint(player,player.location(),target,maxWalk)
++                    if(plan==null) {
++                        LOGGER.info("Offline farm: ${player.name} id=$id route failed reason=no_safe_path trip=${travel.trip}" +
++                                " to=${target.x},${target.y},${target.z} at=${player.x},${player.y},${player.z}")
++                        player.stopMove(null)
++                        traveling.remove(id,travel)
++                        onStuck(player,travel)
++                        continue
++                    }
++                    travel.route=plan.points
++                }
++                if(travel.progress==null) {
++                    val length=(listOf(player.location())+travel.route).zipWithNext().sumOf { dev.l2j.autobots.utils.distance(it.first,it.second) }
++                    travel.progress=dev.l2j.autobots.movement.RouteProgress(travel.startedAt,
++                            (length/player.moveSpeed.coerceAtLeast(30)*2000+15_000).toLong().coerceIn(30_000L,300_000L))
++                    LOGGER.info("Offline farm: ${player.name} id=$id route planned trip=${travel.trip}" +
++                            " to=${travel.targetX},${travel.targetY},${travel.targetZ} waypoints=${travel.route.size} length=${length.toInt()}")
++                }
+                 if (travel.trip == Trip.TO_TRAINER && !travel.finalApproach && travel.trainer != null &&
+                         distance(player.x, player.y, travel.targetX, travel.targetY) <= TRAINER_APPROACH_RADIUS) {
+                     // Phase two, up close: walk to a validated standing point next to the trainer
+@@ -485,7 +508,7 @@ object OfflineFarmManager {
+                 }
+                 if(travel.route.isNotEmpty() && travel.routeIndex<travel.route.lastIndex) {
+                     val point=travel.route[travel.routeIndex]
+-                    if(distance(player.x,player.y,point.x,point.y)<=80 && kotlin.math.abs(player.z-point.z)<200) {
++                    if(distance(player.x,player.y,point.x,point.y)<=4 && kotlin.math.abs(player.z-point.z)<200) {
+                         travel.routeIndex++
+                         val next=travel.route[travel.routeIndex]
+                         travel.bestDistance=Double.MAX_VALUE;travel.stuckChecks=0
+@@ -501,34 +524,18 @@ object OfflineFarmManager {
+                     onArrived(player, travel)
+                     continue
+                 }
+-                // A finished or lost leg (arrived mid-way, stun, a fight the movement survived): walk the next leg.
+-                val progressPoint=travel.route.getOrNull(travel.routeIndex)
+-                val remaining = distance(player.x, player.y, progressPoint?.x?:travel.targetX, progressPoint?.y?:travel.targetY)
+-                if (remaining < travel.bestDistance - MIN_PROGRESS) {
+-                    travel.bestDistance = remaining
+-                    travel.stuckChecks = 0
+-                    travel.detours = 0
+-                } else if (!player.isMoving) {
+-                    travel.stuckChecks++
++                val point=travel.route[travel.routeIndex]
++                travel.progress?.observe(travel.routeIndex,dev.l2j.autobots.utils.distance(player.location(),point),now)?.let { reason ->
++                    LOGGER.info("Offline farm: ${player.name} id=$id route failed reason=$reason trip=${travel.trip}" +
++                            " to=${travel.targetX},${travel.targetY},${travel.targetZ} at=${player.x},${player.y},${player.z}")
++                    player.stopMove(null)
++                    traveling.remove(id,travel)
++                    onStuck(player,travel)
+                 }
+-                if (travel.stuckChecks >= CHECKS_BEFORE_DETOUR && travel.detours < MAX_DETOURS) {
+-                    // The straight line leads into an obstacle: sidestep like a player feeling its way around a building.
+-                    travel.detours++
+-                    travel.stuckChecks = 0
+-                    travel.lastMoveAt = now
+-                    walkDetour(player, progressPoint?.x?:travel.targetX, progressPoint?.y?:travel.targetY)
+-                    continue
+-                }
+-                if (travel.stuckChecks >= MAX_STUCK_CHECKS) {
+-                    // No progress even with detours: the destination is unreachable on foot from here.
+-                    traveling.remove(id)
+-                    onStuck(player, travel)
+-                    continue
+-                }
+-                if (player.ai.desire.intention != IntentionType.MOVE_TO && now - travel.lastMoveAt > REISSUE_MOVE_MS) {
+-                    travel.lastMoveAt = now
+-                    val next=travel.route.getOrNull(travel.routeIndex)
+-                    walk(player,next?.x?:travel.targetX,next?.y?:travel.targetY,next?.z?:travel.targetZ)
++                if(traveling[id] !== travel) continue
++                if (now-travel.lastMoveAt>=REISSUE_MOVE_MS || !player.isMoving) {
++                    travel.lastMoveAt=now
++                    walk(player,point.x,point.y,point.z)
+                 }
+             } catch (e: Exception) {
+                 LOGGER.warning("Offline farm tick failed for $id: $e")
+@@ -542,8 +549,9 @@ object OfflineFarmManager {
+             try {
+                 val target = player.target?.name ?: "-"
+                 LOGGER.info("Offline farm status: ${player.name} id=${player.objectId} lv ${player.level} exp ${player.exp} sp ${player.sp}" +
+-                        " at ${player.x},${player.y} intention=${player.ai.desire.intention} target=$target" +
++                        " at ${player.x},${player.y},${player.z} intention=${player.ai.desire.intention} target=$target" +
+                         " traveling=${traveling.containsKey(id)} chores=${townJobs.containsKey(id)} life=${OfflineLife.owns(player)} autofarming=${AutofarmManager.isAutoFarming(player)} dead=${player.isDead}" +
++                        " route=${traveling[id]?.let { "${it.trip}:${it.routeIndex}/${it.route.size}->${it.targetX},${it.targetY},${it.targetZ}" } ?: "-"}" +
+                         " sitting=${player.isSitting} hp=${player.currentHp.toInt()}/${player.maxHp} mp=${player.currentMp.toInt()}/${player.maxMp}")
+             } catch (e: Exception) {
+                 LOGGER.warning("Offline farm status failed for ${player.name} id=${player.objectId}: $e")
+@@ -911,21 +919,15 @@ object OfflineFarmManager {
+      * The travel tick issues the next leg when the current one ends.
+      */
+     private fun walk(player: Player, x: Int, y: Int, z: Int) {
+-        if (player.isSitting) player.standUp()
+-        val remaining = distance(player.x, player.y, x, y)
+-        if (remaining <= LEG_LENGTH) {
+-            if (!dev.l2j.autobots.population.RouteSafety.safeSegment(player,Location(player.x,player.y,player.z),Location(x,y,z))) return
+-            player.moveTo(x, y, z)
+-            return
+-        }
+-        val ratio = LEG_LENGTH / remaining
+-        val legX = player.x + ((x - player.x) * ratio).toInt()
+-        val legY = player.y + ((y - player.y) * ratio).toInt()
+-        val legZ = player.z + ((z - player.z) * ratio).toInt()
+-        // A straight-line height is often under a floor or over a bridge; the ground under the point is reachable.
+-        val point=Location(legX,legY,GeoEngine.getInstance().getHeight(legX,legY,legZ).toInt())
+-        if (dev.l2j.autobots.population.RouteSafety.safeSegment(player,Location(player.x,player.y,player.z),point))
++        // The tick installs a checked route first; never issue a blind initial move to a distant goal.
++        val travel=traveling[player.objectId] ?: return
++        if(travel.route.isEmpty()) return
++        val point=travel.route[travel.routeIndex]
++        if(player.isSitting) player.standUp()
++        if(dev.l2j.autobots.population.RouteSafety.safeSegment(player,player.location(),point) &&
++                GeoEngine.getInstance().canMoveToTarget(player.x,player.y,player.z,point.x,point.y,point.z))
+             player.moveTo(point.x,point.y,point.z)
++        // If a previously planned link becomes invalid, the progress watchdog ends this trip.
+     }
+ 
+     /** A step to one side of the straight line, so the next leg starts from somewhere the pathfinder can solve. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+index adfc6b9..b6b6681 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+@@ -49,7 +49,10 @@ internal object NpcTravel {
+         val path=if(geo.canMoveToTarget(from.x,from.y,from.z,to.x,to.y,to.z)) listOf(to)
+             else geo.findPath(from.x,from.y,from.z,to.x,to.y,to.z,true)?.toList().orEmpty().let { if(it.isEmpty()) it else it+to }
+         if(path.isEmpty()) return null
+-        if((listOf(from)+path).zipWithNext().any { !RouteSafety.safeSegment(player,it.first,it.second) }) return null
++        if((listOf(from)+path).zipWithNext().any {
++                    !geo.canMoveToTarget(it.first.x,it.first.y,it.first.z,it.second.x,it.second.y,it.second.z) ||
++                    !RouteSafety.safeSegment(player,it.first,it.second)
++                }) return null
+         return path
+     }
+ 
+@@ -60,7 +63,7 @@ internal object NpcTravel {
+         queue.add(Node(0,0,from,emptyList(),0.0))
+         val step=if(maxDistance>20000) 2400 else 800
+         val limit=if(maxDistance>20000) 800 else 160
+-        val deadline=if(maxDistance>20000) System.nanoTime()+5_000_000_000L else Long.MAX_VALUE
++        val deadline=if(maxDistance>20000) System.nanoTime()+5_000_000_000L else System.nanoTime()+1_500_000_000L
+         val geo=GeoEngine.getInstance()
+         var expanded=0
+         while(queue.isNotEmpty() && expanded++<limit && System.nanoTime()<deadline) {

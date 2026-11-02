@@ -1,0 +1,41 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 4afb272..5395a90 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -369,10 +369,14 @@ object OfflineFarmManager {
+                 return
+             }
+             if(player.isInsideZone(ZoneId.TOWN)) {
+-                val distant=HuntingSpots.nearArrival(player,player.location(),excluded,100000,surfaceOnly=true).take(5).firstNotNullOfOrNull { candidate ->
+-                    HuntingSpots.huntAnchor(player,candidate,validateDirect=false)?.let { anchor ->
+-                        dev.l2j.autobots.population.economy.NpcTravel.toPoint(player,player.location(),anchor,100000)?.let { candidate to it }
+-                    }
++                val distant=HuntingSpots.nearArrival(player,player.location(),excluded,100000,surfaceOnly=true).firstNotNullOfOrNull { candidate ->
++                    val anchor=HuntingSpots.huntAnchor(player,candidate,validateDirect=false)
++                    val route=anchor?.let { dev.l2j.autobots.population.economy.NpcTravel.toPoint(player,player.location(),it,100000) }
++                    if(route==null) {
++                        excluded.add(candidate.key)
++                        LOGGER.info("Offline farm: ${player.name} id=${player.objectId} rejected hunt candidate=${candidate.key} reason=no_safe_path from=${player.x},${player.y},${player.z}")
++                        null
++                    } else candidate to route
+                 }
+                 if(distant!=null) {
+                     LOGGER.info("Offline farm: ${player.name} id=${player.objectId} cannot afford a local hunting ride; walks ${distant.second.length.toInt()} units to safe prey, ${distant.second.points.size} waypoints.")
+@@ -458,10 +462,14 @@ object OfflineFarmManager {
+                 }
+                 if(travel.progress==null) {
+                     val length=(listOf(player.location())+travel.route).zipWithNext().sumOf { dev.l2j.autobots.utils.distance(it.first,it.second) }
+-                    travel.progress=dev.l2j.autobots.movement.RouteProgress(travel.startedAt,
+-                            (length/player.moveSpeed.coerceAtLeast(30)*2000+15_000).toLong().coerceIn(30_000L,300_000L))
++                    // A stranded novice may have no affordable ride out of an unsuitable region.
++                    // This is one validated recovery walk, not repeated blind attempts. Keep the
++                    // 20s progress watchdog and calculate a finite budget from real path length.
++                    val maxBudget=if(travel.trip==Trip.TO_SPOT && travel.gkHopped && length>MAX_WALK_TO_SPOT) 900_000L else 300_000L
++                    val budget=(length/player.moveSpeed.coerceAtLeast(30)*2000+15_000).toLong().coerceIn(30_000L,maxBudget)
++                    travel.progress=dev.l2j.autobots.movement.RouteProgress(travel.startedAt,budget)
+                     LOGGER.info("Offline farm: ${player.name} id=$id route planned trip=${travel.trip}" +
+-                            " to=${travel.targetX},${travel.targetY},${travel.targetZ} waypoints=${travel.route.size} length=${length.toInt()}")
++                            " to=${travel.targetX},${travel.targetY},${travel.targetZ} waypoints=${travel.route.size} length=${length.toInt()} budgetSeconds=${budget/1000}")
+                 }
+                 if (travel.trip == Trip.TO_TRAINER && !travel.finalApproach && travel.trainer != null &&
+                         distance(player.x, player.y, travel.targetX, travel.targetY) <= TRAINER_APPROACH_RADIUS) {

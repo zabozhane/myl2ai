@@ -1,0 +1,187 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+index dcb0665..3f50a08 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+@@ -20,11 +20,21 @@ import kotlin.math.ceil
+ internal class WalkToSequence(override val bot: Player, private val destination: Location,
+                               private val arrivalRadius: Int, private val onStuck: () -> Unit) : Sequence {
+     override var cancellationToken: CancellationToken? = null
++    private var recoveryRoute: NpcTravel.Walk? = null
++    var failureReason: String? = null
++        private set
++
++    /** Only a prevalidated recovery route earns a longer, still finite journey budget. */
++    fun withRecoveryRoute(route: NpcTravel.Walk): WalkToSequence {
++        recoveryRoute=route
++        return this
++    }
+ 
+     override suspend fun definition() {
+         val started = System.currentTimeMillis()
+         fun arrived() = distance(bot.location(), destination) <= arrivalRadius && abs(bot.z-destination.z) < 200
+         fun failed(reason: String) {
++            failureReason=reason
+             bot.stopMove(null)
+             println("Autobots movement: ${bot.name} id=${bot.objectId} failed reason=$reason" +
+                     " to=${destination.x},${destination.y},${destination.z} at=${bot.x},${bot.y},${bot.z}" +
+@@ -36,9 +46,11 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+         if (bot.isInsideZone(ZoneId.WATER)) return failed("water")
+         if (bot.isSitting) { bot.standUp(); delay(2700) }
+         val maxWalk = ceil(distance(bot.location(),destination)).toInt().coerceIn(12000,100000)
+-        val route = NpcTravel.toPoint(bot,bot.location(),destination,maxWalk) ?: return failed("no_safe_path")
++        val route = recoveryRoute ?: NpcTravel.toPoint(bot,bot.location(),destination,maxWalk) ?: return failed("no_safe_path")
++        if(route.points.isEmpty()) return failed("empty_path")
++        val budgetLimit=if(recoveryRoute!=null) 900_000L else 300_000L
+         val watch = RouteProgress(started,(route.length/bot.moveSpeed.coerceAtLeast(30)*2000+15_000)
+-                .toLong().coerceIn(30_000L,300_000L))
++                .toLong().coerceIn(30_000L,budgetLimit))
+         println("Autobots movement: ${bot.name} id=${bot.objectId} planned to=${destination.x},${destination.y},${destination.z}" +
+                 " from=${bot.x},${bot.y},${bot.z} waypoints=${route.points.size} length=${route.length.toInt()}")
+         var index = 0
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
+index 971aaa0..811bb3d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
+@@ -12,9 +12,40 @@ import kotlinx.coroutines.delay
+ import net.sf.l2j.gameserver.data.xml.TeleportLocationData
+ import net.sf.l2j.gameserver.model.actor.Player
+ import net.sf.l2j.gameserver.model.location.TeleportLocation
++import net.sf.l2j.gameserver.model.location.Location
+ 
+ /** Leave an empty region through a real nearby gatekeeper and a fare that preserves supplies. */
+ internal object HuntRecovery {
++    data class WalkPlan(val spot: HuntingSpot,val anchor: Location,val origin: Location,val walk: NpcTravel.Walk)
++    private val walkingSearches=java.util.concurrent.Semaphore(2)
++
++    private fun checkedWalk(player: Player,spot: HuntingSpot,origin: Location): WalkPlan? {
++        val anchor=HuntingSpots.huntAnchor(player,spot,origin,validateDirect=false) ?: return null
++        val walk=NpcTravel.toPoint(player,origin,anchor,100000) ?: return null
++        if(walk.length/player.moveSpeed.coerceAtLeast(30)*2000+15_000>15*60_000) return null
++        return WalkPlan(spot,anchor,origin,walk)
++    }
++
++    /** A close goal may require a wide detour around a lake or mountain. */
++    fun walkTo(player: Player,spot: HuntingSpot): WalkPlan? {
++        if(!walkingSearches.tryAcquire()) return null
++        return try { checkedWalk(player,spot,player.location()) } finally { walkingSearches.release() }
++    }
++
++    /** A stranded hunter can walk farther once, rather than waiting forever in an empty region. */
++    fun walkPlan(player: Player,excluded: Set<Long>): WalkPlan? {
++        if(!walkingSearches.tryAcquire()) return null
++        try {
++            val origin=player.location()
++            val deadline=System.nanoTime()+8_000_000_000L
++            for(spot in HuntingSpots.nearArrival(player,origin,excluded,100000,surfaceOnly=true)) {
++                if(System.nanoTime()>=deadline) break
++                checkedWalk(player,spot,origin)?.let { return it }
++            }
++            return null
++        } finally { walkingSearches.release() }
++    }
++
+     data class Ride(val gatekeeper: net.sf.l2j.gameserver.model.actor.Npc,val exitId: Int,
+                     val exit: TeleportLocation,val spot: HuntingSpot,val walk: NpcTravel.Walk,var paid: Int=0)
+     fun plan(player: Player,excluded: Set<Long>): Ride? {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 045a587..c3b358a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -99,6 +99,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private var idleTicks = 0
+     private var gatekeeperFailed = false
+     private var nextSpotRetryAt = 0L
++    private var nextRecoveryRetryAt = 0L
++    private var recovery: dev.l2j.autobots.offlinelife.HuntRecovery.WalkPlan? = null
+ 
+     // Diagnostics: where hunters end up a floor below their spot (a geodata hole, a chase, a bad anchor).
+     private var lastX = 0
+@@ -518,7 +520,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+         val repeatTargets=quests.repeatTargets()
+         if(!bot.isInParty && repeatTargets.isNotEmpty() && target.npcIds().any { it in repeatTargets })
+             bot.questTargets=repeatTargets
+-        val isAway = distance(bot.location(), target.location) > SPOT_RADIUS
++        val huntAt=recovery?.takeIf { it.spot.key==target.key }?.anchor ?: target.location
++        val isAway = distance(bot.location(), huntAt) > SPOT_RADIUS
+         // A quester grabs the repeatable quest of this hunting ground on the way out of town.
+         if (inTown && quests.beforeLeavingTown(target)) return
+         if (inTown || (isAway && bot.target == null && !bot.isSitting)) {
+@@ -572,12 +575,15 @@ internal class LifeBehavior(private val bot: Autobot) {
+         val current = spot
+         val repeatSuitable=current!=null && repeatTargets.isNotEmpty() && current.npcIds().any { it in repeatTargets } &&
+                 !HuntingSpots.isDeadly(current.dangerLevel,bot.level)
+-        if (current != null && (HuntingSpots.isSuitable(current,level)||repeatSuitable) && RouteSafety.safeDestination(bot,current.location)) {
++        val recoverySuitable=current!=null && recovery?.spot?.key==current.key &&
++                current.monstersIn(HuntingSpots.targetLevels(bot))>0 && !HuntingSpots.isDeadly(current.dangerLevel,bot.level)
++        if (current != null && (HuntingSpots.isSuitable(current,level)||repeatSuitable||recoverySuitable) && RouteSafety.safeDestination(bot,current.location)) {
+             spotLevel = level
+             return current
+         }
+ 
+         current?.let { HuntingSpots.leave(it) }
++        recovery=null
+         val wanted = if (economy) Prospecting.wantedLoot(bot) else null
+         // A bot reaches its spot on foot or by a gatekeeper ride plus a walk: either way no more than
+         // MAX_TRAVEL_ON_FOOT of walking, or the way there is what kills it. A crowded close spot beats a far one.
+@@ -586,6 +592,15 @@ internal class LifeBehavior(private val bot: Autobot) {
+         val next = (if(repeatTargets.isNotEmpty()) HuntingSpots.choose(bot,repeatLevel,excludedSpots,wanted,MAX_TRAVEL_ON_FOOT,
+                 useExits=canRide,preferredNpcIds=repeatTargets) else null)
+                 ?: HuntingSpots.choose(bot, level, excludedSpots, wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide)
++                ?: if(now>=nextRecoveryRetryAt) {
++                    nextRecoveryRetryAt=now+60_000L
++                    dev.l2j.autobots.offlinelife.HuntRecovery.walkPlan(bot,excludedSpots)?.let {
++                        recovery=it
++                        println("Autobots movement: ${bot.name} id=${bot.objectId} recovery reason=no_local_hunt" +
++                                " to=${it.anchor.x},${it.anchor.y},${it.anchor.z} length=${it.walk.length.toInt()} waypoints=${it.walk.points.size}")
++                        it.spot
++                    }
++                } else null
+ 
+         if (next != null && wanted != null) EconomyLog.note(bot, "farming for ${if (wanted.spoil) "spoil" else "drops"} " +
+                 "${wanted.items.take(5).joinToString { ItemTable.getInstance().getTemplate(it)?.name ?: "$it" }} at ${next.location}")
+@@ -603,6 +618,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private fun dropSpot() {
+         spot?.let { HuntingSpots.leave(it) }
+         spot = null
++        recovery=null
+     }
+ 
+     private suspend fun travelTo(target: HuntingSpot, inTown: Boolean) {
+@@ -611,6 +627,15 @@ internal class LifeBehavior(private val bot: Autobot) {
+             return
+         }
+ 
++        val escape=recovery?.takeIf { it.spot.key==target.key }
++        if(escape!=null) {
++            val route=if(distance(bot.location(),escape.origin)<=200) escape.walk else
++                dev.l2j.autobots.population.economy.NpcTravel.toPoint(bot,bot.location(),escape.anchor,100000)
++            if(route==null) { abandon(target);return }
++            WalkToSequence(bot,escape.anchor,600) { abandon(target) }.withRecoveryRoute(route).execute()
++            return
++        }
++
+         val exit = if (inTown && !gatekeeperFailed) gatekeeperExitFor(target.location) else null
+         val sequence = if (exit != null) {
+             TravelByGatekeeperSequence(bot, exit) { gatekeeperFailed = true }
+@@ -618,7 +643,20 @@ internal class LifeBehavior(private val bot: Autobot) {
+             // A party walks together: one short leg at a time, the leader waits for the others in between.
+             WalkToSequence(bot, legToward(target.location), PARTY_LEG_ARRIVAL) { abandon(target) }
+         } else {
+-            WalkToSequence(bot, target.location, SPOT_RADIUS) { abandon(target) }
++            var failed=false
++            val walk=WalkToSequence(bot, target.location, SPOT_RADIUS) { failed=true }
++            walk.execute()
++            if(failed) {
++                val detour=if(walk.failureReason=="no_safe_path")
++                    dev.l2j.autobots.offlinelife.HuntRecovery.walkTo(bot,target) else null
++                if(detour!=null) {
++                    recovery=detour
++                    println("Autobots movement: ${bot.name} id=${bot.objectId} recovery reason=local_path_detour" +
++                            " to=${detour.anchor.x},${detour.anchor.y},${detour.anchor.z} length=${detour.walk.length.toInt()}")
++                    travelTo(target,bot.isInsideZone(ZoneId.TOWN))
++                } else abandon(target)
++            }
++            return
+         }
+         sequence.execute()
+         // A failed ride must not turn into a walk across the map: the spot was only reachable by the teleport.

@@ -27,6 +27,7 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git apply /patches/acis-382-trade.patch \
  && git apply /patches/acis-382-offlinefarm.patch \
  && git apply /patches/acis-382-loginflag.patch \
+ && git apply /patches/acis-382-town-landing.patch \
  && git -C /autobots apply /patches/l2autobots-fixes.patch \
  && git -C /autobots apply /patches/l2autobots-autofarm.patch \
  && git -C /autobots apply /patches/l2autobots-craft.patch \
@@ -57,7 +58,24 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git -C /autobots apply /patches/l2autobots-audit-chores.patch \
  && git -C /autobots apply /patches/l2autobots-audit-market.patch \
  && git -C /autobots apply /patches/l2autobots-offline-social.patch \
- && git -C /autobots apply /patches/l2autobots-hunt-pace.patch
+ && git -C /autobots apply /patches/l2autobots-hunt-pace.patch \
+ && git -C /autobots apply /patches/l2autobots-movement-retry.patch \
+ && git -C /autobots apply /patches/l2autobots-movement-paths.patch \
+ && git -C /autobots apply /patches/l2autobots-gatekeeper-routes.patch \
+ && git -C /autobots apply /patches/l2autobots-movement-status.patch \
+ && git -C /autobots apply /patches/l2autobots-hunt-search.patch \
+ && git -C /autobots apply /patches/l2autobots-town-policy.patch \
+ && git -C /autobots apply /patches/l2autobots-travel-budget.patch \
+ && git -C /autobots apply /patches/l2autobots-narrow-routes.patch \
+ && git -C /autobots apply /patches/l2autobots-stranded-walk.patch \
+ && git -C /autobots apply /patches/l2autobots-hunt-retry-progress.patch \
+ && git -C /autobots apply /patches/l2autobots-hunt-journey.patch \
+ && git -C /autobots apply /patches/l2autobots-timer-errors.patch \
+ && git -C /autobots apply /patches/l2autobots-offline-planning-behavior.patch \
+ && git -C /autobots apply /patches/l2autobots-town-walk.patch \
+ && git -C /autobots apply /patches/l2autobots-supply-budget.patch \
+ && git -C /autobots apply /patches/l2autobots-town-unstuck.patch \
+ && git -C /autobots apply /patches/l2autobots-npc-return-paths.patch
 
 # The Kotlin module is compiled against the aCis Java sources and dropped into aCis_gameserver/lib,
 # where the stock ant build picks it up for both compilation and the dist libs.

@@ -1,0 +1,132 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/movement/TownUnstuck.kt b/src/main/kotlin/dev/l2j/autobots/movement/TownUnstuck.kt
+new file mode 100644
+index 0000000..25c72ac
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/movement/TownUnstuck.kt
+@@ -0,0 +1,86 @@
++package dev.l2j.autobots.movement
++
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.extensions.useItem
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.isUnderAttack
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.delay
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.geoengine.GeoEngine
++import net.sf.l2j.gameserver.handler.usercommandhandlers.Escape
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.location.Location
++import java.util.Collections
++import java.util.WeakHashMap
++
++/** Confirm a sealed geodata pocket before using the same unstuck options as a player. */
++internal object TownUnstuck {
++    private val checkedUntil=Collections.synchronizedMap(WeakHashMap<Player,Long>())
++
++    fun needsRecovery(player: Player): Boolean {
++        if(!eligible(player)) return false
++        val now=System.currentTimeMillis()
++        if(now<(checkedUntil[player]?:0L)) return false
++        checkedUntil[player]=now+60_000
++        val trapped=isSealed(player)
++        if(trapped) checkedUntil[player]=now+5*60_000
++        return trapped
++    }
++
++    private fun eligible(player: Player)=player.isInsideZone(ZoneId.TOWN) && !player.isDead &&
++            !player.isCastingNow && !player.isTeleporting && !player.isUnderAttack() &&
++            !player.isInStoreMode && player.activeTradeList==null
++
++    /** No large search: uncertainty, timeout or reaching the surrounding street means no recovery. */
++    fun isSealed(player: Player): Boolean {
++        if(!eligible(player)) return false
++        val geo=GeoEngine.getInstance()
++        val origin=player.location()
++        val queue=java.util.ArrayDeque<Location>()
++        val seen=HashSet<Triple<Int,Int,Int>>()
++        queue.add(origin);seen.add(Triple(origin.x,origin.y,origin.z))
++        val deadline=System.nanoTime()+50_000_000L
++        while(queue.isNotEmpty()) {
++            if(seen.size>=2048 || System.nanoTime()>=deadline) return false
++            val from=queue.removeFirst()
++            for(dx in -1..1) for(dy in -1..1) {
++                if(dx==0 && dy==0) continue
++                val x=from.x+dx*16;val y=from.y+dy*16
++                val z=geo.getHeight(x,y,from.z).toInt()
++                val key=Triple(x,y,z)
++                if(key in seen || !geo.canMoveToTarget(from.x,from.y,from.z,x,y,z)) continue
++                val at=Location(x,y,z)
++                if(distance(origin,at)>=384) return false
++                seen.add(key);queue.add(at)
++            }
++        }
++        return true
++    }
++
++    suspend fun recover(player: Player,active: () -> Boolean): Boolean {
++        if(!active() || !eligible(player) || !isSealed(player)) return false
++        val origin=player.location()
++        if(player.isSitting) { player.standUp();delay(2700) }
++        if(!active() || !eligible(player)) return false
++        val scroll=Gear.count(player,Gear.SCROLL_OF_ESCAPE)>0
++        println("Autobots movement: ${player.name} id=${player.objectId} recovery reason=sealed_town_cell method=${if(scroll) "own_scroll" else "unstuck_5min"} from=${origin.x},${origin.y},${origin.z}")
++        if(scroll) player.useItem(Gear.SCROLL_OF_ESCAPE)
++        else {
++            // Escape's GM shortcut must never be used by an automated character.
++            if(player.isGM || !Escape().useUserCommand(52,player)) return false
++        }
++        val until=System.currentTimeMillis()+if(scroll) 35_000 else 315_000
++        while(System.currentTimeMillis()<until) {
++            delay(500)
++            if(!active() || player.isDead) return false
++            if(!player.isCastingNow && !player.isTeleporting && distance(origin,player.location())>32) {
++                val recovered=player.isInsideZone(ZoneId.TOWN) && !isSealed(player)
++                println("Autobots movement: ${player.name} id=${player.objectId} recovery reason=sealed_town_cell completed=$recovered at=${player.x},${player.y},${player.z}")
++                return recovered
++            }
++            if(System.currentTimeMillis()>until-(if(scroll) 32_000 else 312_000) && !player.isCastingNow && !player.isTeleporting) return false
++        }
++        return false
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 6d55946..1ab013a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -322,6 +322,17 @@ object OfflineFarmManager {
+         if (!isActive(player) || player.isDead) return
+         val now = System.currentTimeMillis()
+         if (now < (retryAfter[player.objectId] ?: 0L)) return
++        if(dev.l2j.autobots.movement.TownUnstuck.needsRecovery(player)) {
++            townAction(player) {
++                if(dev.l2j.autobots.movement.TownUnstuck.recover(player) { isActive(player) }) {
++                    unreachableSpots.remove(player.objectId)
++                    failedRoundAt.remove(player.objectId)
++                    huntJourneys.remove(player.objectId)
++                    pendingHunt.add(player.objectId)
++                } else retryAfter[player.objectId]=System.currentTimeMillis()+SPOT_RETRY_MS
++            }
++            return
++        }
+         if(huntDeadline(player,now)==0L) return
+         // Safer than the population bots: the spot's monsters match a slightly lower level.
+         val level = (player.level - 2).coerceAtLeast(1)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index b758d66..72b4eaf 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -484,6 +484,13 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     private suspend fun hunt() {
+         val inTown = bot.isInsideZone(ZoneId.TOWN)
++        if(inTown && dev.l2j.autobots.movement.TownUnstuck.needsRecovery(bot)) {
++            if(dev.l2j.autobots.movement.TownUnstuck.recover(bot) { bot.isOnline && !bot.isDead }) {
++                badSpots.clear()
++                recovery=null
++            }
++            return
++        }
+         if (inTown && economy && !tripDoneInTown) {
+             visitShops()
+             return

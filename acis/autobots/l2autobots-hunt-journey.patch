@@ -1,0 +1,260 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+index 3f50a08..5f80e75 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+@@ -21,6 +21,7 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+                               private val arrivalRadius: Int, private val onStuck: () -> Unit) : Sequence {
+     override var cancellationToken: CancellationToken? = null
+     private var recoveryRoute: NpcTravel.Walk? = null
++    private var huntDeadline=Long.MAX_VALUE
+     var failureReason: String? = null
+         private set
+ 
+@@ -30,6 +31,11 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+         return this
+     }
+ 
++    fun withHuntDeadline(deadline: Long): WalkToSequence {
++        huntDeadline=deadline
++        return this
++    }
++
+     override suspend fun definition() {
+         val started = System.currentTimeMillis()
+         fun arrived() = distance(bot.location(), destination) <= arrivalRadius && abs(bot.z-destination.z) < 200
+@@ -43,14 +49,16 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+         }
+         if (bot.isDead || bot.isUnderAttack()) return
+         if (arrived()) return
++        if(started>=huntDeadline) return failed("hunt_chain_timeout")
+         if (bot.isInsideZone(ZoneId.WATER)) return failed("water")
+         if (bot.isSitting) { bot.standUp(); delay(2700) }
+         val maxWalk = ceil(distance(bot.location(),destination)).toInt().coerceIn(12000,100000)
+         val route = recoveryRoute ?: NpcTravel.toPoint(bot,bot.location(),destination,maxWalk) ?: return failed("no_safe_path")
+         if(route.points.isEmpty()) return failed("empty_path")
+         val budgetLimit=if(recoveryRoute!=null) 900_000L else 300_000L
+-        val watch = RouteProgress(started,(route.length/bot.moveSpeed.coerceAtLeast(30)*2000+15_000)
+-                .toLong().coerceIn(30_000L,budgetLimit))
++        val budget=minOf((route.length/bot.moveSpeed.coerceAtLeast(30)*2000+15_000)
++                .toLong().coerceIn(30_000L,budgetLimit),huntDeadline-started)
++        val watch = RouteProgress(started,budget)
+         println("Autobots movement: ${bot.name} id=${bot.objectId} planned to=${destination.x},${destination.y},${destination.z}" +
+                 " from=${bot.x},${bot.y},${bot.z} waypoints=${route.points.size} length=${route.length.toInt()}")
+         var index = 0
+diff --git a/src/main/kotlin/dev/l2j/autobots/movement/HuntJourney.kt b/src/main/kotlin/dev/l2j/autobots/movement/HuntJourney.kt
+new file mode 100644
+index 0000000..8ff3bed
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/movement/HuntJourney.kt
+@@ -0,0 +1,27 @@
++package dev.l2j.autobots.movement
++
++/** One finite attempt to resume productive hunting, across changing targets and travel legs. */
++internal class HuntJourney(private val budgetMs: Long=900_000L,private val cooldownMs: Long=60_000L) {
++    private var startedAt=-1L
++    @Volatile var retryAt=0L
++        private set
++
++    init { require(budgetMs>0 && cooldownMs>0) }
++
++    /** Absolute deadline; zero means try local combat or wait, rather than start another journey. */
++    @Synchronized fun deadline(now: Long): Long {
++        if(retryAt>0) {
++            if(now<retryAt) return 0L
++            reset()
++        }
++        if(startedAt<0) startedAt=now
++        if(now-startedAt>=budgetMs) {
++            retryAt=now+cooldownMs
++            return 0L
++        }
++        return startedAt+budgetMs
++    }
++
++    /** Real XP or a completed change of purpose (town chores/new session), never mere activation. */
++    @Synchronized fun reset() { startedAt=-1L;retryAt=0L }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 104a5e1..6ebb0b3 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -118,6 +118,7 @@ object OfflineFarmManager {
+     private val retryAfter = ConcurrentHashMap<Int, Long>()
+     private val recoveredAt = ConcurrentHashMap<Int,Long>()
+     private val failedRoundAt = ConcurrentHashMap<Int, Long>()
++    private val huntJourneys=ConcurrentHashMap<Int,dev.l2j.autobots.movement.HuntJourney>()
+     private val questsLoaded = ConcurrentHashMap.newKeySet<Int>()
+ 
+     /** Throttle for the "any lessons to learn?" scan of farming characters. */
+@@ -248,6 +249,7 @@ object OfflineFarmManager {
+             pendingHunt.remove(id)
+             retryAfter.remove(id)
+             failedRoundAt.remove(id)
++            huntJourneys.remove(id)
+             recoveredAt.remove(id)
+             traveling.remove(id)
+             unreachableSpots.remove(id)
+@@ -318,6 +320,7 @@ object OfflineFarmManager {
+         if (!isActive(player) || player.isDead) return
+         val now = System.currentTimeMillis()
+         if (now < (retryAfter[player.objectId] ?: 0L)) return
++        if(huntDeadline(player,now)==0L) return
+         // Safer than the population bots: the spot's monsters match a slightly lower level.
+         val level = (player.level - 2).coerceAtLeast(1)
+         // Auto hunt refuses to fight in a town or a peace zone; such spots are no targets either.
+@@ -408,6 +411,7 @@ object OfflineFarmManager {
+ 
+     private fun startSpotTrip(player: Player, spot: HuntingSpot,route: List<Location> = emptyList(),noMoreHops: Boolean=false) {
+         if (!isActive(player) || player.isDead) return
++        if(huntDeadline(player,System.currentTimeMillis())==0L) return
+         val anchor=route.lastOrNull() ?: HuntingSpots.huntAnchor(player,spot) ?: return
+         traveling[player.objectId] = Travel(Trip.TO_SPOT, anchor.x, anchor.y, anchor.z,
+                 spotKey = spot.key, route=route,gkHopped=noMoreHops,lastMoveAt = System.currentTimeMillis())
+@@ -420,6 +424,17 @@ object OfflineFarmManager {
+             ZoneManager.getInstance().getZone(x, y, z, TownZone::class.java) != null ||
+                     ZoneManager.getInstance().getZone(x, y, z, PeaceZone::class.java) != null
+ 
++    private fun huntDeadline(player: Player,now: Long): Long {
++        val budget=huntJourneys.getOrPut(player.objectId){dev.l2j.autobots.movement.HuntJourney()}
++        val deadline=budget.deadline(now)
++        if(deadline==0L) {
++            if(retryAfter[player.objectId]!=budget.retryAt)
++                LOGGER.info("Offline farm: ${player.name} id=${player.objectId} waits reason=hunt_chain_timeout retryAt=${budget.retryAt} at=${player.x},${player.y},${player.z}.")
++            retryAfter[player.objectId]=budget.retryAt
++        }
++        return deadline
++    }
++
+     private fun tick() {
+         if (serverShuttingDown || farming.isEmpty()) return
+         val now = System.currentTimeMillis()
+@@ -448,6 +463,14 @@ object OfflineFarmManager {
+                     startFarmLogged(player, "jumped on the road")
+                     continue
+                 }
++                val huntDeadline=if(travel.trip==Trip.TO_SPOT && huntJourneys.containsKey(id)) huntDeadline(player,now) else Long.MAX_VALUE
++                if(huntDeadline==0L) {
++                    traveling.remove(id,travel)
++                    player.stopMove(null)
++                    startFarmLogged(player,"hunt journey cooldown")
++                    retryAfter[id]=huntJourneys[id]?.retryAt ?: now+SPOT_RETRY_MS
++                    continue
++                }
+                 if(travel.route.isEmpty()) {
+                     val target=Location(travel.targetX,travel.targetY,travel.targetZ)
+                     val maxWalk=kotlin.math.ceil(dev.l2j.autobots.utils.distance(player.location(),target)).toInt().coerceIn(20000,100000)
+@@ -468,7 +491,7 @@ object OfflineFarmManager {
+                     // This is one validated recovery walk, not repeated blind attempts. Keep the
+                     // 20s progress watchdog and calculate a finite budget from real path length.
+                     val maxBudget=if((travel.trip==Trip.TO_SPOT && travel.gkHopped || travel.trip==Trip.BACK_TO_SPOT) && length>MAX_WALK_TO_SPOT) 900_000L else 300_000L
+-                    val budget=(length/player.moveSpeed.coerceAtLeast(30)*2000+15_000).toLong().coerceIn(30_000L,maxBudget)
++                    val budget=minOf((length/player.moveSpeed.coerceAtLeast(30)*2000+15_000).toLong().coerceIn(30_000L,maxBudget),huntDeadline-travel.startedAt)
+                     travel.progress=dev.l2j.autobots.movement.RouteProgress(travel.startedAt,budget)
+                     LOGGER.info("Offline farm: ${player.name} id=$id route planned trip=${travel.trip}" +
+                             " to=${travel.targetX},${travel.targetY},${travel.targetZ} waypoints=${travel.route.size} length=${length.toInt()} budgetSeconds=${budget/1000}")
+@@ -670,6 +693,7 @@ object OfflineFarmManager {
+             val previous=huntProgress[id]
+             if (previous==null || previous.first!=player.exp.toLong()) {
+                 if(previous!=null && player.exp.toLong()>previous.first) {
++                    huntJourneys.remove(id)
+                     productiveSince.putIfAbsent(id,now)
+                     // Enabling auto hunt is not a successful hunt: only real progress
+                     // makes failed routes from the previous search round worth retrying.
+@@ -785,6 +809,7 @@ object OfflineFarmManager {
+     private suspend fun choresThenBack(player: Player, spot: Location?) {
+         try {
+             if (!isActive(player) || player.isDead) return
++            huntJourneys.remove(player.objectId)
+             AutofarmManager.stopFarm(player, "town errands")
+             lastTownTripAt[player.objectId] = System.currentTimeMillis()
+             AutofarmManager.prepareOfflineBehavior(player)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index c3b358a..b758d66 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -101,6 +101,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private var nextSpotRetryAt = 0L
+     private var nextRecoveryRetryAt = 0L
+     private var recovery: dev.l2j.autobots.offlinelife.HuntRecovery.WalkPlan? = null
++    private val huntJourney=dev.l2j.autobots.movement.HuntJourney()
++    private var reportedJourneyRetry=0L
+ 
+     // Diagnostics: where hunters end up a floor below their spot (a geodata hole, a chase, a bad anchor).
+     private var lastX = 0
+@@ -139,6 +141,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     val activity get() = session.activity
+ 
+     suspend fun onUpdate() {
++        if(bot.exp>lastHuntExp) huntJourney.reset()
+         if(bot.exp>lastHuntExp && !bot.isInsideZone(ZoneId.TOWN) && session.activity==SessionPlan.Activity.Hunt && productiveSince==0L)
+             productiveSince=System.currentTimeMillis()
+         lastHuntExp=bot.exp
+@@ -190,6 +193,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         val previous = session.activity
+         val context = context().let { if (canTrade == null) it else SessionPlan.Context(it.hasGoal, canTrade, it.isCrafter) }
+         val next = session.next(context, reason)
++        if(previous!=next && next==SessionPlan.Activity.Hunt) huntJourney.reset()
+         if (next != SessionPlan.Activity.Trade) StoreKeeper.close(bot)
+         if ((previous == SessionPlan.Activity.Afk || previous == SessionPlan.Activity.Home) && bot.isSitting) bot.standUp()
+         afkRetreats = 0
+@@ -510,6 +514,10 @@ internal class LifeBehavior(private val bot: Autobot) {
+             }
+         }
+ 
++        if(huntDeadline()==0L) {
++            if(!inTown) bot.combatBehavior.onUpdate()
++            return
++        }
+         val target = currentSpot()
+         if (target == null) {
+             if (!inTown) bot.combatBehavior.onUpdate()
+@@ -546,6 +554,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         TownTrip(bot, cautious = fitness.isSaving).execute()
+         tripDoneInTown = true
+         lastTripAt = System.currentTimeMillis()
++        huntJourney.reset()
+         productiveSince=0L
+         lastHuntExp=bot.exp
+         if (!bot.isInParty) session.onTownTrip(context())
+@@ -621,7 +630,19 @@ internal class LifeBehavior(private val bot: Autobot) {
+         recovery=null
+     }
+ 
++    private fun huntDeadline(): Long {
++        val deadline=huntJourney.deadline(System.currentTimeMillis())
++        if(deadline==0L && reportedJourneyRetry!=huntJourney.retryAt) {
++            reportedJourneyRetry=huntJourney.retryAt
++            println("Autobots movement: ${bot.name} id=${bot.objectId} waiting reason=hunt_chain_timeout" +
++                    " retryAt=${huntJourney.retryAt} at=${bot.x},${bot.y},${bot.z}")
++        }
++        return deadline
++    }
++
+     private suspend fun travelTo(target: HuntingSpot, inTown: Boolean) {
++        val deadline=huntDeadline()
++        if(deadline==0L) return
+         if (bot.isSitting) {
+             bot.standUp()
+             return
+@@ -632,7 +653,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+             val route=if(distance(bot.location(),escape.origin)<=200) escape.walk else
+                 dev.l2j.autobots.population.economy.NpcTravel.toPoint(bot,bot.location(),escape.anchor,100000)
+             if(route==null) { abandon(target);return }
+-            WalkToSequence(bot,escape.anchor,600) { abandon(target) }.withRecoveryRoute(route).execute()
++            WalkToSequence(bot,escape.anchor,600) { abandon(target) }.withRecoveryRoute(route).withHuntDeadline(deadline).execute()
+             return
+         }
+ 
+@@ -641,10 +662,10 @@ internal class LifeBehavior(private val bot: Autobot) {
+             TravelByGatekeeperSequence(bot, exit) { gatekeeperFailed = true }
+         } else if (bot.isInParty && bot.party.leader === bot) {
+             // A party walks together: one short leg at a time, the leader waits for the others in between.
+-            WalkToSequence(bot, legToward(target.location), PARTY_LEG_ARRIVAL) { abandon(target) }
++            WalkToSequence(bot, legToward(target.location), PARTY_LEG_ARRIVAL) { abandon(target) }.withHuntDeadline(deadline)
+         } else {
+             var failed=false
+-            val walk=WalkToSequence(bot, target.location, SPOT_RADIUS) { failed=true }
++            val walk=WalkToSequence(bot, target.location, SPOT_RADIUS) { failed=true }.withHuntDeadline(deadline)
+             walk.execute()
+             if(failed) {
+                 val detour=if(walk.failureReason=="no_safe_path")

@@ -1,0 +1,39 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index c1aba15..104a5e1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -669,7 +669,15 @@ object OfflineFarmManager {
+                     !AutofarmManager.isAutoFarming(player)) { huntProgress.remove(id); continue }
+             val previous=huntProgress[id]
+             if (previous==null || previous.first!=player.exp.toLong()) {
+-                if(previous!=null && player.exp.toLong()>previous.first) productiveSince.putIfAbsent(id,now)
++                if(previous!=null && player.exp.toLong()>previous.first) {
++                    productiveSince.putIfAbsent(id,now)
++                    // Enabling auto hunt is not a successful hunt: only real progress
++                    // makes failed routes from the previous search round worth retrying.
++                    val forgotten=unreachableSpots.remove(id)?.size ?: 0
++                    val failedRound=failedRoundAt.remove(id)
++                    if(forgotten>0 || failedRound!=null)
++                        LOGGER.info("Offline farm: ${player.name} id=$id confirms hunting progress expGain=${player.exp.toLong()-previous.first}; clears $forgotten failed routes.")
++                }
+                 huntProgress[id]=player.exp.toLong() to now
+                 continue
+             }
+@@ -677,7 +685,7 @@ object OfflineFarmManager {
+                     player.isCastingNow || player.isAttackingNow || player.isSitting) continue
+             huntedSpot[id]?.let { key -> emptySpots.getOrPut(id){mutableMapOf()}[key]=now }
+             huntProgress.remove(id)
+-            AutofarmManager.stopFarm(player,"no prey or experience for three minutes")
++            AutofarmManager.stopFarm(player,"no prey or experience for 45 seconds")
+             LOGGER.info("Offline farm: ${player.name} id=${player.objectId} left an unproductive hunting anchor.")
+             goHunting(player)
+         }
+@@ -956,8 +964,6 @@ object OfflineFarmManager {
+         if (!isActive(player) || player.isDead) return
+         AutofarmManager.startFarm(player)
+         if (AutofarmManager.isAutoFarming(player)) {
+-            unreachableSpots.remove(player.objectId)
+-            failedRoundAt.remove(player.objectId)
+             retryAfter.remove(player.objectId)
+         } else {
+             retryAfter[player.objectId] = System.currentTimeMillis() + SPOT_RETRY_MS
