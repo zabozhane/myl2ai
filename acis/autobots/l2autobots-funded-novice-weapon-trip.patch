@@ -1,0 +1,250 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
+index 950eb06..530f41d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
+@@ -53,15 +53,15 @@ internal object HuntRecovery {
+ 
+     data class Ride(val gatekeeper: net.sf.l2j.gameserver.model.actor.Npc,val exitId: Int,
+                     val exit: TeleportLocation,val spot: HuntingSpot,val walk: NpcTravel.Walk,var paid: Int=0)
+-    fun plan(player: Player,excluded: Set<Long>): Ride? {
+-        return dev.l2j.autobots.population.economy.GatekeeperTravel.offers(player)
+-                .map { it.id to it.exit }
+-                .mapNotNull { (id,exit) ->
+-                    HuntingSpots.nearArrival(player,exit,excluded).firstNotNullOfOrNull { spot ->
+-                        HuntingSpots.huntAnchor(player,spot,exit,validateDirect=false)?.let { anchor ->
+-                            NpcTravel.toPoint(player,exit,anchor,8000)?.let {
+-                                val gk=player.findClosestGatekeeper() ?: return@let null
+-                                Ride(gk,id,exit,spot,it)
++    fun plan(player: Player,excluded: Set<Long>): Ride? = planFrom(player,player.location(),excluded)
++
++    fun planFrom(player: Player,origin: Location,excluded: Set<Long>): Ride? {
++        return dev.l2j.autobots.population.economy.GatekeeperTravel.offersFrom(player,origin)
++                .mapNotNull { offer ->
++                    HuntingSpots.nearArrival(player,offer.exit,excluded).firstNotNullOfOrNull { spot ->
++                        HuntingSpots.huntAnchor(player,spot,offer.exit,validateDirect=false)?.let { anchor ->
++                            NpcTravel.toPoint(player,offer.exit,anchor,8000)?.let {
++                                Ride(offer.gatekeeper,offer.id,offer.exit,spot,it)
+                             }
+                         }
+                     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+index 682c9fd..f9e86fa 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+@@ -1,6 +1,7 @@
+ package dev.l2j.autobots.offlinelife
+ 
+ import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.extensions.location
+ import dev.l2j.autobots.autofarm.AutofarmManager
+ import dev.l2j.autobots.population.economy.Gear
+ import dev.l2j.autobots.population.trade.Loans
+@@ -30,7 +31,10 @@ internal object OfflineEquipment {
+     }
+ 
+     /** One conservative weapon goal, paid for only from the caller's money after supplies and travel. */
+-    fun weaponPurchase(player: Player,budget: Int): Pair<dev.l2j.autobots.population.economy.Shop,net.sf.l2j.gameserver.model.buylist.Product>? {
++    fun weaponPurchase(player: Player,budget: Int): Pair<dev.l2j.autobots.population.economy.Shop,net.sf.l2j.gameserver.model.buylist.Product>? =
++            weaponPurchaseAt(player,budget,player.location())
++
++    fun weaponPurchaseAt(player: Player,budget: Int,origin: net.sf.l2j.gameserver.model.location.Location): Pair<dev.l2j.autobots.population.economy.Shop,net.sf.l2j.gameserver.model.buylist.Product>? {
+         val current=player.inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND)
+         if(current!=null && (current.enchantLevel>0 || current.isAugmented)) return null
+         val wish=Gear.wishes(player).firstOrNull { it.slot==Inventory.PAPERDOLL_RHAND } ?: return null
+@@ -39,7 +43,7 @@ internal object OfflineEquipment {
+         if(!eligible(player,candidate) || !fits(player,candidate)) return null
+         if(current!=null && (candidate.itemType!=current.itemType || candidate.item.bodyPart!=current.item.bodyPart ||
+                         score(player,candidate)<=score(player,current)*1.2)) return null
+-        val offer=dev.l2j.autobots.population.economy.Market.findProduct(player,wish.itemId) ?: return null
++        val offer=dev.l2j.autobots.population.economy.Market.findProductAt(wish.itemId,origin) ?: return null
+         val price=dev.l2j.autobots.population.economy.Market.priceWithTax(offer.first,offer.second)
+         return offer.takeIf { price>0 && price<=budget }
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index cdd3119..05b88c7 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -304,6 +304,7 @@ object OfflineFarmManager {
+             AutofarmManager.quiesce(player)
+             townJobs.remove(id)?.let { kotlinx.coroutines.runBlocking { it.cancel();it.join() } }
+             equipmentCheckedAt.remove(id)
++            OfflineWeaponTrip.forget(id)
+             townCheckedAt.remove(id)
+             townRetryAfter.remove(id)
+             lastTownTripAt.remove(id)
+@@ -734,9 +735,18 @@ object OfflineFarmManager {
+                 val routine = now - (lastTownTripAt[id] ?: now) >= ROUTINE_TRIP_MS && OfflineEquipment.surplus(player).isNotEmpty()
+                 val lowHealing=dev.l2j.autobots.population.economy.Healing.needsRestockTrip(player)
+                 val productiveMs=now-(productiveSince[id]?:now)
+-                val reason=dev.l2j.autobots.movement.TownPolicy.reason(Errands.loadPercent(player)>=45,lowHealing,
+-                        ready,routine,false,false,false,false,now-(lastTownTripAt[id]?:now),productiveMs)
+-                if(reason!=null) startTownTrip(player,reason=reason)
++                val sinceTown=now-(lastTownTripAt[id]?:now)
++                val heavy=Errands.loadPercent(player)>=45
++                val gearWindow=dev.l2j.autobots.movement.TownPolicy.reason(false,false,false,false,false,true,false,false,sinceTown,productiveMs)=="equipment"
++                val upgrade=if(!heavy && !lowHealing && !ready && !routine && gearWindow) OfflineWeaponTrip.ready(player) else null
++                val reason=dev.l2j.autobots.movement.TownPolicy.reason(heavy,lowHealing,
++                        ready,routine,false,upgrade!=null,false,false,sinceTown,productiveMs)
++                if(reason!=null) {
++                    if(reason=="equipment" && upgrade!=null) LOGGER.info("Offline farm: ${player.name} id=$id plans weapon=${upgrade.product.item.name}" +
++                            " price=${dev.l2j.autobots.population.economy.Market.priceWithTax(upgrade.shop,upgrade.product)} supplies=${upgrade.supplies}" +
++                            " reserve=${Errands.reserve(player)} fare=${upgrade.fare} returnWalk=${upgrade.walk.length.toInt()}")
++                    startTownTrip(player,reason=reason)
++                }
+                 else if(ready) LOGGER.info("Offline farm: ${player.name} id=$id defers town reason=quest_ready productiveSeconds=${productiveMs/1000}")
+             } catch (e: Exception) {
+                 LOGGER.warning("Offline farm town check failed for ${player.name} id=${player.objectId}: $e")
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineWeaponTrip.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineWeaponTrip.kt
+new file mode 100644
+index 0000000..7b50127
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineWeaponTrip.kt
+@@ -0,0 +1,107 @@
++package dev.l2j.autobots.offlinelife
++
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.population.HuntingSpots
++import dev.l2j.autobots.population.economy.*
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.launch
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.buylist.Product
++import net.sf.l2j.gameserver.model.itemcontainer.Inventory
++import net.sf.l2j.gameserver.model.location.Location
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.Semaphore
++import java.util.logging.Logger
++
++/** A funded optional errand is prepared off the farm tick, while the character keeps hunting. */
++internal object OfflineWeaponTrip {
++    data class Plan(val owner: Player,val origin: Location,val home: Location,val level: Int,val weapon: Int,
++                    val shop: Shop,val product: Product,val supplies: Long,val fare: Int,val walk: NpcTravel.Walk,
++                    val createdAt: Long=System.currentTimeMillis())
++    private val plans=ConcurrentHashMap<Int,Plan>()
++    private val retryAt=ConcurrentHashMap<Int,Long>()
++    private val searches=Semaphore(1)
++    private val log=Logger.getLogger(OfflineWeaponTrip::class.java.name)
++
++    fun forget(id: Int) { plans.remove(id);retryAt.remove(id) }
++
++    fun ready(player: Player): Plan? {
++        val now=System.currentTimeMillis()
++        plans.remove(player.objectId)?.let { plan ->
++            if(plan.owner===player && now-plan.createdAt<60_000 && plan.level==player.level &&
++                    plan.weapon==(player.inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND)?.objectId?:0) &&
++                    distance(plan.origin,player.location())<=500) {
++                val costs=supplyCost(player,plan.home)
++                if(costs!=null) {
++                    val budget=budget(player,costs,plan.fare)
++                    val offer=OfflineEquipment.weaponPurchaseAt(player,budget,plan.home)
++                    if(offer!=null && offer.first.merchant===plan.shop.merchant && offer.second.itemId==plan.product.itemId) return plan.copy(supplies=costs)
++                }
++            }
++        }
++        if(now<(retryAt[player.objectId]?:0L) || !searches.tryAcquire()) return null
++        val request=now+60_000
++        retryAt[player.objectId]=request
++        CoScopes.generalScope.launch {
++            try {
++                project(player)?.let {
++                    if(OfflineFarmManager.isActive(player) && retryAt[player.objectId]==request) plans[player.objectId]=it
++                }
++            } catch(e: Exception) {
++                log.warning("Offline weapon planning failed for ${player.name} id=${player.objectId}: $e")
++            } finally { searches.release() }
++        }
++        return null
++    }
++
++    private fun budget(player: Player,costs: Long,fare: Int): Int =
++            (player.adena.toLong()-Errands.reserve(player)-costs-fare.coerceAtLeast(0)).coerceIn(0L,Int.MAX_VALUE.toLong()).toInt()
++
++    /** The normal supplies bought after the outward trip, including the scroll it consumes. */
++    private fun supplyCost(player: Player,home: Location): Long? {
++        val healing=Healing.count(player)
++        val heals=if(healing<3) {
++            val price=Gear.HEALING_POTIONS.mapNotNull { Market.findProductAt(it,home) }
++                    .map { Market.priceWithTax(it.first,it.second) }.filter { it>0 }.minOrNull() ?: return null
++            (10-healing.coerceAtLeast(0)).toLong()*price
++        } else 0L
++        val escapes=(Gear.count(player,Gear.SCROLL_OF_ESCAPE)-1).coerceAtLeast(0)
++        val scrolls=if(escapes<1) {
++            val offer=Market.findProductAt(Gear.SCROLL_OF_ESCAPE,home) ?: return null
++            val price=Market.priceWithTax(offer.first,offer.second)
++            if(price<=0) return null
++            price.toLong()*if(player.level<20) 1 else 2
++        } else 0L
++        val arrows=if(Gear.isArcher(player) && Gear.count(player,Gear.arrowId(player))<500) {
++            val offer=Market.findProductAt(Gear.arrowId(player),home) ?: return null
++            (1500-Gear.count(player,Gear.arrowId(player))).coerceAtLeast(0).toLong()*Market.priceWithTax(offer.first,offer.second)
++        } else 0L
++        val shots=if(Gear.canBuyShots(player) && Gear.count(player,Gear.shotId(player))<50) {
++            val offer=Market.findProductAt(Gear.shotId(player),home) ?: return null
++            (200-Gear.count(player,Gear.shotId(player))).coerceAtLeast(0).toLong()*Market.priceWithTax(offer.first,offer.second)
++        } else 0L
++        return heals+scrolls+arrows+shots
++    }
++
++    /** Cheap affordability first; a real NPC approach and a finite walking return must then be possible. */
++    internal fun project(player: Player): Plan? {
++        // The first dedicated gear errand covers novice weapons. Graded ammo changes remain a separate cycle.
++        if(player.level>=20) return null
++        val origin=player.location()
++        val home=MapRegionData.getInstance().getLocationToTeleport(player,MapRegionData.TeleportType.TOWN)
++        val level=player.level
++        val weapon=player.inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND)?.objectId?:0
++        val costs=supplyCost(player,home) ?: return null
++        val offer=OfflineEquipment.weaponPurchaseAt(player,budget(player,costs,0),home) ?: return null
++        val fare=if(HuntingSpots.nearArrival(player,home,emptySet(),20000).isEmpty())
++            HuntRecovery.planFrom(player,home,emptySet())?.exit?.price?:0 else 0
++        if(Market.priceWithTax(offer.first,offer.second)>budget(player,costs,fare)) return null
++        if(NpcTravel.plan(player,offer.first.merchant,home,8000)==null) return null
++        val walk=NpcTravel.toPoint(player,home,origin,60000) ?: return null
++        if(walk.length/player.moveSpeed.coerceAtLeast(30)*2000+15000>15*60_000) return null
++        if(Gear.count(player,Gear.SCROLL_OF_ESCAPE)==0 && dev.l2j.autobots.movement.TownWalk.plan(player,home,60000)==null) return null
++        return Plan(player,origin,home,level,weapon,offer.first,offer.second,costs,fare,walk)
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+index c7b1a0c..ed8cb07 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+@@ -31,9 +31,13 @@ internal object GatekeeperTravel {
+         return if(!exit.isNoble && weekend && cal.get(Calendar.HOUR_OF_DAY) in 20..23) exit.price/2 else exit.price
+     }
+ 
+-    fun offers(player: Player): List<Offer> {
+-        val npc=player.findClosestGatekeeper() ?: return emptyList()
+-        if(!npc.isVisible || distance(player,npc)>8000 || NpcTravel.plan(player,npc,maxDistance=8000)==null) return emptyList()
++    fun offers(player: Player): List<Offer> = offersFrom(player,player.location())
++
++    fun offersFrom(player: Player,origin: Location): List<Offer> {
++        val npc=net.sf.l2j.gameserver.model.World.getInstance().objects
++                .filterIsInstance<net.sf.l2j.gameserver.model.actor.instance.Gatekeeper>()
++                .minByOrNull { distance(origin,it.location()) } ?: return emptyList()
++        if(!npc.isVisible || distance(origin,npc.location())>8000 || NpcTravel.plan(player,npc,origin,8000)==null) return emptyList()
+         return menuIds(npc).mapNotNull { id ->
+             TeleportLocationData.getInstance().getTeleportLocation(id)?.let { Offer(npc,id,it,price(it)) }
+         }.filter { !it.exit.isNoble && it.price<=Errands.travelSpendable(player) &&
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+index 476f251..2811ef1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+@@ -73,10 +73,13 @@ internal object Market {
+     fun shopsNear(bot: Player): List<Shop> = shops.filter { distance(bot, it.merchant) <= TOWN_RADIUS }
+ 
+     /** The closest shop in town that sells [itemId], with the product. */
+-    fun findProduct(bot: Player, itemId: Int): Pair<Shop, Product>? = shopsNear(bot)
++    fun findProduct(bot: Player, itemId: Int): Pair<Shop, Product>? = findProductAt(itemId,bot.location())
++
++    fun findProductAt(itemId: Int,origin: net.sf.l2j.gameserver.model.location.Location): Pair<Shop,Product>? =
++            shops.filter { distance(origin,it.merchant.location())<=TOWN_RADIUS }
+             .mapNotNull { shop -> shop.products[itemId]?.let { shop to it } }
+             .filter { (_, product) -> !product.hasLimitedStock() || product.count > 0 }
+-            .minByOrNull { (shop, _) -> distance(bot, shop.merchant) }
++            .minByOrNull { (shop, _) -> distance(origin,shop.merchant.location()) }
+ 
+     fun healingPriceAtHome(bot: Player): Int? {
+         val town=net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getLocationToTeleport(bot,

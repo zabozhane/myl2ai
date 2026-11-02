@@ -90,7 +90,8 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git -C /autobots apply /patches/l2autobots-dry-origin-recovery.patch \
  && git -C /autobots apply /patches/l2autobots-elongated-origin-recovery.patch \
  && git -C /autobots apply /patches/l2autobots-moving-party-target.patch \
- && git -C /autobots apply /patches/l2autobots-offline-weapon-purchase.patch
+ && git -C /autobots apply /patches/l2autobots-offline-weapon-purchase.patch \
+ && git -C /autobots apply /patches/l2autobots-funded-novice-weapon-trip.patch
 
 # The Kotlin module is compiled against the aCis Java sources and dropped into aCis_gameserver/lib,
 # where the stock ant build picks it up for both compilation and the dist libs.
