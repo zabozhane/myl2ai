@@ -1,0 +1,88 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
+index 100e402..cae9e6a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/Rester.kt
+@@ -36,7 +36,7 @@ internal class Rester(private val player: Player) {
+         return false
+     }
+ 
+-    private fun isTired() = player.getHealthPercentage() < (if (player is dev.l2j.autobots.Autobot && dev.l2j.autobots.population.economy.Healing.count(player)==0) 75.0 else TIRED_HEALTH_PERCENT) || (player.isMageClass && player.getManaPercentage() < TIRED_MANA_PERCENT) ||
++    private fun isTired() = player.getHealthPercentage() < (if ((player is dev.l2j.autobots.Autobot || dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(player)) && dev.l2j.autobots.population.economy.Healing.count(player)<3) 75.0 else TIRED_HEALTH_PERCENT) || (player.isMageClass && player.getManaPercentage() < TIRED_MANA_PERCENT) ||
+             player.currentHp < minOf(fightCost * FIGHT_COST_MARGIN, player.maxHp * MAX_FIGHT_COST_SHARE)
+ 
+     private fun trackFightCost() {
+diff --git a/src/main/kotlin/dev/l2j/autobots/movement/SupplyBudget.kt b/src/main/kotlin/dev/l2j/autobots/movement/SupplyBudget.kt
+index 73a0562..b8c5bb1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/movement/SupplyBudget.kt
++++ b/src/main/kotlin/dev/l2j/autobots/movement/SupplyBudget.kt
+@@ -2,6 +2,10 @@ package dev.l2j.autobots.movement
+ 
+ /** Reserve one emergency escape only when the wallet also covers at least three heals. */
+ internal object SupplyBudget {
++    /** A supply commute must fund the ordinary ten-heal stock, not just the next potion. */
++    fun worthRestocking(cash: Int,have: Int,healingPrice: Int): Boolean = have<3 && healingPrice>0 &&
++            cash.coerceAtLeast(0).toLong()>=(10-have.coerceAtLeast(0)).toLong()*healingPrice
++
+     fun healingTarget(cash: Int,have: Int,healingPrice: Int,escapePrice: Int,ownsEscape: Boolean): Int {
+         if(healingPrice<=0) return have.coerceIn(0,10)
+         val money=cash.coerceAtLeast(0).toLong()
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index d45e644..c4be765 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -731,8 +731,7 @@ object OfflineFarmManager {
+                 val ready = RepeatQuests.all.any { q -> player.getQuestState(q.questName)?.isStarted == true &&
+                         q.questItems.sumOf { player.inventory.getInventoryItemCount(it, -1) } >= q.turnInAt }
+                 val routine = now - (lastTownTripAt[id] ?: now) >= ROUTINE_TRIP_MS && OfflineEquipment.surplus(player).isNotEmpty()
+-                val lowHealing=dev.l2j.autobots.population.economy.Healing.count(player)<3 &&
+-                        (dev.l2j.autobots.population.economy.Market.healingPriceAtHome(player)?:Int.MAX_VALUE)<=player.adena
++                val lowHealing=dev.l2j.autobots.population.economy.Healing.needsRestockTrip(player)
+                 val productiveMs=now-(productiveSince[id]?:now)
+                 val reason=dev.l2j.autobots.movement.TownPolicy.reason(Errands.loadPercent(player)>=45,lowHealing,
+                         ready,routine,false,false,false,false,now-(lastTownTripAt[id]?:now),productiveMs)
+@@ -793,8 +792,15 @@ object OfflineFarmManager {
+                 huntProgress[id]=player.exp.toLong() to now
+                 continue
+             }
++            // Rest is useful recovery, not time spent looking for nonexistent prey.
++            // Restart the consecutive idle window so standing up after a long rest cannot
++            // immediately discard this spot before the combat loop gets its next turn.
++            if(player.isSitting) {
++                huntProgress[id]=previous.first to now
++                continue
++            }
+             if (now-previous.second<45_000L || (player.target as? Monster)?.isDead==false || player.isUnderAttack() ||
+-                    player.isCastingNow || player.isAttackingNow || player.isSitting) continue
++                    player.isCastingNow || player.isAttackingNow) continue
+             huntedSpot[id]?.let { key -> emptySpots.getOrPut(id){mutableMapOf()}[key]=now }
+             huntProgress.remove(id)
+             AutofarmManager.stopFarm(player,"no prey or experience for 45 seconds")
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt
+index 4facf82..b5cc108 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt
+@@ -12,6 +12,11 @@ internal object Healing {
+     private val usedAt=ConcurrentHashMap<Int,Long>()
+     private val effects=listOf(2031,2032,2037)
+     fun count(player: Player): Int = listOf(1060,1061,1539,1540).sumOf { Gear.count(player,it) }
++    fun needsRestockTrip(player: Player): Boolean {
++        val price=Market.healingPriceAtHome(player) ?: return false
++        return dev.l2j.autobots.movement.SupplyBudget.worthRestocking(player.adena,count(player),price)
++    }
++
+     fun product(player: Player): Int? = Gear.HEALING_POTIONS.mapNotNull { id ->
+         Market.findProduct(player,id)?.let { (shop,p) -> id to Market.priceWithTax(shop,p) }
+     }.filter { it.second<=player.adena }.minByOrNull { it.second }?.first
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index 28d581b..b16fff5 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -54,7 +54,7 @@ internal object Errands {
+ 
+     fun leaveReason(bot: Autobot,lastTripAt: Long): String? = dev.l2j.autobots.movement.TownPolicy.reason(
+             loadPercent(bot)>=HEAVY_LOAD_PERCENT,
+-            Healing.count(bot)<3 && (Market.healingPriceAtHome(bot)?:Int.MAX_VALUE)<=bot.adena,
++            Healing.needsRestockTrip(bot),
+             bot.life?.repeatTurnInReady()==true,
+             System.currentTimeMillis()-lastTripAt>=ROUTINE_TRIP_MINUTES*60_000L && Gear.surplus(bot).isNotEmpty(),
+             SkillLearner.hasLessons(bot),affordableUpgrade(bot)!=null,outOfShots(bot),
