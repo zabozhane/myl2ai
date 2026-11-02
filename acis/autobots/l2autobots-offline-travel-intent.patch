@@ -1,0 +1,458 @@
+diff --git a/sql/character_offline_travel.sql b/sql/character_offline_travel.sql
+new file mode 100644
+index 0000000..3a8596e
+--- /dev/null
++++ b/sql/character_offline_travel.sql
+@@ -0,0 +1,6 @@
++CREATE TABLE IF NOT EXISTS character_offline_travel (
++  obj_Id INT UNSIGNED NOT NULL,
++  intent TEXT NOT NULL,
++  updated BIGINT NOT NULL,
++  PRIMARY KEY (obj_Id)
++);
+diff --git a/src/main/kotlin/dev/l2j/autobots/movement/HuntJourney.kt b/src/main/kotlin/dev/l2j/autobots/movement/HuntJourney.kt
+index 8ff3bed..8d4538f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/movement/HuntJourney.kt
++++ b/src/main/kotlin/dev/l2j/autobots/movement/HuntJourney.kt
+@@ -24,4 +24,11 @@ internal class HuntJourney(private val budgetMs: Long=900_000L,private val coold
+ 
+     /** Real XP or a completed change of purpose (town chores/new session), never mere activation. */
+     @Synchronized fun reset() { startedAt=-1L;retryAt=0L }
++
++    /** Keep the same absolute attempt/cooldown across an offline travel restart. */
++    @Synchronized fun snapshot(): Pair<Long,Long> = startedAt to retryAt
++    @Synchronized fun restore(start: Long,retry: Long) {
++        require(start>=-1 && retry>=0)
++        startedAt=start;retryAt=retry
++    }
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index a450741..d45e644 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -98,7 +98,10 @@ object OfflineFarmManager {
+                          var routeIndex: Int = 0,
+                          var lastMoveAt: Long = 0L,
+                          /** Stuck detection: closest approach so far, checks without progress, sidesteps tried. */
+-                         var bestDistance: Double = Double.MAX_VALUE, var stuckChecks: Int = 0, var detours: Int = 0)
++                         var bestDistance: Double = Double.MAX_VALUE, var stuckChecks: Int = 0, var detours: Int = 0) {
++        /** Original absolute movement deadline, retained when a restart requires a new path. */
++        var deadlineAt=0L
++    }
+     private val traveling = ConcurrentHashMap<Int, Travel>()
+ 
+     /** Hunting spots a character already failed to reach on foot; cleared when a hunt actually starts. */
+@@ -120,6 +123,66 @@ object OfflineFarmManager {
+     private val recoveredAt = ConcurrentHashMap<Int,Long>()
+     private val failedRoundAt = ConcurrentHashMap<Int, Long>()
+     private val huntJourneys=ConcurrentHashMap<Int,dev.l2j.autobots.movement.HuntJourney>()
++    /** Only stage/deadline changes write SQL; ordinary waypoint ticks remain in memory. */
++    private fun persistTravel(id: Int,travel: Travel) {
++        val budget=huntJourneys[id]?.snapshot() ?: (-1L to 0L)
++        OfflineTravelStore.save(id,OfflineTravelState(travel.trip.name,travel.targetX,travel.targetY,travel.targetZ,
++                travel.trainer?.npcId?:0,travel.thenHunt,travel.spotX,travel.spotY,travel.spotZ,
++                travel.arrivalRadius,travel.gkHopped,travel.spotKey,travel.finalApproach,
++                travel.startedAt,travel.deadlineAt,budget.first,budget.second,unreachableSpots[id]?.toSet().orEmpty()))
++    }
++
++    // Reentry waits for canceled town jobs while holding the manager monitor. Travel writes
++    // must never require that monitor, or an in-flight job and the owner's login deadlock.
++    private val travelStateLock=Any()
++
++    private fun setTravel(player: Player,travel: Travel) = synchronized(travelStateLock) {
++        if(!isActive(player)) return@synchronized
++        persistTravel(player.objectId,travel)
++        traveling[player.objectId]=travel
++    }
++
++    private fun checkpointTravel(player: Player,travel: Travel) = synchronized(travelStateLock) {
++        if(farming[player.objectId]===player && !reaping.contains(player.objectId) && traveling[player.objectId]===travel)
++            persistTravel(player.objectId,travel)
++        Unit
++    }
++
++    private fun clearTravel(id: Int,expected: Travel?=null): Travel? = synchronized(travelStateLock) {
++        val old=if(expected==null) traveling.remove(id)
++                else if(traveling.remove(id,expected)) expected else null
++        if(old!=null) OfflineTravelStore.clear(id)
++        old
++    }
++
++    private fun resumeTravel(player: Player): Boolean {
++        val saved=OfflineTravelStore.load(player.objectId) ?: return false
++        return try {
++            val trip=Trip.valueOf(saved.trip)
++            val trainer=if(trip==Trip.TO_TRAINER) World.getInstance().objects.asSequence().filterIsInstance<Folk>()
++                    .filter { it.npcId==saved.trainerId }.minByOrNull { distance(it.x,it.y,saved.x,saved.y) }
++                    ?: throw IllegalStateException("stored trainer ${saved.trainerId} is unavailable") else null
++            if(saved.journeyStart>=0 || saved.journeyRetry>0) {
++                huntJourneys[player.objectId]=dev.l2j.autobots.movement.HuntJourney().also { it.restore(saved.journeyStart,saved.journeyRetry) }
++            }
++            if(saved.excluded.isNotEmpty()) unreachableSpots[player.objectId]=saved.excluded.toMutableSet()
++            val travel=Travel(trip,saved.x,saved.y,saved.z,trainer=trainer,thenHunt=saved.thenHunt,
++                    spotX=saved.spotX,spotY=saved.spotY,spotZ=saved.spotZ,arrivalRadius=saved.radius,
++                    gkHopped=saved.hopped,spotKey=saved.spotKey,finalApproach=saved.finalApproach,startedAt=saved.startedAt)
++            travel.deadlineAt=saved.deadlineAt
++            AutofarmManager.stopFarm(player,"resuming saved travel")
++            setTravel(player,travel)
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} resumes saved trip=$trip" +
++                    " to=${saved.x},${saved.y},${saved.z} from=${player.x},${player.y},${player.z} deadline=${saved.deadlineAt}")
++            recordEvent(player,"TravelResumed","$trip to ${saved.x},${saved.y},${saved.z}")
++            true
++        } catch(e: Exception) {
++            OfflineTravelStore.clear(player.objectId)
++            LOGGER.warning("Offline farm: ${player.name} id=${player.objectId} discarded invalid travel intent: $e")
++            false
++        }
++    }
++
+     private val questsLoaded = ConcurrentHashMap.newKeySet<Int>()
+ 
+     /** Throttle for the "any lessons to learn?" scan of farming characters. */
+@@ -155,6 +218,7 @@ object OfflineFarmManager {
+         // A restart closes every open journal period; the resume after the start opens fresh ones.
+         for ((_, player) in farming) {
+             OfflineLife.stop(player)
++            traveling[player.objectId]?.let { checkpointTravel(player,it) }
+             AutofarmManager.quiesce(player)
+             runCatching { flushJournal(player, close = true, reason = "restart") }
+         }
+@@ -190,6 +254,7 @@ object OfflineFarmManager {
+ 
+         player.client = DetachedClient(player)
+         farming[id] = player
++        OfflineTravelStore.clear(id)
+         lastTownTripAt[id] = System.currentTimeMillis()
+         markFarming(id)
+         openJournal(player)
+@@ -253,7 +318,7 @@ object OfflineFarmManager {
+             failedRoundAt.remove(id)
+             huntJourneys.remove(id)
+             recoveredAt.remove(id)
+-            traveling.remove(id)
++            clearTravel(id)
+             unreachableSpots.remove(id)
+             trainerFailures.remove(id)
+             lessonCheckedAt.remove(id)
+@@ -308,10 +373,10 @@ object OfflineFarmManager {
+             journal[player.objectId]?.let { it.adenaSpent+=(before-player.adena).coerceAtLeast(0) }
+         }
+         val destination=plan.walk.points.last()
+-        traveling[player.objectId]=Travel(Trip.TO_TRAINER,destination.x,destination.y,destination.z,trainer=plan.trainer,
++        setTravel(player,Travel(Trip.TO_TRAINER,destination.x,destination.y,destination.z,trainer=plan.trainer,
+                 thenHunt=thenHunt,spotX=originX,spotY=originY,spotZ=originZ,
+                 arrivalRadius=APPROACH_ARRIVAL_RADIUS,gkHopped=gkHopped||exit!=null,finalApproach=true,
+-                route=plan.walk.points,lastMoveAt=System.currentTimeMillis())
++                route=plan.walk.points,lastMoveAt=System.currentTimeMillis()))
+         val first=plan.walk.points.first()
+         walk(player,first.x,first.y,first.z)
+         LOGGER.info("Offline farm: ${player.name} id=${player.objectId} goes to trainer ${plan.trainer.name}: ${plan.walk.points.size} waypoints, fare ${plan.ride?.price?:0}.")
+@@ -427,8 +492,8 @@ object OfflineFarmManager {
+         if (!isActive(player) || player.isDead) return
+         if(huntDeadline(player,System.currentTimeMillis())==0L) return
+         val anchor=route.lastOrNull() ?: HuntingSpots.huntAnchor(player,spot) ?: return
+-        traveling[player.objectId] = Travel(Trip.TO_SPOT, anchor.x, anchor.y, anchor.z,
+-                spotKey = spot.key, route=route,gkHopped=noMoreHops,lastMoveAt = System.currentTimeMillis())
++        setTravel(player,Travel(Trip.TO_SPOT, anchor.x, anchor.y, anchor.z,
++                spotKey = spot.key, route=route,gkHopped=noMoreHops,lastMoveAt = System.currentTimeMillis()))
+         val first=route.firstOrNull()?:anchor
+         walk(player, first.x, first.y, first.z)
+         LOGGER.info("Offline farm: ${player.name} id=${player.objectId} stays online, walks to a hunting spot at ${spot.location.x},${spot.location.y}.")
+@@ -465,21 +530,22 @@ object OfflineFarmManager {
+ 
+         for ((id, travel) in traveling) {
+             try {
++                if(traveling[id]!==travel) continue
+                 val player = farming[id]
+                 if (player == null || !isActive(player) || player.isDead) {
+                     // Removed already, or dead on the way: stage 1 waits for the owner (no auto-return to village yet).
+-                    traveling.remove(id)
++                    clearTravel(id,travel)
+                     continue
+                 }
+                 if (player.isUnderAttack()) {
+                     // Jumped by a monster on the road: fight back right here, the trip is over.
+-                    traveling.remove(id)
++                    if(clearTravel(id,travel)==null) continue
+                     startFarmLogged(player, "jumped on the road")
+                     continue
+                 }
+                 val huntDeadline=if(travel.trip==Trip.TO_SPOT && huntJourneys.containsKey(id)) huntDeadline(player,now) else Long.MAX_VALUE
+                 if(huntDeadline==0L) {
+-                    traveling.remove(id,travel)
++                    if(clearTravel(id,travel)==null) continue
+                     player.stopMove(null)
+                     startFarmLogged(player,"hunt journey cooldown")
+                     retryAfter[id]=huntJourneys[id]?.retryAt ?: now+SPOT_RETRY_MS
+@@ -492,11 +558,12 @@ object OfflineFarmManager {
+                     if(plan==null) {
+                         LOGGER.info("Offline farm: ${player.name} id=$id route failed reason=no_safe_path trip=${travel.trip}" +
+                                 " to=${target.x},${target.y},${target.z} at=${player.x},${player.y},${player.z}")
++                        if(clearTravel(id,travel)==null) continue
+                         player.stopMove(null)
+-                        traveling.remove(id,travel)
+                         onStuck(player,travel)
+                         continue
+                     }
++                    if(traveling[id]!==travel || !isActive(player)) continue
+                     travel.route=plan.points
+                 }
+                 if(travel.progress==null) {
+@@ -506,7 +573,11 @@ object OfflineFarmManager {
+                     // 20s progress watchdog and calculate a finite budget from real path length.
+                     val maxBudget=if((travel.trip==Trip.TO_SPOT && travel.gkHopped || travel.trip==Trip.BACK_TO_SPOT || travel.trip==Trip.TO_TOWN) && length>MAX_WALK_TO_SPOT) 900_000L else 300_000L
+                     val budget=minOf((length/player.moveSpeed.coerceAtLeast(30)*2000+15_000).toLong().coerceIn(30_000L,maxBudget),huntDeadline-travel.startedAt)
+-                    travel.progress=dev.l2j.autobots.movement.RouteProgress(travel.startedAt,budget)
++                    if(travel.deadlineAt==0L) {
++                        travel.deadlineAt=travel.startedAt+budget
++                        checkpointTravel(player,travel)
++                    }
++                    travel.progress=dev.l2j.autobots.movement.RouteProgress(travel.startedAt,(travel.deadlineAt-travel.startedAt).coerceAtLeast(0))
+                     LOGGER.info("Offline farm: ${player.name} id=$id route planned trip=${travel.trip}" +
+                             " to=${travel.targetX},${travel.targetY},${travel.targetZ} waypoints=${travel.route.size} length=${length.toInt()} budgetSeconds=${budget/1000}")
+                 }
+@@ -516,22 +587,23 @@ object OfflineFarmManager {
+                     // (several NPCs stand on cells no path leads to), or let the server approach it.
+                     val trainer = travel.trainer
+                     val spot = Approach.pointNear(player, trainer)
+-                    traveling.remove(id)
++                    if(clearTravel(id,travel)==null) continue
+                     val next = if (spot != null) {
+                         walk(player, spot.x, spot.y, spot.z)
+                         Travel(Trip.TO_TRAINER, spot.x, spot.y, spot.z, trainer = trainer, thenHunt = travel.thenHunt,
+                                 spotX = travel.spotX, spotY = travel.spotY, spotZ = travel.spotZ,
+                                 arrivalRadius = APPROACH_ARRIVAL_RADIUS, gkHopped = travel.gkHopped,
+-                                finalApproach = true, lastMoveAt = now)
++                                finalApproach = true, lastMoveAt = now, startedAt=travel.startedAt)
+                     } else {
+                         player.target = trainer
+                         player.ai.setIntention(IntentionType.INTERACT, trainer)
+                         Travel(Trip.TO_TRAINER, trainer.x, trainer.y, trainer.z, trainer = trainer, thenHunt = travel.thenHunt,
+                                 spotX = travel.spotX, spotY = travel.spotY, spotZ = travel.spotZ,
+                                 arrivalRadius = Npc.INTERACTION_DISTANCE - 50, gkHopped = travel.gkHopped,
+-                                finalApproach = true, lastMoveAt = now)
++                                finalApproach = true, lastMoveAt = now, startedAt=travel.startedAt)
+                     }
+-                    traveling[id] = next
++                    next.deadlineAt=travel.deadlineAt
++                    setTravel(player,next)
+                     continue
+                 }
+                 if(travel.route.isNotEmpty() && travel.routeIndex<travel.route.lastIndex) {
+@@ -548,7 +620,7 @@ object OfflineFarmManager {
+                 val arrived = distance(player.x, player.y, travel.targetX, travel.targetY) <= travel.arrivalRadius &&
+                         (travel.route.isEmpty() || travel.routeIndex==travel.route.lastIndex && kotlin.math.abs(player.z-travel.targetZ)<200)
+                 if (arrived && (travel.trip != Trip.TO_TOWN || player.isInsideZone(ZoneId.TOWN))) {
+-                    traveling.remove(id)
++                    if(clearTravel(id,travel)==null) continue
+                     onArrived(player, travel)
+                     continue
+                 }
+@@ -556,9 +628,10 @@ object OfflineFarmManager {
+                 travel.progress?.observe(travel.routeIndex,dev.l2j.autobots.utils.distance(player.location(),point),now)?.let { reason ->
+                     LOGGER.info("Offline farm: ${player.name} id=$id route failed reason=$reason trip=${travel.trip}" +
+                             " to=${travel.targetX},${travel.targetY},${travel.targetZ} at=${player.x},${player.y},${player.z}")
+-                    player.stopMove(null)
+-                    traveling.remove(id,travel)
+-                    onStuck(player,travel)
++                    if(clearTravel(id,travel)!=null) {
++                        player.stopMove(null)
++                        onStuck(player,travel)
++                    }
+                 }
+                 if(traveling[id] !== travel) continue
+                 if (now-travel.lastMoveAt>=REISSUE_MOVE_MS || !player.isMoving) {
+@@ -633,7 +706,7 @@ object OfflineFarmManager {
+             if (now - since < DEATH_WAIT_MS || townJobs.containsKey(id)) continue
+             try {
+                 AutofarmManager.stopFarm(player, "died")
+-                traveling.remove(id)
++                clearTravel(id)
+                 diedAt.remove(id)
+                 player.doRevive()
+                 if (player.isDead) continue
+@@ -812,9 +885,9 @@ object OfflineFarmManager {
+                 val town = MapRegionData.getInstance().getLocationToTeleport(player, MapRegionData.TeleportType.TOWN)
+                 val route=if(!player.isUnderAttack()) dev.l2j.autobots.movement.TownWalk.plan(player,town,MAX_WALK_TO_TOWN) else null
+                 if (route!=null) {
+-                    traveling[id] = Travel(Trip.TO_TOWN, town.x, town.y, town.z,
++                    setTravel(player,Travel(Trip.TO_TOWN, town.x, town.y, town.z,
+                             spotX = origin?.x?:0, spotY = origin?.y?:0, spotZ = origin?.z?:0, thenHunt=!returnToSpot,
+-                            route=route.points,lastMoveAt = System.currentTimeMillis())
++                            route=route.points,lastMoveAt = System.currentTimeMillis()))
+                     LOGGER.info("Offline farm: ${player.name} id=$id returns to town on a checked walk without SoE length=${route.length.toInt()} waypoints=${route.points.size}.")
+                     walk(player, town.x, town.y, town.z)
+                 } else {
+@@ -849,13 +922,14 @@ object OfflineFarmManager {
+             val trainer=if(learnableNow(player).isNotEmpty()) nearestTrainer(player) else null
+             if(trainer!=null) goToTrainer(player,trainer,thenHunt=true) else pendingHunt.add(player.objectId)
+         } else {
+-            traveling[player.objectId] = Travel(Trip.BACK_TO_SPOT, spot.x, spot.y, spot.z, lastMoveAt = System.currentTimeMillis())
++            setTravel(player,Travel(Trip.BACK_TO_SPOT, spot.x, spot.y, spot.z, lastMoveAt = System.currentTimeMillis()))
+             walk(player, spot.x, spot.y, spot.z)
+         }
+     }
+ 
+     /** The trip leads nowhere from here: give it up and fall back to farming within reach. */
+     private fun onStuck(player: Player, travel: Travel) {
++        if(!isActive(player)) return
+         LOGGER.info("Offline farm: ${player.name} id=${player.objectId} can't reach ${travel.targetX},${travel.targetY} on foot, gives up the ${travel.trip} trip.")
+         when (travel.trip) {
+             Trip.TO_TOWN -> {
+@@ -874,8 +948,8 @@ object OfflineFarmManager {
+                 if (travel.thenHunt) {
+                     goHunting(player)
+                 } else {
+-                    traveling[player.objectId] = Travel(Trip.BACK_TO_SPOT, travel.spotX, travel.spotY, travel.spotZ,
+-                            lastMoveAt = System.currentTimeMillis())
++                    setTravel(player,Travel(Trip.BACK_TO_SPOT, travel.spotX, travel.spotY, travel.spotZ,
++                            lastMoveAt = System.currentTimeMillis()))
+                     walk(player, travel.spotX, travel.spotY, travel.spotZ)
+                 }
+             }
+@@ -887,8 +961,10 @@ object OfflineFarmManager {
+                             val before=player.adena
+                             if(dev.l2j.autobots.population.economy.GatekeeperTravel.travel(player,ride)) {
+                                 journal[player.objectId]?.let { it.adenaSpent+=(before-player.adena).coerceAtLeast(0) }
+-                                traveling[player.objectId]=Travel(travel.trip,travel.targetX,travel.targetY,travel.targetZ,
+-                                        arrivalRadius=travel.arrivalRadius,gkHopped=true,spotKey=travel.spotKey)
++                                val continued=Travel(travel.trip,travel.targetX,travel.targetY,travel.targetZ,
++                                        arrivalRadius=travel.arrivalRadius,gkHopped=true,spotKey=travel.spotKey,startedAt=travel.startedAt)
++                                continued.deadlineAt=travel.deadlineAt
++                                setTravel(player,continued)
+                             } else {
+                                 travel.spotKey?.let { unreachableSpots.getOrPut(player.objectId){mutableSetOf()}.add(it) }
+                                 pendingHunt.add(player.objectId)
+@@ -912,6 +988,7 @@ object OfflineFarmManager {
+     }
+ 
+     private fun onArrived(player: Player, travel: Travel) {
++        if(!isActive(player)) return
+         when (travel.trip) {
+             Trip.TO_TOWN -> runChoresThenBack(player, if(travel.thenHunt) null else Location(travel.spotX, travel.spotY, travel.spotZ))
+             Trip.TO_SPOT, Trip.BACK_TO_SPOT -> {
+@@ -929,8 +1006,8 @@ object OfflineFarmManager {
+                         goHunting(player)
+                     } else {
+                         if (learned > 0) LOGGER.info("Offline farm: ${player.name} id=${player.objectId} learned $learned skill levels, back to the spot.")
+-                        traveling[player.objectId] = Travel(Trip.BACK_TO_SPOT, travel.spotX, travel.spotY, travel.spotZ,
+-                                lastMoveAt = System.currentTimeMillis())
++                        setTravel(player,Travel(Trip.BACK_TO_SPOT, travel.spotX, travel.spotY, travel.spotZ,
++                                lastMoveAt = System.currentTimeMillis()))
+                         walk(player, travel.spotX, travel.spotY, travel.spotZ)
+                     }
+                 }
+@@ -1035,6 +1112,7 @@ object OfflineFarmManager {
+      * blocking anything.
+      */
+     fun onServerStart() {
++        OfflineTravelStore.initialize()
+         val ids = readMarkers()
+         if (ids.isEmpty()) return
+         LOGGER.info("Offline farm: resuming ${ids.size} character(s) after a server restart.")
+@@ -1065,10 +1143,10 @@ object OfflineFarmManager {
+                 lastTownTripAt[id] = System.currentTimeMillis()
+                 openJournal(player)
+                 LOGGER.info("Offline farm: ${player.name} id=${player.objectId} is back after a server restart, keeps farming.")
+-                if (player.isDead)
++                if (player.isDead) {
++                    OfflineTravelStore.clear(id)
+                     LOGGER.info("Offline farm: ${player.name} id=${player.objectId} was stored dead; will return to the village.")
+-                else
+-                    beginFarm(player)
++                } else if(!resumeTravel(player)) beginFarm(player)
+             } catch (e: Exception) {
+                 LOGGER.warning("Offline farm resume failed for $id: $e")
+                 unmarkFarming(id)
+@@ -1102,6 +1180,7 @@ object OfflineFarmManager {
+     }
+ 
+     private fun unmarkFarming(id: Int) {
++        OfflineTravelStore.clear(id)
+         runCatching {
+             L2DatabaseFactory.getInstance().connection.use { con ->
+                 con.prepareStatement("DELETE FROM character_offline_farm WHERE obj_Id=?").use { ps ->
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineTravelStore.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineTravelStore.kt
+new file mode 100644
+index 0000000..9d6b284
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineTravelStore.kt
+@@ -0,0 +1,78 @@
++package dev.l2j.autobots.offlinelife
++
++import com.fasterxml.jackson.databind.ObjectMapper
++import net.sf.l2j.L2DatabaseFactory
++import java.util.logging.Logger
++
++/** Persist purpose, not obsolete geodata waypoints. A resumed trip replans from the stored player position. */
++internal data class OfflineTravelState(val trip: String,val x: Int,val y: Int,val z: Int,
++        val trainerId: Int,val thenHunt: Boolean,val spotX: Int,val spotY: Int,val spotZ: Int,
++        val radius: Int,val hopped: Boolean,val spotKey: Long?,val finalApproach: Boolean,
++        val startedAt: Long,val deadlineAt: Long,val journeyStart: Long,val journeyRetry: Long,
++        val excluded: Set<Long>)
++
++internal object OfflineTravelStore {
++    private val logger=Logger.getLogger(OfflineTravelStore::class.java.name)
++    private val json=ObjectMapper()
++
++    fun initialize() {
++        L2DatabaseFactory.getInstance().connection.use { connection ->
++            connection.createStatement().use { it.executeUpdate("CREATE TABLE IF NOT EXISTS character_offline_travel (obj_Id INT UNSIGNED NOT NULL, intent TEXT NOT NULL, updated BIGINT NOT NULL, PRIMARY KEY(obj_Id))") }
++        }
++    }
++
++    fun save(id: Int,state: OfflineTravelState) {
++        runCatching {
++            val payload=json.writeValueAsString(mapOf("version" to 1,"trip" to state.trip,
++                    "x" to state.x,"y" to state.y,"z" to state.z,"trainer" to state.trainerId,
++                    "thenHunt" to state.thenHunt,"spotX" to state.spotX,"spotY" to state.spotY,"spotZ" to state.spotZ,
++                    "radius" to state.radius,"hopped" to state.hopped,"spotKey" to state.spotKey,
++                    "finalApproach" to state.finalApproach,"startedAt" to state.startedAt,"deadlineAt" to state.deadlineAt,
++                    "journeyStart" to state.journeyStart,"journeyRetry" to state.journeyRetry,
++                    "excluded" to state.excluded.sorted().take(512)))
++            L2DatabaseFactory.getInstance().connection.use { connection ->
++                connection.prepareStatement("INSERT INTO character_offline_travel(obj_Id,intent,updated) VALUES(?,?,?) ON DUPLICATE KEY UPDATE intent=VALUES(intent),updated=VALUES(updated)").use {
++                    it.setInt(1,id);it.setString(2,payload);it.setLong(3,System.currentTimeMillis());it.executeUpdate()
++                }
++            }
++        }.onFailure { logger.warning("Offline travel write failed for $id: $it") }
++    }
++
++    fun load(id: Int): OfflineTravelState? = runCatching {
++        L2DatabaseFactory.getInstance().connection.use { connection ->
++            connection.prepareStatement("SELECT intent FROM character_offline_travel WHERE obj_Id=?").use { query ->
++                query.setInt(1,id)
++                query.executeQuery().use records@ { rows ->
++                    if(!rows.next()) return@records null
++                    val p=json.readTree(rows.getString(1))
++                    require(p.path("version").asInt()==1 && p.path("radius").asInt() in 1..2000)
++                    val start=p.path("startedAt").asLong()
++                    val deadline=p.path("deadlineAt").asLong()
++                    require(start>=0 && (deadline==0L || deadline in start..(start+900_000L)))
++                    OfflineTravelState(p.path("trip").asText(),p.path("x").asInt(),p.path("y").asInt(),p.path("z").asInt(),
++                            p.path("trainer").asInt(),p.path("thenHunt").asBoolean(),
++                            p.path("spotX").asInt(),p.path("spotY").asInt(),p.path("spotZ").asInt(),
++                            p.path("radius").asInt(),p.path("hopped").asBoolean(),
++                            p.path("spotKey").takeUnless { it.isMissingNode || it.isNull }?.asLong(),
++                            p.path("finalApproach").asBoolean(),start,deadline,
++                            p.path("journeyStart").asLong(-1),p.path("journeyRetry").asLong(),
++                            p.path("excluded").take(512).map { it.asLong() }.toSet())
++                }
++            }
++        }
++    }.getOrElse {
++        logger.warning("Offline travel read failed for $id; discarded: $it")
++        clear(id)
++        null
++    }
++
++    fun clear(id: Int) {
++        runCatching {
++            L2DatabaseFactory.getInstance().connection.use { connection ->
++                connection.prepareStatement("DELETE FROM character_offline_travel WHERE obj_Id=?").use {
++                    it.setInt(1,id);it.executeUpdate()
++                }
++            }
++        }.onFailure { logger.warning("Offline travel delete failed for $id: $it") }
++    }
++}
