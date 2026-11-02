@@ -1,0 +1,29 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+index b6b6681..09f739c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+@@ -58,12 +58,21 @@ internal object NpcTravel {
+ 
+     private data class Node(val x: Int,val y: Int,val at: Location,val route: List<Location>,val cost: Double)
+     private fun coarse(player: Player,from: Location,to: Location,maxDistance: Int): List<Location>? {
++        val longWalk=maxDistance>20000
++        val deadline=System.nanoTime()+if(longWalk) 5_000_000_000L else 3_000_000_000L
++        search(player,from,to,maxDistance,if(longWalk) 2400 else 800,if(longWalk) 800 else 160,deadline)?.let { return it }
++        // A coarse grid can have no node on a narrow village ramp even though the
++        // geodata permits walking there. Refine failed local searches within the same
++        // finite deadline; every link still uses the core pathfinder and safety checks.
++        return if(!longWalk && System.nanoTime()<deadline)
++            search(player,from,to,maxDistance,200,2000,deadline) else null
++    }
++
++    private fun search(player: Player,from: Location,to: Location,maxDistance: Int,
++                       step: Int,limit: Int,deadline: Long): List<Location>? {
+         val queue=java.util.PriorityQueue<Node>(compareBy { it.cost+distance(it.at,to) })
+         val costs=mutableMapOf<Triple<Int,Int,Int>,Double>()
+         queue.add(Node(0,0,from,emptyList(),0.0))
+-        val step=if(maxDistance>20000) 2400 else 800
+-        val limit=if(maxDistance>20000) 800 else 160
+-        val deadline=if(maxDistance>20000) System.nanoTime()+5_000_000_000L else System.nanoTime()+1_500_000_000L
+         val geo=GeoEngine.getInstance()
+         var expanded=0
+         while(queue.isNotEmpty() && expanded++<limit && System.nanoTime()<deadline) {

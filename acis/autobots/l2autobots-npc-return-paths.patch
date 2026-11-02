@@ -1,0 +1,178 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+index 5f80e75..fbcf097 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+@@ -21,6 +21,7 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+                               private val arrivalRadius: Int, private val onStuck: () -> Unit) : Sequence {
+     override var cancellationToken: CancellationToken? = null
+     private var recoveryRoute: NpcTravel.Walk? = null
++    private var npcRoute=false
+     private var huntDeadline=Long.MAX_VALUE
+     var failureReason: String? = null
+         private set
+@@ -31,6 +32,12 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+         return this
+     }
+ 
++    fun withNpcRoute(route: NpcTravel.Walk): WalkToSequence {
++        recoveryRoute=route
++        npcRoute=true
++        return this
++    }
++
+     fun withHuntDeadline(deadline: Long): WalkToSequence {
+         huntDeadline=deadline
+         return this
+@@ -53,16 +60,17 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+         if (bot.isInsideZone(ZoneId.WATER)) return failed("water")
+         if (bot.isSitting) { bot.standUp(); delay(2700) }
+         val maxWalk = ceil(distance(bot.location(),destination)).toInt().coerceIn(12000,100000)
+-        val route = recoveryRoute ?: NpcTravel.toPoint(bot,bot.location(),destination,maxWalk) ?: return failed("no_safe_path")
++        var route = recoveryRoute ?: NpcTravel.toPoint(bot,bot.location(),destination,maxWalk) ?: return failed("no_safe_path")
+         if(route.points.isEmpty()) return failed("empty_path")
+         val budgetLimit=if(recoveryRoute!=null) 900_000L else 300_000L
+         val budget=minOf((route.length/bot.moveSpeed.coerceAtLeast(30)*2000+15_000)
+                 .toLong().coerceIn(30_000L,budgetLimit),huntDeadline-started)
+-        val watch = RouteProgress(started,budget)
++        var watch = RouteProgress(started,budget)
+         println("Autobots movement: ${bot.name} id=${bot.objectId} planned to=${destination.x},${destination.y},${destination.z}" +
+                 " from=${bot.x},${bot.y},${bot.z} waypoints=${route.points.size} length=${route.length.toInt()}")
+         var index = 0
+         var lastMoveAt = 0L
++        var replans=0
+         try {
+             while (true) {
+                 if (bot.isDead || bot.isUnderAttack()) return
+@@ -82,8 +90,24 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+                 watch.observe(index,distance(bot.location(),point),now)?.let { return failed(it) }
+                 if (now-lastMoveAt >= 3000 || !bot.isMoving) {
+                     if (!RouteSafety.safeSegment(bot,bot.location(),point) ||
+-                            !GeoEngine.getInstance().canMoveToTarget(bot.x,bot.y,bot.z,point.x,point.y,point.z))
+-                        return failed("leg_changed")
++                            !GeoEngine.getInstance().canMoveToTarget(bot.x,bot.y,bot.z,point.x,point.y,point.z)) {
++                        // A geodata ray can change after rounded movement into the next cell. Replan
++                        // from the actual position, with the original absolute budget and a finite limit.
++                        bot.stopMove(null)
++                        if(replans>=2) return failed("leg_changed")
++                        val replacement=(if(npcRoute) NpcTravel.returnableToPoint(bot,bot.location(),destination,maxWalk)
++                                else NpcTravel.toPoint(bot,bot.location(),destination,maxWalk))
++                                ?: return failed("leg_changed")
++                        if(replacement.points.isEmpty()) return failed("empty_path")
++                        replans++
++                        route=replacement
++                        index=0
++                        watch=RouteProgress(started,budget)
++                        lastMoveAt=0L
++                        println("Autobots movement: ${bot.name} id=${bot.objectId} replanned reason=leg_changed attempt=$replans" +
++                                " to=${destination.x},${destination.y},${destination.z} waypoints=${route.points.size}")
++                        continue
++                    }
+                     bot.moveTo(point.x,point.y,point.z)
+                     lastMoveAt = now
+                 }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+index 09f739c..cf70e04 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+@@ -26,13 +26,13 @@ internal object NpcTravel {
+         }
+         val goals=candidates.filter { abs(it.z-npc.z)<=50 }.distinctBy { Triple(it.x,it.y,it.z) }.sortedBy { distance(origin,it) }.take(12)
+         for (point in goals) {
+-            val path=segment(player,origin,point) ?: continue
++            val path=segment(player,origin,point,reversible=true) ?: continue
+             return Walk(path,(listOf(origin)+path).zipWithNext().sumOf { distance(it.first,it.second) })
+         }
+         // The core's largest path buffer covers only a few thousand world units. Solve a longer
+         // walk as a bounded coarse search whose individual links use the real geodata pathfinder.
+         for(point in goals.take(3)) {
+-            val route=coarse(player,origin,point,maxDistance) ?: continue
++            val route=coarse(player,origin,point,maxDistance,reversible=true) ?: continue
+             return Walk(route,(listOf(origin)+route).zipWithNext().sumOf { distance(it.first,it.second) })
+         }
+         return null
+@@ -44,32 +44,43 @@ internal object NpcTravel {
+         return Walk(path,(listOf(origin)+path).zipWithNext().sumOf { distance(it.first,it.second) })
+     }
+ 
+-    private fun segment(player: Player,from: Location,to: Location): List<Location>? {
++    fun returnableToPoint(player: Player,origin: Location,point: Location,maxDistance: Int): Walk? {
++        if(distance(origin,point)>maxDistance) return null
++        val path=segment(player,origin,point,reversible=true) ?:
++                coarse(player,origin,point,maxDistance,reversible=true) ?: return null
++        return Walk(path,(listOf(origin)+path).zipWithNext().sumOf { distance(it.first,it.second) })
++    }
++
++    private fun segment(player: Player,from: Location,to: Location,reversible: Boolean=false): List<Location>? {
+         val geo=GeoEngine.getInstance()
+-        val path=if(geo.canMoveToTarget(from.x,from.y,from.z,to.x,to.y,to.z)) listOf(to)
++        val direct=geo.canMoveToTarget(from.x,from.y,from.z,to.x,to.y,to.z) &&
++                (!reversible || geo.canMoveToTarget(to.x,to.y,to.z,from.x,from.y,from.z))
++        val path=if(direct) listOf(to)
+             else geo.findPath(from.x,from.y,from.z,to.x,to.y,to.z,true)?.toList().orEmpty().let { if(it.isEmpty()) it else it+to }
+         if(path.isEmpty()) return null
+         if((listOf(from)+path).zipWithNext().any {
+                     !geo.canMoveToTarget(it.first.x,it.first.y,it.first.z,it.second.x,it.second.y,it.second.z) ||
+-                    !RouteSafety.safeSegment(player,it.first,it.second)
++                    !RouteSafety.safeSegment(player,it.first,it.second) ||
++                    reversible && (!geo.canMoveToTarget(it.second.x,it.second.y,it.second.z,it.first.x,it.first.y,it.first.z) ||
++                            !RouteSafety.safeSegment(player,it.second,it.first))
+                 }) return null
+         return path
+     }
+ 
+     private data class Node(val x: Int,val y: Int,val at: Location,val route: List<Location>,val cost: Double)
+-    private fun coarse(player: Player,from: Location,to: Location,maxDistance: Int): List<Location>? {
++    private fun coarse(player: Player,from: Location,to: Location,maxDistance: Int,reversible: Boolean=false): List<Location>? {
+         val longWalk=maxDistance>20000
+         val deadline=System.nanoTime()+if(longWalk) 5_000_000_000L else 3_000_000_000L
+-        search(player,from,to,maxDistance,if(longWalk) 2400 else 800,if(longWalk) 800 else 160,deadline)?.let { return it }
++        search(player,from,to,maxDistance,if(longWalk) 2400 else 800,if(longWalk) 800 else 160,deadline,reversible)?.let { return it }
+         // A coarse grid can have no node on a narrow village ramp even though the
+         // geodata permits walking there. Refine failed local searches within the same
+         // finite deadline; every link still uses the core pathfinder and safety checks.
+         return if(!longWalk && System.nanoTime()<deadline)
+-            search(player,from,to,maxDistance,200,2000,deadline) else null
++            search(player,from,to,maxDistance,200,2000,deadline,reversible) else null
+     }
+ 
+     private fun search(player: Player,from: Location,to: Location,maxDistance: Int,
+-                       step: Int,limit: Int,deadline: Long): List<Location>? {
++                       step: Int,limit: Int,deadline: Long,reversible: Boolean): List<Location>? {
+         val queue=java.util.PriorityQueue<Node>(compareBy { it.cost+distance(it.at,to) })
+         val costs=mutableMapOf<Triple<Int,Int,Int>,Double>()
+         queue.add(Node(0,0,from,emptyList(),0.0))
+@@ -77,7 +88,7 @@ internal object NpcTravel {
+         var expanded=0
+         while(queue.isNotEmpty() && expanded++<limit && System.nanoTime()<deadline) {
+             val node=queue.poll()
+-            if(distance(node.at,to)<=2800) segment(player,node.at,to)?.let { return node.route+it }
++            if(distance(node.at,to)<=2800) segment(player,node.at,to,reversible)?.let { return node.route+it }
+             for(dx in -1..1) for(dy in -1..1) {
+                 if(dx==0 && dy==0) continue
+                 val nx=node.x+dx;val ny=node.y+dy
+@@ -87,7 +98,7 @@ internal object NpcTravel {
+                 val key=Triple(nx,ny,Math.floorDiv(at.z,200))
+                 val lower=node.cost+distance(node.at,at)
+                 if(lower>=(costs[key]?:Double.MAX_VALUE)) continue
+-                val link=segment(player,node.at,at) ?: continue
++                val link=segment(player,node.at,at,reversible) ?: continue
+                 val cost=node.cost+(listOf(node.at)+link).zipWithNext().sumOf { distance(it.first,it.second) }
+                 if(cost>maxDistance*2 || cost>=(costs[key]?:Double.MAX_VALUE)) continue
+                 costs[key]=cost
+@@ -102,11 +113,11 @@ internal object NpcTravel {
+         if(player.isSitting) { player.standUp();delay(2700) }
+         if (!npc.isInsideRadius(player,Npc.INTERACTION_DISTANCE,true,false)) {
+             val route=plan(player,npc,maxDistance=maxDistance) ?: return false
+-            for(point in route.points) {
+-                var failed=false
+-                WalkToSequence(player,point,20){failed=true}.definition()
+-                if(failed || player.isDead) return false
+-            }
++            var failed=false
++            // Keep intermediate corners exact; treating every waypoint as a final 20-unit
++            // arrival cuts corners and loses the verified NPC approach/return path.
++            WalkToSequence(player,route.points.last(),20){failed=true}.withNpcRoute(route).definition()
++            if(failed || player.isDead) return false
+         }
+         return !player.isDead && npc.isInsideRadius(player,Npc.INTERACTION_DISTANCE,true,false)
+     }

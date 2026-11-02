@@ -1,0 +1,23 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt b/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
+index fc81ab7..55c05c5 100644
+--- a/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
++++ b/src/main/kotlin/dev/l2j/autobots/extensions/PlayerExtensions.kt
+@@ -203,6 +203,11 @@ internal fun Player.getCombatBehavior() : CombatBehavior{
+     if(this is Autobot) {
+         return combatBehavior
+     }
++    // Stopping the combat loop clears its cache. Offline planning still needs the
++    // class's shots/preferences; rebuilding them must not enable auto hunt itself.
++    if(AutofarmManager.combatBehaviors[objectId]==null &&
++            dev.l2j.autobots.offlinelife.OfflineFarmManager.isActive(this))
++        AutofarmManager.prepareOfflineBehavior(this)
+     
+     return AutofarmManager.combatBehaviors[objectId] ?: error("CombatBehavior was not found for player $name and class id $classId")
+ }
+@@ -491,4 +496,4 @@ internal fun Player.getControllingBot() : Autobot? {
+ 
+ internal fun Creature.location() : Location {
+     return Location(x, y, z)
+-}
+\ No newline at end of file
++}

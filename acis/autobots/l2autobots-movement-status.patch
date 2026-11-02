@@ -1,0 +1,43 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/movement/MovementStatus.kt b/src/main/kotlin/dev/l2j/autobots/movement/MovementStatus.kt
+new file mode 100644
+index 0000000..19678fd
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/movement/MovementStatus.kt
+@@ -0,0 +1,25 @@
++package dev.l2j.autobots.movement
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.extensions.getActiveSequence
++
++/** Periodic coverage includes bots that never issue a walk order and would otherwise be silent. */
++internal object MovementStatus {
++    fun line(bot: Autobot): String {
++        val sequence=bot.getActiveSequence()?.javaClass?.simpleName ?: "-"
++        val chores=sequence=="TownTrip"
++        val activity=bot.life?.activity?.name ?: "unknown"
++        val traveling=!chores && (sequence!="-" || bot.isMoving && !bot.isAttackingNow)
++        return "Autobots state: ${bot.name} id=${bot.objectId} lv ${bot.level} exp ${bot.exp}" +
++                " at ${bot.x},${bot.y},${bot.z} intention=${bot.ai.desire.intention}" +
++                " target=${bot.target?.objectId ?: "-"} activity=$activity sequence=$sequence" +
++                " traveling=$traveling chores=$chores life=false autofarming=${activity=="Hunt"}" +
++                " dead=${bot.isDead} sitting=${bot.isSitting} store=${bot.isInStoreMode}" +
++                " hp=${bot.currentHp.toInt()}/${bot.maxHp} mp=${bot.currentMp.toInt()}/${bot.maxMp}"
++    }
++
++    fun sample(bots: Collection<Autobot>) {
++        for(bot in bots) runCatching { println(line(bot)) }
++                .onFailure { println("Autobots movement: ${bot.name} id=${bot.objectId} status unavailable: ${it.javaClass.simpleName}") }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index 81e41ef..0bf1d40 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -114,6 +114,7 @@ internal object PopulationManager {
+                 dev.l2j.autobots.population.llm.Llm.summary()
+             }
+             val online = members.values.mapNotNull { active(it) }.distinctBy { it.objectId }
++            if(ticks % 4 == 0) dev.l2j.autobots.movement.MovementStatus.sample(online)
+             if (ticks % GROUPS_EVERY_TICKS == 0) { dev.l2j.autobots.population.group.StaticParties.tick(online,now);GroupFinder.tick(online) }
+             if (ticks % GROUPS_EVERY_TICKS == 1) SocialTrade.tick(online)
+             if (ticks % CLANS_EVERY_TICKS == 3) dev.l2j.autobots.population.group.Clans.tick(online)

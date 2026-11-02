@@ -1,0 +1,326 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TravelByGatekeeperSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TravelByGatekeeperSequence.kt
+index 6775758..187aac0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TravelByGatekeeperSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/TravelByGatekeeperSequence.kt
+@@ -15,15 +15,10 @@ internal class TravelByGatekeeperSequence(override val bot: Player, private val
+     override var cancellationToken: CancellationToken? = null
+ 
+     override suspend fun definition() {
+-        val gatekeeper = bot.findClosestGatekeeper() ?: return onFail()
++        val travel=dev.l2j.autobots.population.economy.GatekeeperTravel
++        val offer=travel.offers(bot).firstOrNull { it.exit===exit } ?: return onFail()
++        if(!travel.travel(bot,offer)) onFail()
+ 
+-        if (!dev.l2j.autobots.population.economy.NpcTravel.reach(bot,gatekeeper)) return onFail()
+-
+-        bot.target = gatekeeper
+-        delay(Rnd.get(2000, 4000).toLong())
+-        if (exit.price > 0 && !bot.reduceAdena("Teleport", exit.price, gatekeeper, false)) return onFail()
+-
+-        bot.teleportTo(exit, 20)
+     }
+ 
+     companion object {
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index a3a31e4..4afb272 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -276,7 +276,7 @@ object OfflineFarmManager {
+      * NPCs often stand on cells no path leads to (behind a counter, under a roof), so the trip then
+      * targets a validated standing point next to the trainer, like the population bots do.
+      */
+-    private fun goToTrainer(player: Player, trainer: Folk, thenHunt: Boolean, gkHopped: Boolean = false) {
++    private suspend fun goToTrainer(player: Player, trainer: Folk, thenHunt: Boolean, gkHopped: Boolean = false) {
+         // Where the hunt continues after the lesson: captured before any gatekeeper hop.
+         val originX = player.x
+         val originY = player.y
+@@ -291,14 +291,15 @@ object OfflineFarmManager {
+             return
+         }
+         val exit=plan.exit
+-        if(exit!=null) {
+-            if(!player.reduceAdena("Offline farm trainer",exit.price,player,false)) {
++        if(plan.ride!=null) {
++            val before=player.adena
++            if(!dev.l2j.autobots.population.economy.GatekeeperTravel.travel(player,plan.ride)) {
+                 lessonCheckedAt[player.objectId]=System.currentTimeMillis()+LESSON_RETRY_AFTER_FAIL_MS
+-                if(thenHunt) goHunting(player) else startFarmLogged(player,"trainer fare unavailable")
++                LOGGER.info("Offline farm: ${player.name} id=${player.objectId} postpones lessons: gatekeeper trip refused.")
++                if(thenHunt) pendingHunt.add(player.objectId) else startFarmLogged(player,"trainer ride refused")
+                 return
+             }
+-            journal[player.objectId]?.let { it.adenaSpent+=exit.price }
+-            player.teleportTo(exit,20);player.onTeleported()
++            journal[player.objectId]?.let { it.adenaSpent+=(before-player.adena).coerceAtLeast(0) }
+         }
+         val destination=plan.walk.points.last()
+         traveling[player.objectId]=Travel(Trip.TO_TRAINER,destination.x,destination.y,destination.z,trainer=plan.trainer,
+@@ -307,27 +308,7 @@ object OfflineFarmManager {
+                 route=plan.walk.points,lastMoveAt=System.currentTimeMillis())
+         val first=plan.walk.points.first()
+         walk(player,first.x,first.y,first.z)
+-        LOGGER.info("Offline farm: ${player.name} id=${player.objectId} goes to trainer ${plan.trainer.name}: ${plan.walk.points.size} waypoints, fare ${exit?.price?:0}.")
+-    }
+-
+-    /** A paid gatekeeper hop to the teleport location closest to the target. Walls, not distance, are the point. */
+-    private fun teleportNear(player: Player, x: Int, y: Int): Boolean {
+-        val loc = TeleportLocationData.getInstance().allTeleportLocations
+-                .filter { !it.isNoble }
+-                .minByOrNull { distance(x, y, it.x, it.y) }
+-        if (loc == null) {
+-            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} found no gatekeeper location near $x,$y.")
+-            return false
+-        }
+-        if (!player.reduceAdena("Offline farm gatekeeper", loc.price, player, false)) {
+-            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} can't afford the gatekeeper hop at ${loc.price} adena (has ${player.adena}).")
+-            return false
+-        }
+-        journal[player.objectId]?.let { it.adenaSpent += loc.price }
+-        player.teleportTo(loc, 20)
+-        player.onTeleported()
+-        LOGGER.info("Offline farm: ${player.name} id=${player.objectId} teleports to ${loc.x},${loc.y} for ${loc.price} adena.")
+-        return true
++        LOGGER.info("Offline farm: ${player.name} id=${player.objectId} goes to trainer ${plan.trainer.name}: ${plan.walk.points.size} waypoints, fare ${plan.ride?.price?:0}.")
+     }
+ 
+     /** Picks a hunting spot for the character's level and sends it there on foot. */
+@@ -662,7 +643,7 @@ object OfflineFarmManager {
+                 }
+                 LOGGER.info("Offline farm: ${player.name} id=${player.objectId} has skills to learn, walks to trainer ${trainer.name}.")
+                 AutofarmManager.stopFarm(player, "going to the trainer")
+-                goToTrainer(player, trainer, thenHunt = false)
++                townAction(player) { goToTrainer(player, trainer, thenHunt = false) }
+             } catch (e: Exception) {
+                 LOGGER.warning("Offline farm lesson check failed for ${player.name} id=${player.objectId}: $e")
+             }
+@@ -809,7 +790,7 @@ object OfflineFarmManager {
+                 travel.trainer?.let { trainerFailures.getOrPut(player.objectId){mutableMapOf()}[it.objectId]=System.currentTimeMillis() }
+                 val alternative=nearestTrainer(player)
+                 if(alternative!=null) {
+-                    goToTrainer(player,alternative,travel.thenHunt,gkHopped=travel.gkHopped)
++                    townAction(player) { goToTrainer(player,alternative,travel.thenHunt,gkHopped=travel.gkHopped) }
+                     return
+                 }
+                 // A trainer trip that led nowhere is retried after a longer pause, not in a minute.
+@@ -823,14 +804,22 @@ object OfflineFarmManager {
+                 }
+             }
+             Trip.TO_SPOT, Trip.BACK_TO_SPOT -> {
+-                if (!travel.gkHopped && (player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE)) &&
+-                        teleportNear(player, travel.targetX, travel.targetY)) {
+-                    // Walking out of a walled town failed; a gatekeeper hop to the spot's area solves it.
+-                    traveling[player.objectId] = Travel(travel.trip, travel.targetX, travel.targetY, travel.targetZ,
+-                            arrivalRadius = travel.arrivalRadius, gkHopped = true,
+-                            lastMoveAt = System.currentTimeMillis())
+-                    walk(player, travel.targetX, travel.targetY, travel.targetZ)
+-                    return
++                if (!travel.gkHopped && (player.isInsideZone(ZoneId.TOWN) || player.isInsideZone(ZoneId.PEACE))) {
++                    val ride=dev.l2j.autobots.population.economy.GatekeeperTravel.toward(player,Location(travel.targetX,travel.targetY,travel.targetZ))
++                    if(ride!=null) {
++                        townAction(player) {
++                            val before=player.adena
++                            if(dev.l2j.autobots.population.economy.GatekeeperTravel.travel(player,ride)) {
++                                journal[player.objectId]?.let { it.adenaSpent+=(before-player.adena).coerceAtLeast(0) }
++                                traveling[player.objectId]=Travel(travel.trip,travel.targetX,travel.targetY,travel.targetZ,
++                                        arrivalRadius=travel.arrivalRadius,gkHopped=true,spotKey=travel.spotKey)
++                            } else {
++                                travel.spotKey?.let { unreachableSpots.getOrPut(player.objectId){mutableSetOf()}.add(it) }
++                                pendingHunt.add(player.objectId)
++                            }
++                        }
++                        return
++                    }
+                 }
+                 // The spot is unreachable from here: remember it and try another one; with none
+                 // left, hunt right where the character stands.
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index a63306e..ec899b9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -92,16 +92,17 @@ internal object HuntingSpots {
+      */
+     fun choose(bot: Player, level: Int, excluded: Set<Long>, wanted: WantedLoot? = null,
+                maxWalk: Int = Int.MAX_VALUE, useExits: Boolean = false, preferredNpcIds: Set<Int> = emptySet()): HuntingSpot? {
++        val exits=if(useExits) dev.l2j.autobots.population.economy.GatekeeperTravel.offers(bot).map { it.exit } else emptyList()
+         val candidates = spots.asSequence()
+                 .filter { it.key !in excluded && isSuitable(it, level) }
+                 .filter { preferredNpcIds.isEmpty() || it.npcIds().any { id -> id in preferredNpcIds } }
+-                .filter { withinReach(bot, it, maxWalk, useExits) }
++                .filter { withinReach(bot, it, maxWalk, exits) }
+                 .filter { !crossesLedge(bot, it) && RouteSafety.safeDestination(bot,it.location) }
+                 .map { it to score(it, bot, level) * lootBonus(it, level, wanted) }
+                 .sortedByDescending { it.second }
+                 .filter { (spot, _) ->
+                     val start = if (useExits && distance(bot.location(),spot.location)>maxWalk)
+-                        teleportExits.minByOrNull { distance(it,spot.location) } ?: bot.location() else bot.location()
++                        exits.minByOrNull { distance(it,spot.location) } ?: bot.location() else bot.location()
+                     RouteSafety.safeSegment(bot,start,spot.location)
+                 }
+                 .take(CANDIDATES)
+@@ -139,10 +140,10 @@ internal object HuntingSpots {
+             net.sf.l2j.gameserver.data.manager.ZoneManager.getInstance().getZone(at.x,at.y,at.z,net.sf.l2j.gameserver.model.zone.type.TownZone::class.java)==null && RouteSafety.safeDestination(player,at) &&
+             (!validateDirect || RouteSafety.safeSegment(player,origin,at))
+ 
+-    private fun withinReach(bot: Player, spot: HuntingSpot, maxWalk: Int, useExits: Boolean): Boolean {
++    private fun withinReach(bot: Player, spot: HuntingSpot, maxWalk: Int, exits: List<TeleportLocation>): Boolean {
+         if (maxWalk == Int.MAX_VALUE) return true
+         if (distance(bot.location(), spot.location) <= maxWalk) return true
+-        return useExits && (teleportExits.minOfOrNull { distance(it, spot.location) } ?: Double.MAX_VALUE) <= maxWalk
++        return (exits.minOfOrNull { distance(it, spot.location) } ?: Double.MAX_VALUE) <= maxWalk
+     }
+ 
+     /** The non-nobility gatekeeper destinations; a ride lands the bot at one of them, the rest is walking. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index ddbb48f..90d1988 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -636,11 +636,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     /** The teleport destination worth paying for: one that saves a long walk to [target]. */
+     private fun gatekeeperExitFor(target: Location): TeleportLocation? {
+-        val exit = TeleportLocationData.getInstance().allTeleportLocations
+-                .filter { !it.isNoble }
+-                .minByOrNull { distance(it, target) } ?: return null
+-        val walkSaved = distance(bot.location(), target) - distance(exit, target)
+-        return if (walkSaved > MIN_WALK_SAVED_BY_TELEPORT) exit else null
++        return dev.l2j.autobots.population.economy.GatekeeperTravel.toward(bot,target,MIN_WALK_SAVED_BY_TELEPORT.toDouble())?.exit
+     }
+ 
+     /** Forgets a spot that is empty or unreachable for a while, so the next update picks another one. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+new file mode 100644
+index 0000000..d3873a2
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+@@ -0,0 +1,67 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.extensions.findClosestGatekeeper
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.offlinelife.OfflineFarmManager
++import dev.l2j.autobots.population.RouteSafety
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.gameserver.data.cache.HtmCache
++import net.sf.l2j.gameserver.data.xml.TeleportLocationData
++import net.sf.l2j.gameserver.model.actor.Npc
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.location.Location
++import net.sf.l2j.gameserver.model.location.TeleportLocation
++import java.util.Calendar
++
++/** A world teleport entry is not a service offered by the player's gatekeeper. */
++internal object GatekeeperTravel {
++    data class Offer(val gatekeeper: Npc,val id: Int,val exit: TeleportLocation,val price: Int)
++
++    fun menuIds(npc: Npc): Set<Int> {
++        val menu=listOf("data/html/teleporter/${npc.npcId}.htm", "data/html/teleporter/${npc.npcId}-1.htm")
++                .mapNotNull { HtmCache.getInstance().getHtm(it) }.joinToString(" ")
++        return Regex("""_goto\s+(\d+)""").findAll(menu).map { it.groupValues[1].toInt() }.toSet()
++    }
++
++    /** Mirrors Gatekeeper's current server-time weekend discount; the core still performs the payment. */
++    fun price(exit: TeleportLocation): Int {
++        val cal=Calendar.getInstance()
++        val weekend=cal.get(Calendar.DAY_OF_WEEK) in listOf(Calendar.SATURDAY,Calendar.SUNDAY)
++        return if(!exit.isNoble && weekend && cal.get(Calendar.HOUR_OF_DAY) in 20..23) exit.price/2 else exit.price
++    }
++
++    fun offers(player: Player): List<Offer> {
++        val npc=player.findClosestGatekeeper() ?: return emptyList()
++        if(!npc.isVisible || distance(player,npc)>8000 || NpcTravel.plan(player,npc,maxDistance=8000)==null) return emptyList()
++        return menuIds(npc).mapNotNull { id ->
++            TeleportLocationData.getInstance().getTeleportLocation(id)?.let { Offer(npc,id,it,price(it)) }
++        }.filter { !it.exit.isNoble && it.price<=Errands.spendable(player) &&
++                RouteSafety.safeDestination(player,it.exit) && RouteSafety.safeSegment(player,it.exit,it.exit) }
++    }
++
++    fun toward(player: Player,target: Location,minSaved: Double=2000.0): Offer? = offers(player)
++            .filter { distance(player.location(),target)-distance(it.exit,target)>minSaved }
++            .minByOrNull { distance(it.exit,target)+it.price/10.0 }
++
++    suspend fun travel(player: Player,offer: Offer): Boolean {
++        val npc=offer.gatekeeper
++        if(!npc.isVisible || offer.id !in menuIds(npc) || offer.exit.isNoble ||
++                price(offer.exit)>Errands.spendable(player)) return false
++        if(!NpcTravel.reach(player,npc,8000) || player.isDead ||
++                player !is Autobot && !OfflineFarmManager.isActive(player)) return false
++        // Balance, fare and menu can change during the walk. No manual charge or direct teleport.
++        if(offer.id !in menuIds(npc) || price(offer.exit)>Errands.spendable(player)) return false
++        val before=player.adena
++        player.target=npc
++        try {
++            npc.onBypassFeedback(player,"goto ${offer.id}")
++            if(player.isTeleporting) player.onTeleported()
++            val arrived=distance(player.location(),offer.exit)<=200
++            EconomyLog.note(player,"gatekeeper ${npc.name} menu=${offer.id} result=${if(arrived) "arrived" else "refused"} paid=${before-player.adena}")
++            return arrived
++        } finally {
++            if(player.target===npc) player.target=null
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+index 71c4fc4..fc8bb0a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+@@ -175,7 +175,7 @@ internal class PartyBehavior(private val bot: Player) {
+         var failed = false
+         when {
+             inTown && !leader.isInsideZone(ZoneId.TOWN) -> {
+-                val exit = TeleportLocationData.getInstance().allTeleportLocations.filter { !it.isNoble && (bot is Autobot || it.price<=dev.l2j.autobots.population.economy.Errands.spendable(bot)) }.minByOrNull { distance(it, leader.location()) }
++                val exit = dev.l2j.autobots.population.economy.GatekeeperTravel.toward(bot,leader.location(),MIN_WALK_SAVED_BY_TELEPORT.toDouble())?.exit
+                 if (exit != null && distance(bot.location(), leader.location()) - distance(exit, leader.location()) > MIN_WALK_SAVED_BY_TELEPORT) {
+                     TravelByGatekeeperSequence(bot, exit) { failed = true }.execute()
+                 } else {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 63d44df..0ab2f84 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -386,11 +386,7 @@ internal class QuestRunner(private val bot: Player) {
+     }
+ 
+     private fun gatekeeperExitFor(destination: Location): TeleportLocation? {
+-        val exit = TeleportLocationData.getInstance().allTeleportLocations
+-                .filter { !it.isNoble && (bot is Autobot || it.price<=dev.l2j.autobots.population.economy.Errands.spendable(bot)) }
+-                .minByOrNull { distance(it, destination) } ?: return null
+-        val walkSaved = distance(bot.location(), destination) - distance(exit, destination)
+-        return if (walkSaved > MIN_WALK_SAVED_BY_TELEPORT) exit else null
++        return dev.l2j.autobots.population.economy.GatekeeperTravel.toward(bot,destination,MIN_WALK_SAVED_BY_TELEPORT.toDouble())?.exit
+     }
+ 
+     /**
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/skills/TrainerTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/skills/TrainerTravel.kt
+index 14b9619..1bf3bb2 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/skills/TrainerTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/skills/TrainerTravel.kt
+@@ -12,7 +12,10 @@ import net.sf.l2j.gameserver.model.location.TeleportLocation
+ 
+ /** Walking to a local guild is free; a paid ride is a last resort, and must leave a supply reserve. */
+ internal object TrainerTravel {
+-    data class Plan(val trainer: Folk,val walk: NpcTravel.Walk,val exit: TeleportLocation?=null)
++    data class Plan(val trainer: Folk,val walk: NpcTravel.Walk,
++                    val ride: dev.l2j.autobots.population.economy.GatekeeperTravel.Offer?=null) {
++        val exit get()=ride?.exit
++    }
+ 
+     fun select(player: Player,excluded: Set<Int> = emptySet()): Plan? {
+         val trainers=World.getInstance().objects.filterIsInstance<Folk>()
+@@ -21,12 +24,11 @@ internal object TrainerTravel {
+         for(npc in trainers.filter { distance(player,it)<=12000 }.take(6)) {
+             NpcTravel.plan(player,npc)?.let { return Plan(npc,it) }
+         }
+-        val budget=(player.adena-Errands.reserve(player)).coerceAtLeast(0)
++        val rides=dev.l2j.autobots.population.economy.GatekeeperTravel.offers(player)
+         return trainers.take(8).flatMap { npc ->
+-            TeleportLocationData.getInstance().allTeleportLocations.asSequence()
+-                    .filter { !it.isNoble && it.price<=budget && distance(it,npc.location())<6000 }
+-                    .sortedBy { it.price+distance(it,npc.location())/10 }.take(2)
+-                    .mapNotNull { exit -> NpcTravel.plan(player,npc,exit,6000)?.let { Plan(npc,it,exit) } }.toList()
+-        }.minByOrNull { (it.exit?.price?:0)+it.walk.length/10 }
++            rides.filter { distance(it.exit,npc.location())<6000 }
++                    .sortedBy { it.price+distance(it.exit,npc.location())/10 }.take(2)
++                    .mapNotNull { ride -> NpcTravel.plan(player,npc,ride.exit,6000)?.let { Plan(npc,it,ride) } }
++        }.minByOrNull { (it.ride?.price?:0)+it.walk.length/10 }
+     }
+ }

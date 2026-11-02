@@ -1,0 +1,66 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/movement/SupplyBudget.kt b/src/main/kotlin/dev/l2j/autobots/movement/SupplyBudget.kt
+new file mode 100644
+index 0000000..73a0562
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/movement/SupplyBudget.kt
+@@ -0,0 +1,12 @@
++package dev.l2j.autobots.movement
++
++/** Reserve one emergency escape only when the wallet also covers at least three heals. */
++internal object SupplyBudget {
++    fun healingTarget(cash: Int,have: Int,healingPrice: Int,escapePrice: Int,ownsEscape: Boolean): Int {
++        if(healingPrice<=0) return have.coerceIn(0,10)
++        val money=cash.coerceAtLeast(0).toLong()
++        val minimum=(3-have).coerceAtLeast(0).toLong()*healingPrice
++        val reserve=if(!ownsEscape && escapePrice>0 && money>=minimum+escapePrice) escapePrice.toLong() else 0L
++        return (have.coerceAtLeast(0).toLong()+(money-reserve).coerceAtLeast(0)/healingPrice).coerceAtMost(10).toInt()
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+index 90dd035..9ed1876 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -97,10 +97,10 @@ internal object OfflineChores {
+         if(Gear.isArcher(player)) buy(player,Gear.arrowId(player),target=50,onlyBelow=10,budgetShare=1.0)
+         val potions=dev.l2j.autobots.population.economy.Healing.count(player)
+         val potion=dev.l2j.autobots.population.economy.Healing.product(player)
+-        if(potion!=null) buy(player,potion,target=10,onlyBelow=3,budgetShare=1.0,have=potions)
+-        if (Gear.isArcher(player)) buy(player, Gear.arrowId(player), target = 1500, onlyBelow = 500, budgetShare = 0.6)
++        if(potion!=null) buy(player,potion,target=dev.l2j.autobots.population.economy.Healing.restockTarget(player,potion),onlyBelow=3,budgetShare=1.0,have=potions)
+         // No town shop sells mana potions in Interlude: mages rest, as players did.
+         buy(player, Gear.SCROLL_OF_ESCAPE, target = if(player.level<20) 1 else 2, onlyBelow = 1, budgetShare = 1.0)
++        if (Gear.isArcher(player)) buy(player, Gear.arrowId(player), target = 1500, onlyBelow = 500, budgetShare = 0.6)
+         if (Gear.canBuyShots(player)) {
+             val shotId = Gear.shotId(player)
+             if (shotId > 0) buy(player, shotId, target = if(player.level<20) 200 else 500, onlyBelow = if(player.level<20) 50 else 150, budgetShare = 0.4, essential=false)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt
+index 5636b8b..4facf82 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt
+@@ -17,6 +17,13 @@ internal object Healing {
+     }.filter { it.second<=player.adena }.minByOrNull { it.second }?.first
+         ?: Gear.HEALING_POTIONS.filter { Market.findProduct(player,it)!=null }.minByOrNull { Market.npcPrice(it)?:Int.MAX_VALUE }
+ 
++    /** Keep the two essential purchases in one budget, without extra shopping dialogues. */
++    fun restockTarget(player: Player,potion: Int): Int {
++        val healing=Market.findProduct(player,potion)?.let { (shop,item) -> Market.priceWithTax(shop,item).coerceAtLeast(1) } ?: return 10
++        val escape=Market.findProduct(player,Gear.SCROLL_OF_ESCAPE)?.let { (shop,item) -> Market.priceWithTax(shop,item) } ?: 0
++        return dev.l2j.autobots.movement.SupplyBudget.healingTarget(player.adena,count(player),healing,escape,Gear.count(player,Gear.SCROLL_OF_ESCAPE)>0)
++    }
++
+     fun use(player: Player) {
+         if(player !is Autobot || player.isDead) return // live auto-hunt uses the owner's own settings
+         val now=System.currentTimeMillis()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index 96933d3..28d581b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -244,7 +244,7 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         val have=Healing.count(bot)
+         if(have>=3) return
+         val potion=Healing.product(bot) ?: return
+-        buy(potion,target=10,budgetShare=1.0,onlyBelow=3,have=have,essential=true)
++        buy(potion,target=Healing.restockTarget(bot,potion),budgetShare=1.0,onlyBelow=3,have=have,essential=true)
+     }
+ 
+     /** Buys up to [target] pieces when the bot has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */

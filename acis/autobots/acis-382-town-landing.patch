@@ -1,0 +1,47 @@
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/data/xml/MapRegionData.java b/aCis_gameserver/java/net/sf/l2j/gameserver/data/xml/MapRegionData.java
+index d9415d9..452db9f 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/data/xml/MapRegionData.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/data/xml/MapRegionData.java
+@@ -10,6 +10,7 @@ import net.sf.l2j.gameserver.data.manager.ZoneManager;
+ import net.sf.l2j.gameserver.enums.SiegeSide;
+ import net.sf.l2j.gameserver.enums.ZoneId;
+ import net.sf.l2j.gameserver.enums.actors.ClassRace;
++import net.sf.l2j.gameserver.geoengine.GeoEngine;
+ import net.sf.l2j.gameserver.model.actor.Creature;
+ import net.sf.l2j.gameserver.model.actor.Npc;
+ import net.sf.l2j.gameserver.model.actor.Player;
+@@ -216,7 +217,7 @@ public class MapRegionData implements IXmlReader
+ 	{
+ 		// The character isn't a player, bypass all checks and retrieve a random spawn location on closest town.
+ 		if (!(creature instanceof Player))
+-			return getClosestTown(creature).getRandomLoc();
++			return groundTownSpawn(getClosestTown(creature).getRandomLoc());
+ 		
+ 		final Player player = ((Player) creature);
+ 		
+@@ -278,13 +279,24 @@ public class MapRegionData implements IXmlReader
+ 			return arena.getRandomLoc();
+ 		
+ 		// Retrieve a random spawn location of the nearest town.
+-		return getClosestTown(player).getRandomLoc();
++		return groundTownSpawn(getClosestTown(player).getRandomLoc());
+ 	}
+ 	
+ 	/**
+ 	 * @param creature : The Creature used to find race, x and y.
+ 	 * @return the closest {@link TownZone} based on a {@link Creature}. There's a Race condition for elf / dark elf races.
+ 	 */
++	private Location groundTownSpawn(Location spawn)
++	{
++		// Older spawn heights can leave a detached character outside the town's Z range.
++		// Keep the chosen town and XY; use only a nearby floor recognized as town ground.
++		final int groundZ = GeoEngine.getInstance().getHeight(spawn.getX(), spawn.getY(), spawn.getZ());
++		if (Math.abs(groundZ - spawn.getZ()) <= 256 &&
++			ZoneManager.getInstance().getZone(spawn.getX(), spawn.getY(), groundZ + 5, TownZone.class) != null)
++			return new Location(spawn.getX(), spawn.getY(), groundZ);
++		return spawn;
++	}
++	
+ 	private final TownZone getClosestTown(Creature creature)
+ 	{
+ 		switch (getMapRegion(creature.getX(), creature.getY()))
