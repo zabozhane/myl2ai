@@ -1,0 +1,34 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index cfce4a6..cdd3119 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -730,8 +730,7 @@ object OfflineFarmManager {
+                 if (player.isUnderAttack() || player.isCastingNow || player.isAttackingNow ||
+                         !AutofarmManager.isAutoFarming(player) || player.isInsideZone(ZoneId.TOWN)) continue
+                 ensureQuestsLoaded(player)
+-                val ready = RepeatQuests.all.any { q -> player.getQuestState(q.questName)?.isStarted == true &&
+-                        q.questItems.sumOf { player.inventory.getInventoryItemCount(it, -1) } >= q.turnInAt }
++                val ready = repeatQuestReadyAtHome(player)
+                 val routine = now - (lastTownTripAt[id] ?: now) >= ROUTINE_TRIP_MS && OfflineEquipment.surplus(player).isNotEmpty()
+                 val lowHealing=dev.l2j.autobots.population.economy.Healing.needsRestockTrip(player)
+                 val productiveMs=now-(productiveSince[id]?:now)
+@@ -837,6 +836,19 @@ object OfflineFarmManager {
+         if (questsLoaded.add(player.objectId)) QuestWorld.loadQuestStates(player)
+     }
+ 
++    /** A routine town return can only complete quests served by that actual destination. */
++    private fun repeatQuestReadyAtHome(player: Player): Boolean {
++        if(!AutobotData.settings.questsEnabled) return false
++        val home=MapRegionData.getInstance().getLocationToTeleport(player,MapRegionData.TeleportType.TOWN)
++        return RepeatQuests.all.any { quest ->
++            player.getQuestState(quest.questName)?.isStarted==true &&
++                    quest.questItems.sumOf { player.inventory.getInventoryItemCount(it,-1) }>=quest.turnInAt &&
++                    QuestWorld.closestNpc(player,listOf(quest.giver))?.let { giver ->
++                        dev.l2j.autobots.utils.distance(home,giver.location())<=GIVER_WITHIN
++                    }==true
++        }
++    }
++
+     private fun availableQuest(player: Player, spot: HuntingSpot): dev.l2j.autobots.population.quests.RepeatQuest? {
+         if (!AutobotData.settings.questsEnabled) return null
+         ensureQuestsLoaded(player)
