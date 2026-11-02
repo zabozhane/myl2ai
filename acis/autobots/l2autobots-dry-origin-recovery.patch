@@ -1,0 +1,22 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/movement/TownUnstuck.kt b/src/main/kotlin/dev/l2j/autobots/movement/TownUnstuck.kt
+index 69e3dad..11aa00e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/movement/TownUnstuck.kt
++++ b/src/main/kotlin/dev/l2j/autobots/movement/TownUnstuck.kt
+@@ -40,7 +40,7 @@ internal object TownUnstuck {
+ 
+     private fun needsEscape(player: Player)=eligible(player) && (offGround(player) || isSealed(player))
+ 
+-    /** No large search: uncertainty, timeout or reaching the surrounding street means no recovery. */
++    /** No large search: uncertainty, timeout or reaching the surrounding dry ground means no recovery. */
+     fun isSealed(player: Player): Boolean {
+         if(!eligible(player)) return false
+         val geo=GeoEngine.getInstance()
+@@ -60,6 +60,8 @@ internal object TownUnstuck {
+                 val key=Triple(x,y,z)
+                 if(key in seen || !geo.canMoveToTarget(from.x,from.y,from.z,x,y,z)) continue
+                 val at=Location(x,y,z)
++                // Underwater cells are not an exit for the dry walking planner.
++                if(dev.l2j.autobots.population.RouteSafety.isWater(at)) continue
+                 if(distance(origin,at)>=384) return false
+                 seen.add(key);queue.add(at)
+             }

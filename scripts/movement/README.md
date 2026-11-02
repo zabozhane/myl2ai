@@ -290,7 +290,7 @@ python3 -m unittest discover -s scripts -p 'test_movement_report.py'
   каст, физическое прибытие в деревню, повтор подготовки, выход и реальный XP.
   Без GM/выдачи предметов/денег/подстановки HP; после начальной точки переносы только
   от штатного навыка. Маркер `FIELD ORIGIN RECOVERY ALL PASSED`, timeout 960 с.
-- `FieldRecoveryEligibilityVerify` — записанные связные точки Marusya и Mapgyk:
+- `FieldRecoveryEligibilityVerify` — открытая сухая точка Marusya в Talking Island и записанная точка Mapgyk:
   обычный отказ пути не должен превращаться в выход через `/unstuck`.
   Маркер `FIELD RECOVERY ELIGIBILITY ALL PASSED`, timeout 120 с.
 
@@ -302,3 +302,13 @@ python3 -m unittest discover -s scripts -p 'test_movement_report.py'
   затем нужны настоящая дорога, прибытие и XP в обычном бою. Начальная позиция задана
   по записи сбоя, без GM/выдачи ресурсов/установки HP. Проверяется сохранение выбранной
   цели между тиками. Маркер `HUNT CANDIDATE HISTORY ALL PASSED`, timeout 1080 с.
+
+- `DryOriginRecoveryVerify --plan-only` — Marusya 10 в записанной точке берега:
+  обычная высота, 1588 аден и нет SoE. Старый геометрический поиск выходит только
+  через воду, сухая компонента содержит три клетки. Маркер `DRY ORIGIN PLAN ALL PASSED`.
+- `DryOriginRecoveryVerify` — настоящий контроллер, полный штатный пятиминутный
+  выход, прибытие с исходными деньгами/без выданного свитка, повтор подготовки,
+  выход на охоту и настоящий прирост XP. Начальная позиция задаётся по записи сбоя;
+  без GM, выдачи ресурсов или установки HP. Если обычный план выбирает торговлю/AFK,
+  в тесте подставляется окончание только этих пауз, затем обычный контроллер продолжает охоту.
+  Маркер `DRY ORIGIN RECOVERY ALL PASSED`, timeout 960 с.
