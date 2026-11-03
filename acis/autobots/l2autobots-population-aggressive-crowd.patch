@@ -1,8 +1,28 @@
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
-index 393809a..1a9b34a 100644
+index 393809a..4dc2e93 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
-@@ -142,13 +142,10 @@ internal object HuntingSpots {
+@@ -96,10 +96,17 @@ internal object HuntingSpots {
+      * ([useExits]), at most [maxWalk] of walking left after the best teleport exit.
+      */
+     fun choose(bot: Player, level: Int, excluded: Set<Long>, wanted: WantedLoot? = null,
+-               maxWalk: Int = Int.MAX_VALUE, useExits: Boolean = false, preferredNpcIds: Set<Int> = emptySet()): HuntingSpot? {
++               maxWalk: Int = Int.MAX_VALUE, useExits: Boolean = false, preferredNpcIds: Set<Int> = emptySet()): HuntingSpot? =
++            choose(bot,level,excluded,wanted,maxWalk,useExits,preferredNpcIds,allowCrowded=false) ?:
++            // A resident with no other prey still hunts somewhere rather than standing idle;
++            // an offline character keeps the strict rule, its owner's character must not be lost.
++            if(bot is dev.l2j.autobots.Autobot) choose(bot,level,excluded,wanted,maxWalk,useExits,preferredNpcIds,allowCrowded=true) else null
++
++    private fun choose(bot: Player, level: Int, excluded: Set<Long>, wanted: WantedLoot?,
++               maxWalk: Int, useExits: Boolean, preferredNpcIds: Set<Int>, allowCrowded: Boolean): HuntingSpot? {
+         val exits=if(useExits) dev.l2j.autobots.population.economy.GatekeeperTravel.offers(bot).map { it.exit } else emptyList()
+         val candidates = spots.asSequence()
+-                .filter { it.key !in excluded && isSuitable(it, level) && !isDangerousFor(bot,it.dangerLevel) && !isCrowdedFor(bot,it) }
++                .filter { it.key !in excluded && isSuitable(it, level) && !isDangerousFor(bot,it.dangerLevel) && (allowCrowded || !isCrowdedFor(bot,it)) }
+                 .filter { preferredNpcIds.isEmpty() || it.npcIds().any { id -> id in preferredNpcIds } }
+                 .filter { withinReach(bot, it, maxWalk, exits) }
+                 .filter { !crossesLedge(bot, it) && RouteSafety.safeDestination(bot,it.location) }
+@@ -142,13 +149,10 @@ internal object HuntingSpots {
      fun keysWithNpcNear(location: Location,npcId: Int,radius: Int): List<Long> =
              spots.filter { npcId in it.npcIds() && distance(it.location,location)<=radius }.map { it.key }
  
@@ -18,3 +38,16 @@ index 393809a..1a9b34a 100644
  
      /** Autonomous novices must not plan ordinary prey under stronger aggressive guards. */
      fun isDangerousFor(player: Player,monsterLevel: Int): Boolean =
+@@ -165,7 +169,11 @@ internal object HuntingSpots {
+ 
+     /** Validate the final walk from a paid arrival, not from the other side of the map. */
+     fun nearArrival(player: Player,origin: Location,excluded: Set<Long>,maxWalk: Int=8000,surfaceOnly: Boolean=false): List<HuntingSpot> =
+-            spots.asSequence().filter { it.key !in excluded && it.monstersIn(targetLevels(player))>0 && !isDangerousFor(player,it.dangerLevel) && !isCrowdedFor(player,it) && distance(origin,it.location)<=maxWalk }
++            nearArrival(player,origin,excluded,maxWalk,surfaceOnly,allowCrowded=false).ifEmpty {
++                if(player is dev.l2j.autobots.Autobot) nearArrival(player,origin,excluded,maxWalk,surfaceOnly,allowCrowded=true) else it }
++
++    private fun nearArrival(player: Player,origin: Location,excluded: Set<Long>,maxWalk: Int,surfaceOnly: Boolean,allowCrowded: Boolean): List<HuntingSpot> =
++            spots.asSequence().filter { it.key !in excluded && it.monstersIn(targetLevels(player))>0 && !isDangerousFor(player,it.dangerLevel) && (allowCrowded || !isCrowdedFor(player,it)) && distance(origin,it.location)<=maxWalk }
+                     .filter { RouteSafety.safeDestination(player,it.location) }
+                     .filter { !surfaceOnly || kotlin.math.abs(net.sf.l2j.gameserver.geoengine.GeoEngine.getInstance().getHeight(it.location.x,it.location.y,it.location.z+5000)-it.location.z)<=200 }
+                     .sortedBy { distance(origin,it.location) }.filter { huntAnchor(player,it,origin,validateDirect=false)!=null }.take(8).toList()
