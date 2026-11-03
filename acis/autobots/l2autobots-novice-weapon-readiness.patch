@@ -1,0 +1,21 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index 9248e0c..9be911c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -180,11 +180,14 @@ internal object Gear {
+         return current.item.crystalType.id >= target.crystalType.id && current.referencePrice >= target.referencePrice
+     }
+ 
+-    /** Weapon or chest more than a grade below the level, or no weapon at all: the bot is undergeared. */
++    /** Starting weapons can be inadequate even while every legal item still has no grade. */
+     fun isWeak(bot: Player): Boolean {
++        val weapon = bot.inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND)
++        // Use the real relevant attack stat, including enchantment, rather than price or item names.
++        if(bot.level>=10 && (weapon==null || dev.l2j.autobots.offlinelife.OfflineEquipment.score(bot,weapon)<10.0)) return true
+         val expected = gradeFor(bot.level).id
+         if (expected == 0) return false
+-        val weapon = bot.inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND) ?: return true
++        if(weapon==null) return true
+         val chest = bot.inventory.getPaperdollItem(Inventory.PAPERDOLL_CHEST)
+         return weapon.item.crystalType.id < expected - 1 || (chest?.item?.crystalType?.id ?: -1) < expected - 1
+     }
