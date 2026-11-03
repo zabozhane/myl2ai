@@ -1,0 +1,30 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+index 200843d..7f05366 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+@@ -37,7 +37,7 @@ internal object GatekeeperTravel {
+     /** Preserve the existing ten-heal travel rule by buying the missing stock, never by pretending it is carried. */
+     private fun noviceTopUpAt(player: Player,origin: Location): TopUp? {
+         val have=Healing.count(player)
+-        if(player.level>=20 || have !in 3..9 || Gear.count(player,Gear.SCROLL_OF_ESCAPE)<1) return null
++        if(!Errands.usesNoviceTravelBudget(player) || have !in 3..9 || Gear.count(player,Gear.SCROLL_OF_ESCAPE)<1) return null
+         val need=10-have
+         return Gear.HEALING_POTIONS.mapNotNull { Market.findProductAt(it,origin) }
+                 .filter { it.first.merchant.isVisible && (!it.second.hasLimitedStock() || it.second.count>=need) }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index 0a671d8..8c3b0bf 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -44,8 +44,11 @@ internal object Errands {
+ 
+     fun spendable(bot: Player): Int = (bot.adena - reserve(bot)).coerceAtLeast(0)
+ 
++    /** A base-class character still needs its first profession after reaching level 20. */
++    fun usesNoviceTravelBudget(bot: Player): Boolean = bot.level<20 || bot.classId.level()==0
++
+     /** Prepared novices may use cash for an actual ride: emergency supplies are already in the bag. */
+-    fun travelSpendable(bot: Player): Int = if(bot.level<20 && Healing.count(bot)>=10 && Gear.count(bot,Gear.SCROLL_OF_ESCAPE)>0)
++    fun travelSpendable(bot: Player): Int = if(usesNoviceTravelBudget(bot) && Healing.count(bot)>=10 && Gear.count(bot,Gear.SCROLL_OF_ESCAPE)>0)
+         bot.adena else spendable(bot)
+ 
+     fun loadPercent(bot: Player): Int = if (bot.maxLoad <= 0) 0 else (bot.currentLoad.toLong() * 100 / bot.maxLoad).toInt()
