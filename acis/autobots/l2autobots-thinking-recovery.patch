@@ -1,0 +1,44 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+index a0fb4ec..eda5106 100644
+--- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
++++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+@@ -114,21 +114,25 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+         
+         if(activeSequence != null) return
+         
+-        if(isBusyThinking.get()) return
+-        
+-        isBusyThinking.set(true)
+-        handleScheduledLogout()
+-        
+-        val life = life
+-        if(life != null) {
+-            life.onUpdate()
+-        } else if(isInsideZone(ZoneId.TOWN)) {
+-            socialBehavior.onUpdate()
+-        } else {
+-            combatBehavior.onUpdate()
++        if(!isBusyThinking.compareAndSet(false,true)) return
++
++        try {
++            handleScheduledLogout()
++            val life = life
++            if(life != null) {
++                life.onUpdate()
++            } else if(isInsideZone(ZoneId.TOWN)) {
++                socialBehavior.onUpdate()
++            } else {
++                combatBehavior.onUpdate()
++            }
++        } finally {
++            try {
++                updateLocation()
++            } finally {
++                isBusyThinking.set(false)
++            }
+         }
+-        updateLocation()
+-        isBusyThinking.set(false)
+     }
+ 
+     private fun updateLocation() {
