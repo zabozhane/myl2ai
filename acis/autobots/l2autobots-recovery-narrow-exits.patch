@@ -1,0 +1,18 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+index cf70e04..7d144a3 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+@@ -73,9 +73,10 @@ internal object NpcTravel {
+         val deadline=System.nanoTime()+if(longWalk) 5_000_000_000L else 3_000_000_000L
+         search(player,from,to,maxDistance,if(longWalk) 2400 else 800,if(longWalk) 800 else 160,deadline,reversible)?.let { return it }
+         // A coarse grid can have no node on a narrow village ramp even though the
+-        // geodata permits walking there. Refine failed local searches within the same
+-        // finite deadline; every link still uses the core pathfinder and safety checks.
+-        return if(!longWalk && System.nanoTime()<deadline)
++        // geodata permits walking there. A nearby goal still needs local refinement
++        // when its caller permits a long detour; the larger allowance must not remove
++        // the narrow exit. Keep the original finite deadline and all segment checks.
++        return if((!longWalk || distance(from,to)<=20000) && System.nanoTime()<deadline)
+             search(player,from,to,maxDistance,200,2000,deadline,reversible) else null
+     }
+ 
