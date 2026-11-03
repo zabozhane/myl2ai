@@ -1,0 +1,85 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index ec899b9..5a86cd7 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -94,7 +94,7 @@ internal object HuntingSpots {
+                maxWalk: Int = Int.MAX_VALUE, useExits: Boolean = false, preferredNpcIds: Set<Int> = emptySet()): HuntingSpot? {
+         val exits=if(useExits) dev.l2j.autobots.population.economy.GatekeeperTravel.offers(bot).map { it.exit } else emptyList()
+         val candidates = spots.asSequence()
+-                .filter { it.key !in excluded && isSuitable(it, level) }
++                .filter { it.key !in excluded && isSuitable(it, level) && !isDangerousFor(bot,it.dangerLevel) }
+                 .filter { preferredNpcIds.isEmpty() || it.npcIds().any { id -> id in preferredNpcIds } }
+                 .filter { withinReach(bot, it, maxWalk, exits) }
+                 .filter { !crossesLedge(bot, it) && RouteSafety.safeDestination(bot,it.location) }
+@@ -119,8 +119,22 @@ internal object HuntingSpots {
+ 
+     /** True when hunting at [spot] doesn't mean a walk across the map: close directly, or close after a teleport exit. */
+     /** Anchor on prey the actual character can target, rather than an unrelated spawn in the same cell. */
+-    fun targetLevels(player: Player): IntRange = (player.level-5).coerceAtLeast(1)..
+-            (player.level+if(player is dev.l2j.autobots.Autobot && player.level<20) 1 else 3)
++    fun targetLevels(player: Player): IntRange {
++        val above=when {
++            // Offline novices choose spots for level-2; suitableLevels caps these at
++            // their own level. Anchors, fallback search and combat must keep that cap.
++            player.level<20 && dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(player) -> 0
++            player.level<20 && player is dev.l2j.autobots.Autobot -> 1
++            else -> 3
++        }
++        return (player.level-5).coerceAtLeast(1)..(player.level+above)
++    }
++
++    /** Autonomous novices must not plan ordinary prey under stronger aggressive guards. */
++    fun isDangerousFor(player: Player,monsterLevel: Int): Boolean =
++            if(player.level<20 && (player is dev.l2j.autobots.Autobot ||
++                    dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(player)))
++                monsterLevel>targetLevels(player).last else isDeadly(monsterLevel,player.level)
+ 
+     fun huntAnchor(player: Player, spot: HuntingSpot, origin: Location=player.location(),validateDirect: Boolean=true): Location? = SpawnTable.getInstance().spawns.asSequence()
+             .filter { it.template.isType("Monster") && it.template.level.toInt() in targetLevels(player) }
+@@ -130,7 +144,7 @@ internal object HuntingSpots {
+ 
+     /** Validate the final walk from a paid arrival, not from the other side of the map. */
+     fun nearArrival(player: Player,origin: Location,excluded: Set<Long>,maxWalk: Int=8000,surfaceOnly: Boolean=false): List<HuntingSpot> =
+-            spots.asSequence().filter { it.key !in excluded && it.monstersIn(targetLevels(player))>0 && !isDeadly(it.dangerLevel,player.level) && distance(origin,it.location)<=maxWalk }
++            spots.asSequence().filter { it.key !in excluded && it.monstersIn(targetLevels(player))>0 && !isDangerousFor(player,it.dangerLevel) && distance(origin,it.location)<=maxWalk }
+                     .filter { RouteSafety.safeDestination(player,it.location) }
+                     .filter { !surfaceOnly || kotlin.math.abs(net.sf.l2j.gameserver.geoengine.GeoEngine.getInstance().getHeight(it.location.x,it.location.y,it.location.z+5000)-it.location.z)<=200 }
+                     .sortedBy { distance(origin,it.location) }.filter { huntAnchor(player,it,origin,validateDirect=false)!=null }.take(8).toList()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/RouteSafety.kt b/src/main/kotlin/dev/l2j/autobots/population/RouteSafety.kt
+index f4e27f0..1bbf5d3 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/RouteSafety.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/RouteSafety.kt
+@@ -61,7 +61,7 @@ internal object RouteSafety {
+         }
+         for (cx in Math.floorDiv(minOf(from.x,to.x)-1000,CELL)..Math.floorDiv(maxOf(from.x,to.x)+1000,CELL))
+             for (cy in Math.floorDiv(minOf(from.y,to.y)-1000,CELL)..Math.floorDiv(maxOf(from.y,to.y)+1000,CELL)) {
+-                if (threats[cx to cy].orEmpty().any { HuntingSpots.isDeadly(it.level,player.level) &&
++                if (threats[cx to cy].orEmpty().any { HuntingSpots.isDangerousFor(player,it.level) &&
+                             minOf(abs(it.loc.z-from.z),abs(it.loc.z-to.z))<2500 && crosses(it.loc) }) return false
+             }
+         if (waterDeaths.values.any { crosses(it) }) return false
+diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+index 263c14f..bc2b4a9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
++++ b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+@@ -466,9 +466,6 @@ internal fun Creature.getKnownTargatablesInRadius(radius: Int, attackPlayerType:
+ // Monsters outside the level window give little or no exp (or are too dangerous), unless they already attack us.
+ private const val TARGET_LEVEL_BELOW = 5
+ private const val TARGET_LEVEL_ABOVE = 3
+-// Without potions, shots or decent gear a newbie bot loses to a monster two levels above it as often as it wins.
+-private const val NEWBIE_TARGET_LEVEL_ABOVE = 1
+-private const val NEWBIE_MAX_LEVEL = 19
+ 
+ private fun Creature.isWorthTargeting(target: Creature): Boolean {
+     if (target !is Monster || target.target === this) return true
+@@ -479,6 +476,8 @@ private fun Creature.isWorthTargeting(target: Creature): Boolean {
+         if(!dev.l2j.autobots.offlinelife.OfflineLife.allowsTarget(this,target)) return false
+         dev.l2j.autobots.offlinelife.OfflineLife.targets(this)?.let { return target.npcId in it }
+     }
+-    val above = if (this is Autobot && level <= NEWBIE_MAX_LEVEL) NEWBIE_TARGET_LEVEL_ABOVE else TARGET_LEVEL_ABOVE
+-    return target.level in (level - TARGET_LEVEL_BELOW)..(level + above)
++    val levels=if(this is net.sf.l2j.gameserver.model.actor.Player)
++        dev.l2j.autobots.population.HuntingSpots.targetLevels(this)
++        else (level-TARGET_LEVEL_BELOW)..(level+TARGET_LEVEL_ABOVE)
++    return target.level in levels
+ }
