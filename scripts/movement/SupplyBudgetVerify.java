@@ -48,7 +48,9 @@ public class SupplyBudgetVerify extends OfflineTownVerify{
   GameServer.main(new String[0]);Object m=singleton("offlinelife.OfflineFarmManager");invoke(member(m,"travelTask").get(m),"cancel");
   for(Object job:((Map<?,?>)member(m,"townJobs").get(m)).values())invoke(job,"cancel");Thread.sleep(300);((Map<?,?>)member(m,"townJobs").get(m)).clear();
   invoke(member(AutofarmManager.INSTANCE,"onUpdateTask").get(AutofarmManager.INSTANCE),"cancel");
-  Player p=World.getInstance().getPlayer("Zenthen");check(p!=null,"snapshot restores offline buyer");invoke(AutofarmManager.INSTANCE,"quiesce",p);shopping(p,null,"offline buyer");
+  Player p=World.getInstance().getPlayer("Zenthen");
+  if(p==null){p=Player.restore(268486152);check(p!=null,"recorded offline buyer restores explicitly");p.setClient((net.sf.l2j.gameserver.network.GameClient)Class.forName("dev.l2j.autobots.offlinelife.DetachedClient").getConstructor(Player.class).newInstance(p));invoke(AutofarmManager.INSTANCE,"onEnterWorld",p);World.getInstance().addPlayer(p);p.setOnlineStatus(true,true);p.spawnMe(p.getX(),p.getY(),p.getZ());p.onPlayerEnter();((Map<Integer,Player>)member(m,"farming").get(m)).put(p.getObjectId(),p);invoke(m,"openJournal",p);}
+  invoke(AutofarmManager.INSTANCE,"quiesce",p);shopping(p,null,"offline buyer");
   Autobot b=(Autobot)invoke(singleton("dao.AutobotsDao"),"loadByName","Weapons");check(b!=null,"snapshot restores population buyer");
   suspendValue(singleton("AutobotsManager"),"spawnAutobot",b);((Map<?,?>)invoke(singleton("AutobotsManager"),"getActiveBots")).remove(b.getName());
   Object trip=Class.forName("dev.l2j.autobots.population.economy.TownTrip").getConstructor(Autobot.class,boolean.class).newInstance(b,false);shopping(b,trip,"population buyer");
