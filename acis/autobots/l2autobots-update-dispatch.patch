@@ -1,0 +1,16 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 46ae0e2..53bfdaf 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -65,10 +65,8 @@ object AutobotsManager {
+                     try {
+                         it.onUpdate()
+                     } catch (e: CancellationException) {
+-                        // A sequence cancelled on logout or a change of plans: expected, nothing to report.
+-                        it.isBusyThinking.set(false)
++                        // onUpdate releases only the guard it acquired; the dispatcher never owns it.
+                     } catch (e: Exception){
+-                        it.isBusyThinking.set(false)
+                         // A cancelled sequence (the bot changed its plans) is not an error.
+                         if (e !is kotlinx.coroutines.CancellationException) e.printStackTrace()
+                     }
