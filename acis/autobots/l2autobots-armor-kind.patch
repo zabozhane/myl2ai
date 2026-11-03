@@ -1,0 +1,144 @@
+diff --git a/data/autobots/equipment.xml b/data/autobots/equipment.xml
+index c60dc95..d486548 100644
+--- a/data/autobots/equipment.xml
++++ b/data/autobots/equipment.xml
+@@ -2,7 +2,7 @@
+ 
+ <equipmentSets>
+ 
+-    <equipment classId="HUMAN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="HUMAN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="34" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="WARRIOR" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="KNIGHT" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ROGUE" minLevel="20" maxLevel="39" rhand="279" lhand="" head="47" chest="395" legs="417" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+@@ -11,7 +11,7 @@
+     <equipment classId="HUMAN_WIZARD" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="CLERIC" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+-    <equipment classId="ELVEN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="ELVEN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="34" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="ELVEN_KNIGHT" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ELVEN_SCOUT" minLevel="20" maxLevel="39" rhand="279" lhand="" head="47" chest="395" legs="417" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+@@ -19,7 +19,7 @@
+     <equipment classId="ELVEN_WIZARD" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ELVEN_ORACLE" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+-    <equipment classId="DARK_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="DARK_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="34" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="PALUS_KNIGHT" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ASSASSIN" minLevel="20" maxLevel="39" rhand="279" lhand="" head="47" chest="395" legs="417" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+@@ -27,13 +27,13 @@
+     <equipment classId="DARK_WIZARD" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="SHILLIEN_ORACLE" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+-    <equipment classId="ORC_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="ORC_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="34" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="ORC_RAIDER" minLevel="20" maxLevel="39" rhand="70" lhand="" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+     <equipment classId="ORC_MYSTIC" minLevel="1" maxLevel="19" rhand="177" lhand="" head="44" chest="1101" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="ORC_SHAMAN" minLevel="20" maxLevel="39" rhand="90" lhand="" head="44" chest="1101" legs="1104" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+-    <equipment classId="DWARVEN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="DWARVEN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="34" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
+     <equipment classId="ARTISAN" minLevel="20" maxLevel="39" rhand="158" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="SCAVENGER" minLevel="20" maxLevel="39" rhand="158" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+index 525ffca..0951ddd 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+@@ -92,7 +92,9 @@ internal object OfflineEquipment {
+             else {
+                 val slot = slot(player, item)
+                 val worn = if (slot >= 0) player.inventory.getPaperdollItem(slot) else null
+-                worn != null && fits(player, item) && score(player, worn) >= score(player, item)
++                // A piece of the wrong armor kind is surplus once the slot holds one of the class's kind.
++                worn != null && (Gear.isWrongKind(player, item.item) && !Gear.isWrongKind(player, worn.item) && Gear.isBodyArmor(worn.item) ||
++                        fits(player, item) && score(player, worn) >= score(player, item))
+             }
+         }
+     }
+@@ -115,8 +117,12 @@ internal object OfflineEquipment {
+             if (item.item.bodyPart == Item.SLOT_LR_HAND && left != null &&
+                     !(item.itemType == WeaponType.BOW && left.itemType == EtcItemType.ARROW)) return false
+         } else if (item.item.type2 != Item.TYPE2_ACCESSORY) {
+-            if (current != null && (item.itemType != current.itemType || item.item.bodyPart != current.item.bodyPart)) return false
+-            if (current == null && item.itemType == (if (player.isMageClass) ArmorType.HEAVY else ArmorType.MAGIC)) return false
++            if (item.itemType == (if (player.isMageClass) ArmorType.HEAVY else ArmorType.MAGIC)) return false
++            if (Gear.isWrongKind(player, item.item)) return false
++            // The class kit decides heavy, light or robe, not the starting Squire's set: a worn piece of another
++            // kind may be replaced by one of the class's kind; within the same kind the body part must match.
++            val replacesWrongKind = current != null && Gear.isBodyArmor(item.item) && Gear.isWrongKind(player, current.item)
++            if (current != null && !replacesWrongKind && (item.itemType != current.itemType || item.item.bodyPart != current.item.bodyPart)) return false
+             if (item.item.bodyPart == Item.SLOT_L_HAND && player.activeWeaponItem?.bodyPart == Item.SLOT_LR_HAND) return false
+             if (item.item.bodyPart == Item.SLOT_LEGS && player.inventory.getPaperdollItem(Inventory.PAPERDOLL_CHEST)?.item?.bodyPart == Item.SLOT_FULL_ARMOR) return false
+             if (item.item.bodyPart == Item.SLOT_FULL_ARMOR && player.inventory.getPaperdollItem(Inventory.PAPERDOLL_LEGS) != null) return false
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index 9be911c..5b435e0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -177,6 +177,8 @@ internal object Gear {
+         if (current.itemId == itemId) return true
+         // Something at least as valuable is already worn there (found in loot, or bought before the level band changed).
+         val target = ItemTable.getInstance().getTemplate(itemId)
++        // A dear piece of the wrong kind (light on a knight) doesn't stand in for the kit's heavy one.
++        if (isBodyArmor(target) && current.itemType != target.itemType) return false
+         return current.item.crystalType.id >= target.crystalType.id && current.referencePrice >= target.referencePrice
+     }
+ 
+@@ -210,9 +212,38 @@ internal object Gear {
+         return replaced
+     }
+ 
++    /** Body armor proper (heavy, light or robe), as opposed to helmets, gloves, boots and shields. */
++    fun isBodyArmor(item: Item): Boolean = item.itemType == ArmorType.HEAVY || item.itemType == ArmorType.LIGHT || item.itemType == ArmorType.MAGIC
++
++    /**
++     * The body armor kind the class wears at this level, from its kit in `equipment.xml`: the chest piece decides,
++     * the legs only when the chest is empty. A level outside every row takes the closest lower row (a fighter who
++     * hasn't taken the profession yet), then the first row. Null when the class has no kit or the kit names no body armor.
++     */
++    fun armorKind(bot: Player): ArmorType? {
++        val rows = AutobotData.equipment.filter { it.classId == bot.classId }
++        val kit = rows.firstOrNull { bot.level in it.minLevel..it.maxLevel }
++                ?: rows.filter { it.minLevel <= bot.level }.maxByOrNull { it.minLevel } ?: rows.minByOrNull { it.minLevel } ?: return null
++        val kind = listOf(kit.chest, kit.legs).asSequence().filter { it > 0 }.mapNotNull { ItemTable.getInstance().getTemplate(it) }
++                .firstOrNull { isBodyArmor(it) }?.itemType as? ArmorType ?: return null
++        // A kit typo never puts a mage into heavy armor or a fighter into a robe.
++        return if (kind == (if (bot.isMageClass) ArmorType.HEAVY else ArmorType.MAGIC)) null else kind
++    }
++
++    /** Body armor of another kind than the class wears: the starting Squire's shirt on a knight, a robe on a warrior. */
++    fun isWrongKind(bot: Player, item: Item): Boolean {
++        if (!isBodyArmor(item)) return false
++        val kind = armorKind(bot) ?: return false
++        return item.itemType != kind
++    }
++
+     fun isUpgrade(bot: Player, item: ItemInstance): Boolean {
+         val current = bot.inventory.getPaperdollItem(slotOf(bot, item)) ?: return fitsEmptySlot(bot, item)
+-        if (current.item.bodyPart != item.item.bodyPart || current.itemType != item.itemType) return false
++        if (current.item.bodyPart != item.item.bodyPart) return false
++        if (isWrongKind(bot, item.item)) return false
++        // The class's armor kind replaces a piece of another kind (the starting light set) once it defends better.
++        if (current.itemType != item.itemType) return isWrongKind(bot, current.item) &&
++                dev.l2j.autobots.offlinelife.OfflineEquipment.score(bot, item) > dev.l2j.autobots.offlinelife.OfflineEquipment.score(bot, current)
+         if (item.isWeapon && item.weaponItem.isMagical != current.weaponItem.isMagical) return false
+         return item.referencePrice > current.referencePrice * 1.2
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+index 89c65b9..409999e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+@@ -67,7 +67,8 @@ internal object Market {
+             val sameType = fitting.filter { it.itemType == target.itemType }
+             return (sameType.ifEmpty { fitting.filter { it is net.sf.l2j.gameserver.model.item.kind.Weapon } }).maxByOrNull { it.referencePrice }?.itemId ?: 0
+         }
+-        return fitting.filter { it is net.sf.l2j.gameserver.model.item.kind.Armor }.maxByOrNull { it.referencePrice }?.itemId ?: 0
++        // Same armor kind as the goal: a heavy breastplate is never replaced by a robe or a light shirt.
++        return fitting.filter { it is net.sf.l2j.gameserver.model.item.kind.Armor && it.itemType == target.itemType }.maxByOrNull { it.referencePrice }?.itemId ?: 0
+     }
+ 
+     fun shopsNear(bot: Player): List<Shop> = shops.filter { distance(bot, it.merchant) <= TOWN_RADIUS }
