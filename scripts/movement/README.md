@@ -293,3 +293,12 @@ python3 -m unittest discover -s scripts -p 'test_movement_report.py'
 - `FieldRecoveryEligibilityVerify` — записанные связные точки Marusya и Mapgyk:
   обычный отказ пути не должен превращаться в выход через `/unstuck`.
   Маркер `FIELD RECOVERY ELIGIBILITY ALL PASSED`, timeout 120 с.
+
+- `HuntCandidateHistoryVerify --history-only` — записанный Mapgyk: занятие обоих
+  слотов не должно помечать непроверенные споты; реальные отказы маршрутов должны
+  остаться в истории следующего выбора. Маркер `HUNT CANDIDATE HISTORY PLAN ALL PASSED`.
+- `HuntCandidateHistoryVerify` — повторные ограниченные попытки доходят до цели после
+  первых восьми отказов. Возраст пауз подставляется, не ждётся несколько минут;
+  затем нужны настоящая дорога, прибытие и XP в обычном бою. Начальная позиция задана
+  по записи сбоя, без GM/выдачи ресурсов/установки HP. Проверяется сохранение выбранной
+  цели между тиками. Маркер `HUNT CANDIDATE HISTORY ALL PASSED`, timeout 1080 с.
