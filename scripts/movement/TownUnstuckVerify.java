@@ -40,59 +40,40 @@ public class TownUnstuckVerify extends OfflineTownVerify {
   throw new AssertionError("No actual local NPC arrival after recovery");
  }
  public static void main(String[] args){try{
+  if(Arrays.asList(args).contains("--hunt")){RecoveryPreparationVerify.main(new String[0]);return;}
   if(!"yes".equals(System.getenv("L2_MOVEMENT_ISOLATED")))throw new IllegalStateException();
-  boolean noScroll=Arrays.asList(args).contains("--no-scroll"),hunt=Arrays.asList(args).contains("--hunt");
+  boolean noScroll=Arrays.asList(args).contains("--no-scroll");
   GameServer.main(new String[0]);Object m=singleton("offlinelife.OfflineFarmManager");invoke(member(m,"travelTask").get(m),"cancel");
-  for(Object job:((Map<?,?>)member(m,"townJobs").get(m)).values())invoke(job,"cancel");Thread.sleep(300);((Map<?,?>)member(m,"townJobs").get(m)).clear();
   invoke(member(AutofarmManager.INSTANCE,"onUpdateTask").get(AutofarmManager.INSTANCE),"cancel");
   check(World.getInstance().getPlayer("Zenthen")==null,"fixture suppresses automatic startup actions before controlled restore");
   Player p=Player.restore(268486152);check(p!=null&&p.getName().equals("Zenthen"),"real stuck snapshot restores Zenthen");
   p.setClient((net.sf.l2j.gameserver.network.GameClient)Class.forName("dev.l2j.autobots.offlinelife.DetachedClient").getConstructor(Player.class).newInstance(p));
   invoke(AutofarmManager.INSTANCE,"onEnterWorld",p);World.getInstance().addPlayer(p);p.setOnlineStatus(true,true);p.spawnMe(p.getX(),p.getY(),p.getZ());p.onPlayerEnter();
   ((Map<Integer,Player>)member(m,"farming").get(m)).put(p.getObjectId(),p);invoke(m,"openJournal",p);
-  invoke(AutofarmManager.INSTANCE,"quiesce",p);p.abortCast();p.stopMove(null);p.setAccessLevel(0);p.setIsInvul(false);p.getAppearance().setVisible();
-  ((Map<Integer,Player>)member(m,"farming").get(m)).entrySet().removeIf(e->e.getKey()!=p.getObjectId());
-  for(String field:new String[]{"traveling","retryAfter","pendingHunt","huntJourneys"}){Object c=member(m,field).get(m);if(c instanceof Map)((Map<?,?>)c).clear();else ((Set<?>)c).clear();}
+  p.setAccessLevel(0);p.setIsInvul(false);p.getAppearance().setVisible();
   check(p.getX()==-15048&&p.getY()==124424,"fixture starts at the exact live sealed cell");
   Object recovery=singleton("movement.TownUnstuck");check((Boolean)invoke(recovery,"isSealed",p),"fine geodata flood confirms a closed pocket");
-  if(noScroll)erase(p,736); // Deliberate no-scroll fixture; no gifts or accelerated cast.
-  long scrolls=p.getInventory().getInventoryItemCount(736,-1),initialExp=p.getExp();Location origin=location(p);int cash=p.getAdena();
-  long start=System.currentTimeMillis();invoke(m,"goHunting",p);check(hasTownAction(m,p),"normal offline planner owns recovery instead of repeatedly rejecting spots");
-  if(!hunt)stamp(m,"retryAfter",p,start+3600000); // Isolate recovery/NPC continuation from a later paid hunting ride.
-
-  long deadline=start+(noScroll?350000:50000),reported=0;
+  if(noScroll)erase(p,736);
+  long scrolls=p.getInventory().getInventoryItemCount(736,-1);Location origin=location(p);int cash=p.getAdena();
+  // Isolate the recovery mechanism. The integrated manager/chores/hunt cycle is RecoveryPreparationVerify.
+  kotlinx.coroutines.CompletableJob hold=kotlinx.coroutines.JobKt.Job(null);
+  ((Map<Integer,Object>)member(m,"townJobs").get(m)).put(p.getObjectId(),hold);
+  long start=System.currentTimeMillis(),deadline=start+(noScroll?350000:50000),reported=0;
+  CompletableFuture<Object> returned=async(recovery,"recover",p,(kotlin.jvm.functions.Function0<Boolean>)()->true);
   while(System.currentTimeMillis()<deadline&&(gap(origin,location(p))<=32||p.isTeleporting()||!p.isInsideZone(ZoneId.TOWN))){
-   invoke(m,"tick"); // The ordinary offline tick acknowledges core teleports without a client.
+   invoke(m,"tick");
    if(System.currentTimeMillis()-reported>20000){reported=System.currentTimeMillis();System.out.println("UNSTUCK INFO elapsed="+(reported-start)/1000+" casting="+p.isCastingNow()+" at="+location(p));}
    Thread.sleep(500);
   }
-  long elapsed=System.currentTimeMillis()-start;
+  check(Boolean.TRUE.equals(returned.get(2,TimeUnit.SECONDS)),"recovery mechanism reports genuine completion");
   check(gap(origin,location(p))>32&&p.isInsideZone(ZoneId.TOWN),"ordinary core return actually moves out of the sealed cell");
   check(!(Boolean)invoke(recovery,"isSealed",p),"arrival has a geodata exit");
   check(p.getAdena()==cash,"unstuck creates and spends no money");
   check(p.getInventory().getInventoryItemCount(736,-1)==(noScroll?0:scrolls-1),"only an owned scroll can be consumed");
-  if(noScroll)check(elapsed>=290000,"ordinary unstuck honors the five-minute cast");
-  if(!hunt){
-   // Addressed recovery check. --hunt separately keeps the complete battle scenario.
-   while(hasTownAction(m,p))Thread.sleep(100);
-   ((Map<?,?>)member(m,"traveling").get(m)).remove(p.getObjectId());p.stopMove(null);
-   continueAtNpc(p);
-   check(!p.isGM(),"offline recovery uses no GM protection");
-   if(noScroll){System.out.println("TOWN UNSTUCK NO SCROLL ALL PASSED");System.exit(0);}
-  }
-  if(hunt){
-  deadline=System.currentTimeMillis()+900000;reported=0;
-  while(System.currentTimeMillis()<deadline&&p.getExp()<=initialExp){
-   invoke(m,"tick");if(AutofarmManager.INSTANCE.isAutoFarming(p))suspendValue(AutofarmManager.INSTANCE,"onUpdate",p);
-   if(p.isDead()){
-    for(net.sf.l2j.gameserver.model.actor.Creature c:p.getKnownTypeInRadius(net.sf.l2j.gameserver.model.actor.Creature.class,1500))if(c.getTarget()==p)
-     System.out.println("UNSTUCK INFO death attacker="+c.getName()+" lv="+c.getLevel()+" at="+c.getX()+","+c.getY()+","+c.getZ());
-    throw new AssertionError("death before recovery reaches useful hunting");
-   }
-   if(System.currentTimeMillis()-reported>20000){reported=System.currentTimeMillis();System.out.println("UNSTUCK INFO hunting at="+location(p)+" exp="+p.getExp()+" hp="+(int)p.getCurrentHp()+" cash="+p.getAdena());}Thread.sleep(500);
-  }
-  check(p.getExp()>initialExp&&!p.isGM(),"recovered offline farmer reaches prey and gains real XP without GM protection");
-  }
+  if(noScroll)check(System.currentTimeMillis()-start>=290000,"ordinary unstuck honors the five-minute cast");
+  ((Map<?,?>)member(m,"townJobs").get(m)).remove(p.getObjectId());hold.complete();
+  continueAtNpc(p);check(!p.isGM(),"offline recovery uses no GM protection");
+  if(noScroll){System.out.println("TOWN UNSTUCK NO SCROLL ALL PASSED");System.exit(0);}
   Autobot b=(Autobot)invoke(singleton("dao.AutobotsDao"),"loadByName","Weapons");check(b!=null,"population fixture exists");
   suspendValue(singleton("AutobotsManager"),"spawnAutobot",b);((Map<?,?>)invoke(singleton("AutobotsManager"),"getActiveBots")).remove(b.getName());
   b.setAccessLevel(0);b.setIsInvul(false);b.getAppearance().setVisible();warp(b,origin);
@@ -101,9 +82,7 @@ public class TownUnstuckVerify extends OfflineTownVerify {
   async(life,"hunt").get(60,TimeUnit.SECONDS);
   check(gap(origin,location(b))>32&&!(Boolean)invoke(recovery,"isSealed",b),"ordinary population hunting also recovers from the same cell");
   check(b.getInventory().getInventoryItemCount(736,-1)==owned-1,"population recovery consumes its fixture scroll");
-  continueAtNpc(b);
-  check(!(Boolean)invoke(recovery,"needsRecovery",b),"reachable town street does not start another recovery");
-  System.out.println("UNSTUCK INFO finalExp="+p.getExp()+" initialExp="+initialExp+" elapsed="+(System.currentTimeMillis()-start)/1000);
+  continueAtNpc(b);check(!(Boolean)invoke(recovery,"needsRecovery",b),"reachable town street does not start another recovery");
   System.out.println("TOWN UNSTUCK ALL PASSED");System.exit(0);
  }catch(Throwable t){t.printStackTrace();System.exit(1);}}
 }
