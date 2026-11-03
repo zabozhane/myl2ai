@@ -1,16 +1,17 @@
 diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
-index 10c454d..75e8c87 100644
+index 10c454d..23bda68 100644
 --- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
-@@ -27,6 +27,7 @@ import net.sf.l2j.gameserver.model.actor.Player
+@@ -27,6 +27,8 @@ import net.sf.l2j.gameserver.model.actor.Player
   * for free: the quest script pays, the merchant pays, the shop charges.
   */
  internal object OfflineChores {
 +    private const val MAX_ARMOR_PIECES = 3
++    private const val MIN_ARMOR_HEALING = 5
  
      /** One visit to town: quests first (their adena pays for the rest), then sell, then buy, then buffs. */
      suspend fun run(player: Player) {
-@@ -36,6 +37,7 @@ internal object OfflineChores {
+@@ -36,6 +38,7 @@ internal object OfflineChores {
          sellJunk(player)
          buyEssentialSupplies(player)
          buyWeapon(player)
@@ -18,7 +19,33 @@ index 10c454d..75e8c87 100644
          // Stock matches the final weapon, including a new arrow/shot grade.
          buySupplies(player)
          newbieBuffs(player)
-@@ -132,6 +134,27 @@ internal object OfflineChores {
+@@ -114,11 +117,22 @@ internal object OfflineChores {
+         }
+     }
+ 
+-    internal fun optionalBudget(player: Player): Int {
+-        val fare=if(player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN) &&
++    internal fun optionalBudget(player: Player): Int =
++            (dev.l2j.autobots.population.economy.Errands.spendable(player)-returnFare(player)).coerceAtLeast(0)
++
++    private fun returnFare(player: Player): Int =
++            if(player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN) &&
+                 dev.l2j.autobots.population.HuntingSpots.nearArrival(player,player.location(),emptySet(),20000).isEmpty())
+             HuntRecovery.plan(player,emptySet())?.exit?.price?:0 else 0
+-        return (dev.l2j.autobots.population.economy.Errands.spendable(player)-fare).coerceAtLeast(0)
++
++    /**
++     * Defence keeps a weak character alive more than savings do. Once this visit has restocked healing and
++     * an escape scroll, armor may use money beyond the generic reserve, never the fare back to the prey.
++     */
++    private fun armorBudget(player: Player): Int {
++        val stocked=dev.l2j.autobots.population.economy.Healing.count(player)>=MIN_ARMOR_HEALING &&
++                Gear.count(player,Gear.SCROLL_OF_ESCAPE)>0
++        return if(stocked) (player.adena-returnFare(player)).coerceAtLeast(0) else optionalBudget(player)
+     }
+ 
+     private suspend fun buyWeapon(player: Player) {
+@@ -132,6 +146,27 @@ internal object OfflineChores {
          if(Market.buyFromNpc(player,shop,product,1)) OfflineEquipment.equip(player)
      }
  
@@ -26,7 +53,7 @@ index 10c454d..75e8c87 100644
 +    private suspend fun buyArmor(player: Player) {
 +        for(piece in 1..MAX_ARMOR_PIECES) {
 +            if(!OfflineFarmManager.isActive(player) || player.isDead || !player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN)) return
-+            val budget=optionalBudget(player)
++            val budget=armorBudget(player)
 +            val (plan,goal)=OfflineEquipment.armorPlan(player,budget)
 +            if(plan==null) {
 +                goal?.let { println("Offline gear: ${player.name} id=${player.objectId} waits slot=${it.slot} current=${it.current?.itemName ?: "-"}" +
