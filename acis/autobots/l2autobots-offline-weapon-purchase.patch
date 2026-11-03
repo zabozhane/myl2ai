@@ -1,0 +1,73 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+index 9ed1876..3382c2e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -35,6 +35,7 @@ internal object OfflineChores {
+         turnInQuests(player)
+         sellJunk(player)
+         buySupplies(player)
++        buyWeapon(player)
+         newbieBuffs(player)
+         player.target=null
+         player.refreshOverloaded()
+@@ -107,16 +108,30 @@ internal object OfflineChores {
+         }
+     }
+ 
++    private fun optionalBudget(player: Player): Int {
++        val fare=if(player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN) &&
++                dev.l2j.autobots.population.HuntingSpots.nearArrival(player,player.location(),emptySet(),20000).isEmpty())
++            HuntRecovery.plan(player,emptySet())?.exit?.price?:0 else 0
++        return (dev.l2j.autobots.population.economy.Errands.spendable(player)-fare).coerceAtLeast(0)
++    }
++
++    private suspend fun buyWeapon(player: Player) {
++        if(!OfflineFarmManager.isActive(player) || player.isDead || !player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN)) return
++        val budget=optionalBudget(player)
++        val (shop,product)=OfflineEquipment.weaponPurchase(player,budget) ?: return
++        val reserved=player.adena-budget
++        if(!approach(player,shop.merchant)) return
++        if(Market.priceWithTax(shop,product)>(player.adena-reserved).coerceAtLeast(0)) return
++        if(Market.buyFromNpc(player,shop,product,1)) OfflineEquipment.equip(player)
++    }
++
+     /** Buys up to [target] pieces when the character has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */
+     private suspend fun buy(player: Player, itemId: Int, target: Int, onlyBelow: Int, budgetShare: Double,
+                             have: Int = Gear.count(player, itemId), essential: Boolean = true) {
+         if (have >= onlyBelow) return
+         val (shop, product) = Market.findProduct(player, itemId) ?: return
+         val price = Market.priceWithTax(shop, product).coerceAtLeast(1)
+-        val fare=if(!essential && player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN) &&
+-                dev.l2j.autobots.population.HuntingSpots.nearArrival(player,player.location(),emptySet(),20000).isEmpty())
+-            HuntRecovery.plan(player,emptySet())?.exit?.price?:0 else 0
+-        val budget=if(essential) player.adena else (dev.l2j.autobots.population.economy.Errands.spendable(player)-fare).coerceAtLeast(0)
++        val budget=if(essential) player.adena else optionalBudget(player)
+         val count = minOf(target - have, (budget * budgetShare / price).toInt())
+         if (count <= 0) return
+         if (!approach(player, shop.merchant)) return
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+index 1802276..682c9fd 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+@@ -29,6 +29,21 @@ internal object OfflineEquipment {
+         }
+     }
+ 
++    /** One conservative weapon goal, paid for only from the caller's money after supplies and travel. */
++    fun weaponPurchase(player: Player,budget: Int): Pair<dev.l2j.autobots.population.economy.Shop,net.sf.l2j.gameserver.model.buylist.Product>? {
++        val current=player.inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND)
++        if(current!=null && (current.enchantLevel>0 || current.isAugmented)) return null
++        val wish=Gear.wishes(player).firstOrNull { it.slot==Inventory.PAPERDOLL_RHAND } ?: return null
++        // A detached value object for stat calculation: never registered, saved or added to an inventory.
++        val candidate=ItemInstance(0,wish.itemId)
++        if(!eligible(player,candidate) || !fits(player,candidate)) return null
++        if(current!=null && (candidate.itemType!=current.itemType || candidate.item.bodyPart!=current.item.bodyPart ||
++                        score(player,candidate)<=score(player,current)*1.2)) return null
++        val offer=dev.l2j.autobots.population.economy.Market.findProduct(player,wish.itemId) ?: return null
++        val price=dev.l2j.autobots.population.economy.Market.priceWithTax(offer.first,offer.second)
++        return offer.takeIf { price>0 && price<=budget }
++    }
++
+     /** Keep consumables, materials, recipes, future-grade and enhanced/borrowed gear. */
+     fun surplus(player: Player): List<ItemInstance> {
+         val protected = Loans.protectedObjects(player)
