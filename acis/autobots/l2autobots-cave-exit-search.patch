@@ -1,0 +1,50 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+index 7d144a3..effd36d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+@@ -71,17 +71,24 @@ internal object NpcTravel {
+     private fun coarse(player: Player,from: Location,to: Location,maxDistance: Int,reversible: Boolean=false): List<Location>? {
+         val longWalk=maxDistance>20000
+         val deadline=System.nanoTime()+if(longWalk) 5_000_000_000L else 3_000_000_000L
+-        search(player,from,to,maxDistance,if(longWalk) 2400 else 800,if(longWalk) 800 else 160,deadline,reversible)?.let { return it }
++        val wide=search(player,from,to,maxDistance,if(longWalk) 2400 else 800,if(longWalk) 800 else 160,deadline,reversible)
++        wide.route?.let { return it }
++        // A long grid step lands on the surface above an underground village or cave, so
++        // its whole graph closes around the origin. Only such an exhausted graph earns a
++        // finer long search; a slow or crowded failure keeps the original bounded cost.
++        if(longWalk && wide.exhausted && System.nanoTime()<deadline)
++            search(player,from,to,maxDistance,400,6000,deadline,reversible).route?.let { return it }
+         // A coarse grid can have no node on a narrow village ramp even though the
+         // geodata permits walking there. A nearby goal still needs local refinement
+         // when its caller permits a long detour; the larger allowance must not remove
+         // the narrow exit. Keep the original finite deadline and all segment checks.
+         return if((!longWalk || distance(from,to)<=20000) && System.nanoTime()<deadline)
+-            search(player,from,to,maxDistance,200,2000,deadline,reversible) else null
++            search(player,from,to,maxDistance,200,2000,deadline,reversible).route else null
+     }
+ 
++    private class Search(val route: List<Location>?,val exhausted: Boolean)
+     private fun search(player: Player,from: Location,to: Location,maxDistance: Int,
+-                       step: Int,limit: Int,deadline: Long,reversible: Boolean): List<Location>? {
++                       step: Int,limit: Int,deadline: Long,reversible: Boolean): Search {
+         val queue=java.util.PriorityQueue<Node>(compareBy { it.cost+distance(it.at,to) })
+         val costs=mutableMapOf<Triple<Int,Int,Int>,Double>()
+         queue.add(Node(0,0,from,emptyList(),0.0))
+@@ -89,7 +96,7 @@ internal object NpcTravel {
+         var expanded=0
+         while(queue.isNotEmpty() && expanded++<limit && System.nanoTime()<deadline) {
+             val node=queue.poll()
+-            if(distance(node.at,to)<=2800) segment(player,node.at,to,reversible)?.let { return node.route+it }
++            if(distance(node.at,to)<=2800) segment(player,node.at,to,reversible)?.let { return Search(node.route+it,false) }
+             for(dx in -1..1) for(dy in -1..1) {
+                 if(dx==0 && dy==0) continue
+                 val nx=node.x+dx;val ny=node.y+dy
+@@ -106,7 +113,7 @@ internal object NpcTravel {
+                 queue.add(Node(nx,ny,at,node.route+link,cost))
+             }
+         }
+-        return null
++        return Search(null,queue.isEmpty())
+     }
+ 
+     suspend fun reach(player: Player,npc: Npc,maxDistance: Int=12000): Boolean {
