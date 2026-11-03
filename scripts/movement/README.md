@@ -552,3 +552,7 @@ No Grade бонуса атаки; его заменяет проверка D Gra
   сохраняет исключённые споты в `character_offline_deadly_spots`, после перезапуска первый
   план всё ещё их избегает. Прежняя сборка после перезапуска снова идёт к LDH.
   `DEADLY RESTART SAVE ALL PASSED`, затем `DEADLY RESTART RESUME ALL PASSED` (снимок `-`).
+- `CrowdedSpotVerify` — от живой точки -6072,40488 Zenthen ушёл к -15583,48512 (14 агрессивных
+  Dark/Lesser Dark Horror в 1500) и погиб от 11 нападавших. 300 обычных выборов: прежняя сборка
+  выбирает гнездо 55 раз, новая ни разу, обычная добыча остаётся. `CROWDED SPOT ALL PASSED`.
+  Снимки без новых таблиц: перед проверкой удалять `character_offline_deadly_spots` на стенде.
