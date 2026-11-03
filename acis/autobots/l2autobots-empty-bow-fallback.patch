@@ -1,0 +1,49 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index fb0f59d..1b4d4bc 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -52,6 +52,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         dev.l2j.autobots.population.economy.Healing.use(player)
+         
+         ensureSummonPet()        
++        dev.l2j.autobots.population.economy.Gear.useStockedBow(player)
+         handleShots()
+         stopIdleToggles()
+         if(AutofarmManager.allowsRest(player) && rester.onUpdate()) return
+@@ -76,6 +77,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         dev.l2j.autobots.population.economy.Healing.use(player)
+ 
+         ensureSummonPet()
++        dev.l2j.autobots.population.economy.Gear.useStockedBow(player)
+         handleShots()
+         stopIdleToggles()
+         if(idleSupport()) return
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index 950aff4..f117b11 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -100,6 +100,24 @@ internal object Gear {
+         return stock<=available()
+     }
+ 
++    /** Keep shooting when this bow's arrows run out, using only another stocked, owned bow. */
++    fun useStockedBow(bot: Player) {
++        if(bot.isCastingNow || bot.isAttackingNow || bot.isTeleporting) return
++        val current=bot.inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND) ?: return
++        if(current.itemType!=WeaponType.BOW || count(bot,ARROWS.getValue(current.item.crystalType))>0) return
++        val allowed=gradeFor(bot.level).id
++        val replacement=bot.inventory.items.filter { item ->
++            !item.isEquipped && item.isEquipable && item.isWeapon && item.itemType==WeaponType.BOW &&
++                    !item.isQuestItem && !item.isHeroItem && !item.isShadowItem &&
++                    item.item.crystalType.id<=allowed && item.item.bodyPart==current.item.bodyPart &&
++                    item.weaponItem.isMagical==current.weaponItem.isMagical &&
++                    count(bot,ARROWS.getValue(item.item.crystalType))>0
++        }.maxByOrNull { dev.l2j.autobots.offlinelife.OfflineEquipment.score(bot,it) } ?: return
++        equip(bot,replacement)
++        if(replacement.isEquipped) EconomyLog.log(bot,Deal.Equip,
++                "bow fallback: no arrows for ${current.itemName}; using owned ${replacement.itemName}")
++    }
++
+     fun count(bot: Player, itemId: Int): Int = bot.inventory.getItemByItemId(itemId)?.count ?: 0
+ 
+     /** The pieces of the target kit the bot still lacks, in buying order. */
