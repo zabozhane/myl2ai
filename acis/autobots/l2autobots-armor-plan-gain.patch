@@ -1,0 +1,24 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+index 4672d98..525ffca 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+@@ -57,7 +57,7 @@ internal object OfflineEquipment {
+ 
+     /**
+      * The best armor or jewelry upgrade the town's ordinary merchants sell, judged by the real defence it adds
+-     * over the worn piece per adena, never by price alone. [affordable] is false when only dearer goals exist.
++     * over the worn piece within the budget, never by price alone; the second value is the cheapest dearer goal.
+      */
+     fun armorPlan(player: Player,budget: Int): Pair<ArmorPlan?,ArmorPlan?> {
+         val plans=dev.l2j.autobots.population.economy.Market.shopsNear(player).flatMap { shop -> shop.products.values.map { shop to it } }
+@@ -75,7 +75,9 @@ internal object OfflineEquipment {
+                     val price=dev.l2j.autobots.population.economy.Market.priceWithTax(shop,product)
+                     if(gain<MIN_ARMOR_GAIN || price<=0) null else ArmorPlan(slot,shop,product,worn,gain,price)
+                 }
+-        val affordable=plans.filter { it.price<=budget }.maxByOrNull { it.gain/it.price }
++        // The largest defence gain the wallet allows; among equal gains the cheaper piece. Ranking by gain per
++        // adena alone kept buying +2 pants while a real upgrade was affordable.
++        val affordable=plans.filter { it.price<=budget }.maxWithOrNull(compareBy<ArmorPlan> { it.gain }.thenByDescending { it.price })
+         val goal=plans.filter { it.price>budget }.minByOrNull { it.price }
+         return affordable to goal
+     }
