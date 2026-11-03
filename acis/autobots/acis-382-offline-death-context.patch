@@ -1,0 +1,13 @@
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java
+index fad3235..12d178b 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java
+@@ -3513,6 +3513,8 @@ public class Player extends Playable
+ 		// Kill the Player
+ 		if (!super.doDie(killer))
+ 			return false;
++
++		dev.l2j.autobots.offlinelife.OfflineFarmManager.INSTANCE.reportDeath(this, killer);
+ 		
+ 		if (isMounted())
+ 			stopFeed();

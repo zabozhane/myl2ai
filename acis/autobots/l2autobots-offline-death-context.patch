@@ -1,0 +1,41 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index ac59cd5..2743410 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -227,6 +227,36 @@ object OfflineFarmManager {
+ 
+     fun isFarming(player: Player): Boolean = farming[player.objectId] === player
+ 
++    /** Core calls this once after a successful death, before Player applies XP/item penalties. */
++    fun reportDeath(player: Player, killer: Creature?) {
++        if (player is Autobot || !isFarming(player)) return
++        try {
++            val by = when {
++                killer === player && player.isInsideZone(ZoneId.WATER) -> "drowned"
++                killer === player -> "self"
++                killer is Monster -> "${killer.name} (${killer.npcId}) lv ${killer.level}${if (killer.isAggressive) " aggressive" else ""}"
++                killer is Player -> "player ${killer.name} lv ${killer.level}"
++                killer == null -> "unknown"
++                else -> "${killer.name} lv ${killer.level}"
++            }
++            val attackers = player.getKnownTypeInRadius(Monster::class.java, 2000)
++                    .filter { !it.isDead && it.target === player }
++            val route = traveling[player.objectId]
++            LOGGER.info("Offline farm death: ${player.name} id=${player.objectId} lv ${player.level} ${player.classId}" +
++                    " killed by $by, attackers ${attackers.size} [${attackers.joinToString(" ") { "${it.name}/${it.level}" }}]" +
++                    ", healing=${dev.l2j.autobots.population.economy.Healing.count(player)} mp=${player.currentMp.toInt()}/${player.maxMp}" +
++                    " expBeforePenalty=${player.exp} deathPenalty=${player.deathPenaltyBuffLevel}" +
++                    " weapon=${player.activeWeaponItem?.let { "${it.name}/${it.crystalType}" } ?: "fists"}" +
++                    " party=${player.party?.membersCount ?: 0} autofarming=${AutofarmManager.isAutoFarming(player)}" +
++                    " chores=${townJobs.containsKey(player.objectId)} sequence=${player.getActiveSequence()?.javaClass?.simpleName ?: "-"}" +
++                    " route=${route?.let { "${it.trip}:${it.routeIndex}/${it.route.size}->${it.targetX},${it.targetY},${it.targetZ}" } ?: "-"}" +
++                    " at=${player.x},${player.y},${player.z}")
++        } catch (e: Exception) {
++            // Diagnostics must never interrupt ordinary death penalties or resurrection handling.
++            LOGGER.warning("Offline farm death report failed for id=${player.objectId}: $e")
++        }
++    }
++
+     internal fun activityAvailable(player: Player): Boolean = isActive(player) && !traveling.containsKey(player.objectId) && !townJobs.containsKey(player.objectId)
+ 
+     internal fun isActive(player: Player): Boolean = !serverShuttingDown &&
