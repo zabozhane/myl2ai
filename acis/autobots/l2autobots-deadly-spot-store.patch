@@ -1,0 +1,92 @@
+diff --git a/sql/character_offline_deadly_spots.sql b/sql/character_offline_deadly_spots.sql
+new file mode 100644
+index 0000000..302034c
+--- /dev/null
++++ b/sql/character_offline_deadly_spots.sql
+@@ -0,0 +1,6 @@
++CREATE TABLE IF NOT EXISTS character_offline_deadly_spots (
++  char_id INT UNSIGNED NOT NULL,
++  spot_key BIGINT NOT NULL,
++  marked_at BIGINT NOT NULL,
++  PRIMARY KEY(char_id,spot_key)
++);
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index ac064e1..1681797 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -57,6 +57,7 @@ object AutobotsManager {
+         AutofarmManager
+         dev.l2j.autobots.population.quests.QuestRetryStore.initialize()
+         dev.l2j.autobots.population.economy.FitnessStore.initialize()
++        dev.l2j.autobots.offlinelife.DeadlySpotStore.initialize()
+         OfflineFarmManager.onServerStart()
+         dev.l2j.autobots.population.RouteSafety.load()
+         PopulationManager.start()
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/DeadlySpotStore.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/DeadlySpotStore.kt
+new file mode 100644
+index 0000000..1cfb7e9
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/DeadlySpotStore.kt
+@@ -0,0 +1,31 @@
++package dev.l2j.autobots.offlinelife
++
++import net.sf.l2j.L2DatabaseFactory
++import java.util.logging.Logger
++
++/** Spots an offline character avoids after a death there; survives restarts, stores no resources. */
++internal object DeadlySpotStore {
++    private val logger=Logger.getLogger(DeadlySpotStore::class.java.name)
++    fun initialize() {
++        L2DatabaseFactory.getInstance().connection.use { c -> c.createStatement().use {
++            it.executeUpdate("CREATE TABLE IF NOT EXISTS character_offline_deadly_spots (char_id INT UNSIGNED NOT NULL, spot_key BIGINT NOT NULL, marked_at BIGINT NOT NULL, PRIMARY KEY(char_id,spot_key))")
++        } }
++    }
++    fun load(id: Int,since: Long): Map<Long,Long> = runCatching {
++        L2DatabaseFactory.getInstance().connection.use { c ->
++            c.prepareStatement("DELETE FROM character_offline_deadly_spots WHERE char_id=? AND marked_at<?").use { it.setInt(1,id);it.setLong(2,since);it.executeUpdate() }
++            c.prepareStatement("SELECT spot_key,marked_at FROM character_offline_deadly_spots WHERE char_id=?").use {
++                it.setInt(1,id)
++                it.executeQuery().use { r -> buildMap { while(r.next()) put(r.getLong(1),r.getLong(2)) } }
++            }
++        }
++    }.getOrElse { logger.warning("Deadly spot read failed for $id: $it");emptyMap() }
++    fun save(id: Int,marks: Map<Long,Long>) {
++        runCatching { L2DatabaseFactory.getInstance().connection.use { c ->
++            c.prepareStatement("INSERT INTO character_offline_deadly_spots(char_id,spot_key,marked_at) VALUES(?,?,?) ON DUPLICATE KEY UPDATE marked_at=VALUES(marked_at)").use { ps ->
++                for((key,at) in marks) { ps.setInt(1,id);ps.setLong(2,key);ps.setLong(3,at);ps.addBatch() }
++                ps.executeBatch()
++            }
++        } }.onFailure { logger.warning("Deadly spot write failed for $id: $it") }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index eb0627a..af3d91a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -270,12 +270,16 @@ object OfflineFarmManager {
+         val now=System.currentTimeMillis()
+         val keys=HuntingSpots.keysWithNpcNear(player.location(),killer.npcId,DEADLY_SPOT_RADIUS)
+         if(keys.isEmpty()) return
+-        val marks=deadlySpots.getOrPut(player.objectId){ConcurrentHashMap()}
++        val marks=deadlyMarks(player.objectId,now)
+         keys.forEach { marks[it]=now }
++        DeadlySpotStore.save(player.objectId,keys.associateWith { now })
+         LOGGER.info("Offline farm: ${player.name} id=${player.objectId} avoids ${keys.size} spots of ${killer.name} (${killer.npcId})" +
+                 " within $DEADLY_SPOT_RADIUS for ${DEADLY_SPOT_MS/60_000} minutes after a death there.")
+     }
+ 
++    private fun deadlyMarks(id: Int,now: Long): MutableMap<Long,Long> =
++            deadlySpots.computeIfAbsent(id) { ConcurrentHashMap(DeadlySpotStore.load(id,now-DEADLY_SPOT_MS)) }
++
+     internal fun activityAvailable(player: Player): Boolean = isActive(player) && !traveling.containsKey(player.objectId) && !townJobs.containsKey(player.objectId)
+ 
+     internal fun isActive(player: Player): Boolean = !serverShuttingDown &&
+@@ -461,7 +465,7 @@ object OfflineFarmManager {
+             recent.entries.removeIf { now-it.value>30*60_000L }
+             excluded.addAll(recent.keys)
+         }
+-        deadlySpots[player.objectId]?.let { recent ->
++        deadlyMarks(player.objectId,now).let { recent ->
+             recent.entries.removeIf { now-it.value>DEADLY_SPOT_MS }
+             excluded.addAll(recent.keys)
+         }
