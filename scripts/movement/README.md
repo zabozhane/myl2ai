@@ -282,3 +282,14 @@ python3 -m unittest discover -s scripts -p 'test_movement_report.py'
   полезное решение менеджера и настоящий диалог Varkees: предметы расходуются,
   награда приходит от скрипта. Контролируемые позиции, без GM/выдачи ресурсов;
   навигация не проверяется повторно. Маркер `QUEST TOWN DESTINATION ALL PASSED`, timeout 150 с.
+
+- `FieldOriginRecoveryVerify --plan-only` — ork из сохранённых данных, начальная
+  точка задаётся по записи сбоя: вне города и более 1000 ниже геодаты, денег/SoE нет.
+  Прежняя сборка не распознаёт необходимость выхода. Маркер `FIELD ORIGIN PLAN ALL PASSED`.
+- `FieldOriginRecoveryVerify` — настоящий контроллер населения: штатный 5-минутный
+  каст, физическое прибытие в деревню, повтор подготовки, выход и реальный XP.
+  Без GM/выдачи предметов/денег/подстановки HP; после начальной точки переносы только
+  от штатного навыка. Маркер `FIELD ORIGIN RECOVERY ALL PASSED`, timeout 960 с.
+- `FieldRecoveryEligibilityVerify` — записанные связные точки Marusya и Mapgyk:
+  обычный отказ пути не должен превращаться в выход через `/unstuck`.
+  Маркер `FIELD RECOVERY ELIGIBILITY ALL PASSED`, timeout 120 с.
