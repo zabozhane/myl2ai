@@ -273,3 +273,12 @@ python3 -m unittest discover -s scripts -p 'test_movement_report.py'
   +1000 XP. Без переносов/GM/выдачи ресурсов/подстановки HP. Повторно использует
   проверки общего диапазона новичка из `NoviceTargetsVerify`.
   Маркер `FIELD HUNT RECOVERY ALL PASSED`, timeout 960 с.
+
+- `QuestTownDestinationVerify --foreign-only` — готовые 48 камней Q273 из настоящего
+  снимка и NPC в другой области. Позиция/возраст дела задаются, проверяется настоящий
+  тик менеджера: он не должен ехать в город, где не может сдать задание.
+  Маркер `QUEST TOWN FOREIGN ALL PASSED`.
+- `QuestTownDestinationVerify` — также правильная область, отключённые квесты,
+  полезное решение менеджера и настоящий диалог Varkees: предметы расходуются,
+  награда приходит от скрипта. Контролируемые позиции, без GM/выдачи ресурсов;
+  навигация не проверяется повторно. Маркер `QUEST TOWN DESTINATION ALL PASSED`, timeout 150 с.
