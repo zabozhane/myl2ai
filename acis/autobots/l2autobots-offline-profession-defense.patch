@@ -1,0 +1,72 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 05b88c7..194fe28 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -4,6 +4,7 @@ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.CoScopes
+ import dev.l2j.autobots.autofarm.AutofarmManager
++import dev.l2j.autobots.extensions.getActiveSequence
+ import dev.l2j.autobots.extensions.useItem
+ import dev.l2j.autobots.population.economy.Errands
+ import dev.l2j.autobots.population.economy.Gear
+@@ -654,7 +655,7 @@ object OfflineFarmManager {
+                 val target = player.target?.name ?: "-"
+                 LOGGER.info("Offline farm status: ${player.name} id=${player.objectId} lv ${player.level} exp ${player.exp} sp ${player.sp}" +
+                         " at ${player.x},${player.y},${player.z} intention=${player.ai.desire.intention} target=$target" +
+-                        " traveling=${traveling.containsKey(id)} chores=${townJobs.containsKey(id)} life=${OfflineLife.owns(player)} autofarming=${AutofarmManager.isAutoFarming(player)} dead=${player.isDead}" +
++                        " traveling=${traveling.containsKey(id)} chores=${townJobs.containsKey(id)} life=${OfflineLife.owns(player)} lifeMode=${OfflineLife.purpose(player)} underAttack=${player.isUnderAttack()} sequence=${player.getActiveSequence()?.javaClass?.simpleName ?: "-"} autofarming=${AutofarmManager.isAutoFarming(player)} dead=${player.isDead}" +
+                         " route=${traveling[id]?.let { "${it.trip}:${it.routeIndex}/${it.route.size}->${it.targetX},${it.targetY},${it.targetZ}" } ?: "-"}" +
+                         " sitting=${player.isSitting} hp=${player.currentHp.toInt()}/${player.maxHp} mp=${player.currentMp.toInt()}/${player.maxMp}")
+             } catch (e: Exception) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineLife.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineLife.kt
+index f1d3d28..d2e585a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineLife.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineLife.kt
+@@ -9,6 +9,7 @@ import dev.l2j.autobots.population.isUnderAttack
+ import dev.l2j.autobots.population.quests.QuestRunner
+ import dev.l2j.autobots.utils.distance
+ import kotlinx.coroutines.*
++import net.sf.l2j.gameserver.geoengine.GeoEngine
+ import net.sf.l2j.gameserver.enums.IntentionType
+ import net.sf.l2j.gameserver.model.World
+ import net.sf.l2j.gameserver.model.actor.Player
+@@ -30,6 +31,13 @@ internal object OfflineLife {
+     fun setTargets(player: Player,ids: Set<Int>?) { if(ids==null) prey.remove(player.objectId) else prey[player.objectId]=ids }
+     fun owns(player: Player): Boolean = jobs.containsKey(player.objectId) || player.isInParty ||
+             runners[player.objectId]?.let { professionReady(player,it) }==true
++    /** Diagnostic ownership: pending profession work is distinct from a running party action. */
++    fun purpose(player: Player): String = when {
++        player.isInParty -> "party"
++        runners[player.objectId]?.let { professionReady(player,it) }==true -> "profession"
++        jobs.containsKey(player.objectId) -> "action"
++        else -> "-"
++    }
+     private fun professionReady(player: Player,runner: QuestRunner): Boolean =
+             System.currentTimeMillis()>=(retryQuest[player.objectId]?:0L) && runner.professionBusiness()
+ 
+@@ -100,6 +108,24 @@ internal object OfflineLife {
+             try {
+                 AutofarmManager.stopFarm(player,"offline party or profession quest")
+                 AutofarmManager.prepareOfflineBehavior(player)
++                // A profession trip yields to self-defense, just like population life does.
++                // WalkToSequence refuses to walk while attacked; repeating that quest alone
++                // would claim every tick without ever answering the monster.
++                if(player.isUnderAttack()) {
++                    AutofarmManager.useOfflinePotions(player)
++                    val combat=player.getCombatBehavior()
++                    // Keep the actual attacker: an old idle target can be blacklisted by
++                    // ordinary prey selection before the core has entered its combat state.
++                    val attacker=player.getKnownTypeInRadius(Monster::class.java,1000)
++                            .filter { !it.isDead && it.target===player && GeoEngine.getInstance().canSeeTarget(player,it) }
++                            .minByOrNull { distance(player,it) }
++                    if(attacker!=null) {
++                        player.target=attacker
++                        combat.committedTarget=attacker
++                    }
++                    combat.onUpdate()
++                    return@launch
++                }
+                 if(player.isInParty) {
+                     if(!validParty(player)) { leave(player,"party is no longer bot-led"); return@launch }
+                     if(player.party.leader===player) { leave(player,"offline characters never lead"); return@launch }
