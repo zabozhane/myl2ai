@@ -1,0 +1,95 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+index 23bda68..cf636cb 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -37,6 +37,8 @@ internal object OfflineChores {
+         turnInQuests(player)
+         sellJunk(player)
+         buyEssentialSupplies(player)
++        if(OfflineFarmManager.isActive(player) && !player.isDead)
++            dev.l2j.autobots.population.economy.DeathPenaltyRecovery.lift(player,optionalBudget(player)) { approach(player,it) }
+         buyWeapon(player)
+         buyArmor(player)
+         // Stock matches the final weapon, including a new arrow/shot grade.
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/DeathPenaltyRecovery.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/DeathPenaltyRecovery.kt
+new file mode 100644
+index 0000000..0da3096
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/DeathPenaltyRecovery.kt
+@@ -0,0 +1,64 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.extensions.useItem
++import kotlinx.coroutines.delay
++import net.sf.l2j.gameserver.model.actor.Npc
++import net.sf.l2j.gameserver.model.actor.Player
++
++/**
++ * Death Penalty lifted the way a player does it: the character's own Scroll: Recovery of the version its level
++ * may read, bought from an ordinary grocer with its own adena. Nothing is given; a refusal stops the attempt.
++ */
++internal object DeathPenaltyRecovery {
++    /** Scroll: Recovery No Grade..S; skill 2286 accepts level >= #minLvl and below the next version's minimum. */
++    private val SCROLLS = intArrayOf(8594, 8595, 8596, 8597, 8598, 8599)
++    private val MIN_LEVEL = intArrayOf(0, 20, 40, 52, 61, 76)
++    private const val MAX_LEVEL = 86
++    /** The items' reuse delay is 10 seconds; read the next one only after it. */
++    private const val REUSE_MS = 10_500L
++
++    fun scrollFor(player: Player): Int? =
++            if (player.level >= MAX_LEVEL) null else SCROLLS[MIN_LEVEL.indexOfLast { player.level >= it }]
++
++    /** Reads owned scrolls while the penalty lasts; returns the levels actually removed. */
++    suspend fun useOwned(player: Player): Int {
++        val scroll = scrollFor(player) ?: return 0
++        var removed = 0
++        while (player.deathPenaltyBuffLevel > 0 && Gear.count(player, scroll) > 0 && !player.isDead && removed < MAX_ATTEMPTS) {
++            if (player.isSitting) player.standUp()
++            for (wait in 1..10) { if (!player.isSitting) break; delay(500) }
++            val before = player.deathPenaltyBuffLevel
++            val owned = Gear.count(player, scroll)
++            player.useItem(scroll)
++            delay(REUSE_MS)
++            val after = player.deathPenaltyBuffLevel
++            log(player, "used $scroll penalty $before->$after scrolls $owned->${Gear.count(player, scroll)}")
++            if (after >= before) { log(player, "stops reason=scroll_refused");break }
++            removed++
++        }
++        return removed
++    }
++
++    /**
++     * Uses owned scrolls, buys the missing ones within [budget] from the nearest ordinary seller and reads them.
++     * A small budget or no seller is logged with its numbers and simply waits for a later visit.
++     */
++    suspend fun lift(player: Player, budget: Int, approach: suspend (Npc) -> Boolean) {
++        if (player.deathPenaltyBuffLevel <= 0) return
++        val scroll = scrollFor(player) ?: return log(player, "waits reason=no_version_for_level level=${player.level}")
++        useOwned(player)
++        val missing = player.deathPenaltyBuffLevel - Gear.count(player, scroll)
++        if (missing <= 0) return
++        val (shop, product) = Market.findProduct(player, scroll) ?: return log(player, "waits reason=no_seller item=$scroll penalty=${player.deathPenaltyBuffLevel}")
++        val price = Market.priceWithTax(shop, product)
++        val count = minOf(missing, budget / price.coerceAtLeast(1))
++        if (count <= 0) return log(player, "waits reason=money item=$scroll price=$price budget=$budget penalty=${player.deathPenaltyBuffLevel}")
++        if (!approach(shop.merchant)) return log(player, "waits reason=seller_unreachable seller=${shop.merchant.name}")
++        if (!Market.buyFromNpc(player, shop, product, count)) return log(player, "waits reason=purchase_refused item=$scroll count=$count price=$price")
++        useOwned(player)
++    }
++
++    private const val MAX_ATTEMPTS = 6
++    private fun log(player: Player, message: String) =
++            println("Autobots recovery: ${player.name} id=${player.objectId} lv ${player.level} death penalty $message")
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index 8c3b0bf..49d2036 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -137,6 +137,7 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         // Skills before gear: a spellbook and the trainer's lesson come first, like for a player.
+         SkillLearner.learn(bot)
+         buyEssentialSupplies()
++        DeathPenaltyRecovery.lift(bot, Errands.spendable(bot)) { walkTo(it, "for Scroll: Recovery") }
+         SocialTrade.borrowForGear(bot)
+         buyGear()
+         // What the new gear replaced is junk now, and so are store goods if the bag is still heavy.
