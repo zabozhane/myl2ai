@@ -1,0 +1,91 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 5e3a429..66c7c43 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -184,12 +184,12 @@ internal class QuestRunner(private val bot: Player) {
+             if (items < quest.turnInAt) continue
+             val giver = QuestWorld.closestNpc(bot, listOf(quest.giver)) ?: continue
+             if (distance(bot,giver)>GIVER_WITHIN) {
+-                val exit=gatekeeperExitFor(giver.location())
++                val exit=completeExitFrom(bot.location(),giver.location(),giver)?.exit
+                 if(exit==null || exit.price>dev.l2j.autobots.population.economy.Errands.spendable(bot)) {
+                     deferRepeat(quest.questName,"giver is in another town; no affordable route after supplies reserve")
+                     continue
+                 }
+-                travelTo(giver.location(),800)
++                travelTo(giver.location(),800,giver)
+                 if(distance(bot,giver)>GIVER_WITHIN) { deferRepeat(quest.questName,"route to giver's town failed"); continue }
+             }
+             if (!reach(giver)) { deferRepeat(quest.questName,"giver is unreachable"); continue }
+@@ -379,29 +379,34 @@ internal class QuestRunner(private val bot: Player) {
+     /** Walks (or takes a gatekeeper) to an NPC until it can talk. @return true once in talking range. */
+     private suspend fun reach(npc: Npc): Boolean {
+         if (distance(bot,npc)>12000) {
+-            travelTo(npc.location(),800)
++            travelTo(npc.location(),800,npc)
+         }
+         return dev.l2j.autobots.population.economy.NpcTravel.reach(bot,npc)
+     }
+ 
+-    private suspend fun travelTo(destination: Location, radius: Int) {
++    private suspend fun travelTo(destination: Location,radius: Int) = travelTo(destination,radius,null)
++
++    private suspend fun travelTo(destination: Location,radius: Int,npc: Npc?) {
+         if (bot.isSitting) {
+             bot.standUp()
+             return
+         }
+         val far = distance(bot.location(), destination) > MIN_WALK_SAVED_BY_TELEPORT && System.currentTimeMillis() >= walkOnlyUntil
+         val inTown = bot.isInsideZone(ZoneId.TOWN)
+-        val exit = if (far && inTown) gatekeeperExitFor(destination) else null
++        val exit = if (far && inTown) completeExitFrom(bot.location(),destination,npc)?.exit else null
+         // There is usually no gatekeeper within reach in the field. Quote the actual
+         // town's service first; a current-position lookup would force a map-wide walk.
+         val homeExit=if(far && !inTown) {
+             val home=net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getLocationToTeleport(bot,
+                     net.sf.l2j.gameserver.data.xml.MapRegionData.TeleportType.TOWN)
+-            dev.l2j.autobots.population.economy.GatekeeperTravel.towardFrom(bot,home,destination,
+-                    MIN_WALK_SAVED_BY_TELEPORT.toDouble())?.takeIf {
++            completeExitFrom(home,destination,npc)?.takeIf {
+                 it.price<=dev.l2j.autobots.population.economy.Errands.spendable(bot)
+             }
+         } else null
++        if(npc!=null && exit==null && homeExit==null && distance(bot.location(),destination)>100000) {
++            failed("no affordable complete route to ${npc.name}",walk=false)
++            return
++        }
+         when {
+             exit != null -> TravelByGatekeeperSequence(bot, exit) { failed("no teleport to ${exit.x},${exit.y} (adena ${bot.adena})", walk = true) }.execute()
+             // Far from town and from the target: back to town first, then the gatekeeper.
+@@ -423,9 +428,19 @@ internal class QuestRunner(private val bot: Player) {
+         if (walk) walkOnlyUntil = System.currentTimeMillis() + WALK_ONLY_MS
+     }
+ 
+-    private fun gatekeeperExitFor(destination: Location): TeleportLocation? {
+-        return dev.l2j.autobots.population.economy.GatekeeperTravel.toward(bot,destination,MIN_WALK_SAVED_BY_TELEPORT.toDouble())?.exit
+-    }
++    /** A partial cheap hop is not proof that the quest NPC can actually be reached. */
++    private fun completeExitFrom(origin: Location,destination: Location,npc: Npc?): dev.l2j.autobots.population.economy.GatekeeperTravel.Offer? =
++            dev.l2j.autobots.population.economy.GatekeeperTravel.offersFrom(bot,origin)
++                    .filter { distance(it.exit,destination)<=12000 &&
++                            distance(origin,destination)-distance(it.exit,destination)>MIN_WALK_SAVED_BY_TELEPORT }
++                    .sortedBy { distance(it.exit,destination)+it.price/10.0 }
++                    .firstOrNull { offer ->
++                        if(npc!=null) dev.l2j.autobots.population.economy.NpcTravel.plan(bot,npc,offer.exit,12000)!=null
++                        else dev.l2j.autobots.population.economy.NpcTravel.toPoint(bot,offer.exit,destination,12000)!=null
++                    }
++
++    private fun gatekeeperExitFor(destination: Location): TeleportLocation? =
++            completeExitFrom(bot.location(),destination,null)?.exit
+ 
+     /**
+      * Holds [weapon] (an item id, 0 for bare hands) while a quest counts only such kills; null gives the bot its own
+@@ -487,7 +502,7 @@ internal class QuestRunner(private val bot: Player) {
+     }
+ 
+     // Old route failures are no longer proof after town-origin services become available.
+-    private fun retryContext(path: PathQuest): String = "home-gatekeeper-v1:${describe(path)}"
++    private fun retryContext(path: PathQuest): String = "complete-npc-v1:${describe(path)}"
+ 
+     private fun describe(path: PathQuest): String {
+         val state = bot.getQuestState(path.questName)
