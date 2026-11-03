@@ -1,0 +1,108 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 619db49..0245d28 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -680,7 +680,13 @@ internal class LifeBehavior(private val bot: Autobot) {
+             return
+         }
+ 
+-        val exit = if (inTown && !gatekeeperFailed) gatekeeperExitFor(target.location) else null
++        val exit = if (inTown && !gatekeeperFailed) huntExitFor(target) else null
++        // A spot selected through a paid exit must not become a map-wide walk if
++        // its service or final walking leg is no longer available.
++        if(inTown && distance(bot.location(),target.location)>MAX_TRAVEL_ON_FOOT && exit==null) {
++            abandon(target)
++            return
++        }
+         val sequence = if (exit != null) {
+             TravelByGatekeeperSequence(bot, exit) { gatekeeperFailed = true }
+         } else if (bot.isInParty && bot.party.leader === bot) {
+@@ -726,6 +732,20 @@ internal class LifeBehavior(private val bot: Autobot) {
+         return Location(bot.x + ((destination.x - bot.x) * ratio).toInt(), bot.y + ((destination.y - bot.y) * ratio).toInt(), destination.z)
+     }
+ 
++    /** Match spot selection: a far spot can need a ride even when it saves less than the optional threshold. */
++    private fun huntExitFor(target: HuntingSpot): TeleportLocation? {
++        val origin=bot.location()
++        val saving=if(distance(origin,target.location)>MAX_TRAVEL_ON_FOOT) 0.0 else MIN_WALK_SAVED_BY_TELEPORT.toDouble()
++        return dev.l2j.autobots.population.economy.GatekeeperTravel.offers(bot)
++                .filter { distance(it.exit,target.location)<=MAX_TRAVEL_ON_FOOT &&
++                        distance(origin,target.location)-distance(it.exit,target.location)>saving }
++                .sortedBy { distance(it.exit,target.location)+it.price/10.0 }
++                .firstOrNull { offer ->
++                    val anchor=HuntingSpots.huntAnchor(bot,target,offer.exit,validateDirect=false)
++                    anchor!=null && dev.l2j.autobots.population.economy.NpcTravel.toPoint(bot,offer.exit,anchor,MAX_TRAVEL_ON_FOOT)!=null
++                }?.exit
++    }
++
+     /** The teleport destination worth paying for: one that saves a long walk to [target]. */
+     private fun gatekeeperExitFor(target: Location): TeleportLocation? {
+         return dev.l2j.autobots.population.economy.GatekeeperTravel.toward(bot,target,MIN_WALK_SAVED_BY_TELEPORT.toDouble())?.exit
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+index e0f3e64..200843d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+@@ -31,6 +31,28 @@ internal object GatekeeperTravel {
+         return if(!exit.isNoble && weekend && cal.get(Calendar.HOUR_OF_DAY) in 20..23) exit.price/2 else exit.price
+     }
+ 
++    private data class TopUp(val shop: Shop,val product: net.sf.l2j.gameserver.model.buylist.Product,
++                             val quantity: Int,val cost: Long)
++
++    /** Preserve the existing ten-heal travel rule by buying the missing stock, never by pretending it is carried. */
++    private fun noviceTopUpAt(player: Player,origin: Location): TopUp? {
++        val have=Healing.count(player)
++        if(player.level>=20 || have !in 3..9 || Gear.count(player,Gear.SCROLL_OF_ESCAPE)<1) return null
++        val need=10-have
++        return Gear.HEALING_POTIONS.mapNotNull { Market.findProductAt(it,origin) }
++                .filter { it.first.merchant.isVisible && (!it.second.hasLimitedStock() || it.second.count>=need) }
++                .mapNotNull { (shop,product) ->
++                    val price=Market.priceWithTax(shop,product)
++                    if(price<=0) null else TopUp(shop,product,need,price.toLong()*need)
++                }.minByOrNull { it.cost }
++    }
++
++    private fun fareBudgetAt(player: Player,origin: Location): Int {
++        val normal=Errands.travelSpendable(player)
++        val topUp=noviceTopUpAt(player,origin) ?: return normal
++        return maxOf(normal,(player.adena.toLong()-topUp.cost).coerceIn(0L,Int.MAX_VALUE.toLong()).toInt())
++    }
++
+     fun offers(player: Player): List<Offer> = offersFrom(player,player.location())
+ 
+     fun offersFrom(player: Player,origin: Location): List<Offer> {
+@@ -38,9 +60,10 @@ internal object GatekeeperTravel {
+                 .filterIsInstance<net.sf.l2j.gameserver.model.actor.instance.Gatekeeper>()
+                 .minByOrNull { distance(origin,it.location()) } ?: return emptyList()
+         if(!npc.isVisible || distance(origin,npc.location())>8000 || NpcTravel.plan(player,npc,origin,8000)==null) return emptyList()
++        val budget=fareBudgetAt(player,origin)
+         return menuIds(npc).mapNotNull { id ->
+             TeleportLocationData.getInstance().getTeleportLocation(id)?.let { Offer(npc,id,it,price(it)) }
+-        }.filter { !it.exit.isNoble && it.price<=Errands.travelSpendable(player) &&
++        }.filter { !it.exit.isNoble && it.price<=budget &&
+                 RouteSafety.safeDestination(player,it.exit) && RouteSafety.safeSegment(player,it.exit,it.exit) }
+     }
+ 
+@@ -54,8 +77,21 @@ internal object GatekeeperTravel {
+ 
+     suspend fun travel(player: Player,offer: Offer): Boolean {
+         val npc=offer.gatekeeper
++        fun active() = player is Autobot || OfflineFarmManager.isActive(player)
++        if(!active() || player.isDead) return false
+         if(!npc.isVisible || offer.id !in menuIds(npc) || offer.exit.isNoble ||
+-                price(offer.exit)>Errands.travelSpendable(player)) return false
++                price(offer.exit)>fareBudgetAt(player,player.location())) return false
++        if(price(offer.exit)>Errands.travelSpendable(player)) {
++            val topUp=noviceTopUpAt(player,player.location()) ?: return false
++            if(!NpcTravel.reach(player,topUp.shop.merchant,8000) || player.isDead || !active()) return false
++            val needed=(10-Healing.count(player)).coerceAtLeast(0)
++            if(needed>0) {
++                val cost=Market.priceWithTax(topUp.shop,topUp.product).toLong()*needed
++                if(cost+price(offer.exit)>player.adena || !active() ||
++                        !Market.buyFromNpc(player,topUp.shop,topUp.product,needed)) return false
++                EconomyLog.note(player,"prepared gatekeeper travel heals=${Healing.count(player)} paid=$cost")
++            }
++        }
+         if(!NpcTravel.reach(player,npc,8000) || player.isDead ||
+                 player !is Autobot && !OfflineFarmManager.isActive(player)) return false
+         // Balance, fare and menu can change during the walk. No manual charge or direct teleport.
