@@ -1,0 +1,20 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index 393809a..1a9b34a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -142,13 +142,10 @@ internal object HuntingSpots {
+     fun keysWithNpcNear(location: Location,npcId: Int,radius: Int): List<Long> =
+             spots.filter { npcId in it.npcIds() && distance(it.location,location)<=radius }.map { it.key }
+ 
+-    /**
+-     * A nest of aggressive monsters links into one fight; a lone offline character is overwhelmed there.
+-     * About a quarter of all spots qualify, so the population keeps its own survival memory for now.
+-     */
++    /** A nest of aggressive monsters links into one fight; a hunter without a party is overwhelmed there. */
+     fun isCrowdedFor(player: Player,spot: HuntingSpot): Boolean =
+             !player.isInParty && spot.aggressiveCrowd>=AGGRESSIVE_CROWD_LIMIT &&
+-                    player !is dev.l2j.autobots.Autobot && dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(player)
++                    (player is dev.l2j.autobots.Autobot || dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(player))
+ 
+     /** Autonomous novices must not plan ordinary prey under stronger aggressive guards. */
+     fun isDangerousFor(player: Player,monsterLevel: Int): Boolean =
