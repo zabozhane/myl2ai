@@ -1,0 +1,152 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/movement/TownPolicy.kt b/src/main/kotlin/dev/l2j/autobots/movement/TownPolicy.kt
+index 4bd4c5f..76f4595 100644
+--- a/src/main/kotlin/dev/l2j/autobots/movement/TownPolicy.kt
++++ b/src/main/kotlin/dev/l2j/autobots/movement/TownPolicy.kt
+@@ -3,9 +3,14 @@ package dev.l2j.autobots.movement
+ /** Commute time is not productive hunting. Urgent supplies bypass the optional errand window. */
+ internal object TownPolicy {
+     fun reason(heavy: Boolean,healing: Boolean,quest: Boolean,routine: Boolean,training: Boolean,
+-               upgrade: Boolean,shots: Boolean,arrows: Boolean,sinceTownMs: Long,productiveMs: Long): String? {
++               upgrade: Boolean,shots: Boolean,arrows: Boolean,sinceTownMs: Long,productiveMs: Long): String? =
++            reason(heavy,healing,quest,routine,training,upgrade,shots,arrows,sinceTownMs,productiveMs,false)
++
++    fun reason(heavy: Boolean,healing: Boolean,quest: Boolean,routine: Boolean,training: Boolean,
++               upgrade: Boolean,shots: Boolean,arrows: Boolean,sinceTownMs: Long,productiveMs: Long,emptyBow: Boolean): String? {
+         if(heavy) return "weight"
+         if(healing) return "healing_stock"
++        if(emptyBow) return "arrows_empty"
+         if(sinceTownMs<15*60_000L) return null
+         if(training) return "training"
+         if(productiveMs<10*60_000L) return null
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 194fe28..ac59cd5 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -741,7 +741,7 @@ object OfflineFarmManager {
+                 val gearWindow=dev.l2j.autobots.movement.TownPolicy.reason(false,false,false,false,false,true,false,false,sinceTown,productiveMs)=="equipment"
+                 val upgrade=if(!heavy && !lowHealing && !ready && !routine && gearWindow) OfflineWeaponTrip.ready(player) else null
+                 val reason=dev.l2j.autobots.movement.TownPolicy.reason(heavy,lowHealing,
+-                        ready,routine,false,upgrade!=null,false,false,sinceTown,productiveMs)
++                        ready,routine,false,upgrade!=null,false,false,sinceTown,productiveMs,Gear.fundedEmptyBowTrip(player))
+                 if(reason!=null) {
+                     if(reason=="equipment" && upgrade!=null) LOGGER.info("Offline farm: ${player.name} id=$id plans weapon=${upgrade.product.item.name}" +
+                             " price=${dev.l2j.autobots.population.economy.Market.priceWithTax(upgrade.shop,upgrade.product)} supplies=${upgrade.supplies}" +
+@@ -898,6 +898,7 @@ object OfflineFarmManager {
+         val productiveSeconds=(System.currentTimeMillis()-(productiveSince[id]?:System.currentTimeMillis()))/1000
+         val origin = if(returnToSpot) Location(player.x, player.y, player.z) else null
+         townAction(player) {
++            if(Gear.isArcher(player) && Gear.count(player,Gear.arrowId(player))==0) Gear.noteArrowTrip(player)
+             AutofarmManager.stopFarm(player, "going to town")
+             LOGGER.info("Offline farm: ${player.name} id=${player.objectId} heads to town reason=$reason productiveSeconds=$productiveSeconds healing=${dev.l2j.autobots.population.economy.Healing.count(player)} loadPercent=${Errands.loadPercent(player)} from=${player.x},${player.y},${player.z}.")
+             if (Gear.count(player, Gear.SCROLL_OF_ESCAPE) > 0) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 009257c..619db49 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -7,6 +7,7 @@ import dev.l2j.autobots.behaviors.sequences.WalkToSequence
+ import dev.l2j.autobots.extensions.getActiveSequence
+ import dev.l2j.autobots.extensions.location
+ import dev.l2j.autobots.population.economy.EconomyLog
++import dev.l2j.autobots.population.economy.Gear
+ import dev.l2j.autobots.population.economy.Errands
+ import net.sf.l2j.gameserver.data.ItemTable
+ import dev.l2j.autobots.population.economy.Fitness
+@@ -502,12 +503,13 @@ internal class LifeBehavior(private val bot: Autobot) {
+         }
+         if (inTown) bot.socialBehavior.onUpdate()
+ 
+-        if (!inTown && economy && bot.target == null && System.currentTimeMillis() - townTravelFailedAt > TOWN_RETRY_MS &&
+-                Errands.shouldLeaveSpot(bot, lastTripAt)) {
+-            val reason=Errands.leaveReason(bot,lastTripAt) ?: "errands"
+-            EconomyLog.note(bot,"leaves hunt reason=$reason productiveSeconds=${productiveHuntMs/1000}")
+-            goToTown(reason=reason)
+-            return
++        if (!inTown && economy && System.currentTimeMillis() - townTravelFailedAt > TOWN_RETRY_MS) {
++            val reason=Errands.leaveReason(bot,lastTripAt)
++            if(reason!=null && (bot.target==null || reason=="arrows_empty")) {
++                EconomyLog.note(bot,"leaves hunt reason=$reason productiveSeconds=${productiveHuntMs/1000}")
++                goToTown(reason=reason)
++                return
++            }
+         }
+ 
+         // A quest leads the bot its own way; a party keeps hunting together instead.
+@@ -579,6 +581,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     /** @return false when town can't be reached from here (no scroll, too far to walk). */
+     private suspend fun goToTown(maxWalk: Int = GoToTownSequence.MAX_WALK_TO_TOWN,reason: String="session_or_party"): Boolean {
+         var failed = false
++        if(Gear.isArcher(bot) && Gear.count(bot,Gear.arrowId(bot))==0) Gear.noteArrowTrip(bot)
+         GoToTownSequence(bot, maxWalk,purpose=reason) { failed = true }.execute()
+         if (failed) townTravelFailedAt = System.currentTimeMillis()
+         return !failed
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index f117b11..9248e0c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -105,17 +105,48 @@ internal object Gear {
+         if(bot.isCastingNow || bot.isAttackingNow || bot.isTeleporting) return
+         val current=bot.inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND) ?: return
+         if(current.itemType!=WeaponType.BOW || count(bot,ARROWS.getValue(current.item.crystalType))>0) return
++        val replacement=stockedBow(bot,current) ?: return
++        equip(bot,replacement)
++        if(replacement.isEquipped) EconomyLog.log(bot,Deal.Equip,
++                "bow fallback: no arrows for ${current.itemName}; using owned ${replacement.itemName}")
++    }
++
++    private fun stockedBow(bot: Player,current: ItemInstance): ItemInstance? {
+         val allowed=gradeFor(bot.level).id
+-        val replacement=bot.inventory.items.filter { item ->
++        return bot.inventory.items.filter { item ->
+             !item.isEquipped && item.isEquipable && item.isWeapon && item.itemType==WeaponType.BOW &&
+                     !item.isQuestItem && !item.isHeroItem && !item.isShadowItem &&
+                     item.item.crystalType.id<=allowed && item.item.bodyPart==current.item.bodyPart &&
+                     item.weaponItem.isMagical==current.weaponItem.isMagical &&
+                     count(bot,ARROWS.getValue(item.item.crystalType))>0
+-        }.maxByOrNull { dev.l2j.autobots.offlinelife.OfflineEquipment.score(bot,it) } ?: return
+-        equip(bot,replacement)
+-        if(replacement.isEquipped) EconomyLog.log(bot,Deal.Equip,
+-                "bow fallback: no arrows for ${current.itemName}; using owned ${replacement.itemName}")
++        }.maxByOrNull { dev.l2j.autobots.offlinelife.OfflineEquipment.score(bot,it) }
++    }
++
++    private val arrowTripRetry=java.util.concurrent.ConcurrentHashMap<Int,Long>()
++
++    /** A failed stock visit must not create an immediate scroll/commute loop. */
++    fun noteArrowTrip(bot: Player) { arrowTripRetry[bot.objectId]=System.currentTimeMillis()+5*60_000L }
++
++    /** Fund the minimum usable arrows, necessary heals/escape replacement and ordinary cash reserve. */
++    fun fundedEmptyBowTrip(bot: Player): Boolean {
++        val current=bot.inventory.getPaperdollItem(Inventory.PAPERDOLL_RHAND) ?: return false
++        if(current.itemType!=WeaponType.BOW) return false
++        if(count(bot,arrowId(bot))>0) { arrowTripRetry.remove(bot.objectId);return false }
++        if(System.currentTimeMillis()<(arrowTripRetry[bot.objectId]?:0L) || stockedBow(bot,current)!=null) return false
++        val home=net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getLocationToTeleport(bot,
++                net.sf.l2j.gameserver.data.xml.MapRegionData.TeleportType.TOWN)
++        fun cost(id: Int,quantity: Int): Long? {
++            val offer=Market.findProductAt(id,home) ?: return null
++            val price=Market.priceWithTax(offer.first,offer.second)
++            if(price<=0 || offer.second.hasLimitedStock() && offer.second.count<quantity) return null
++            return price.toLong()*quantity
++        }
++        val arrows=cost(arrowId(bot),50) ?: return false
++        val haveHeals=Healing.count(bot)
++        val heals=if(haveHeals<3) HEALING_POTIONS.mapNotNull { cost(it,10-haveHeals.coerceAtLeast(0)) }.minOrNull() ?: return false else 0L
++        val escapes=(count(bot,SCROLL_OF_ESCAPE)-1).coerceAtLeast(0)
++        val scrolls=if(escapes<1) cost(SCROLL_OF_ESCAPE,if(bot.level<20) 1 else 2) ?: return false else 0L
++        return arrows+heals+scrolls<=Errands.spendable(bot).toLong()
+     }
+ 
+     fun count(bot: Player, itemId: Int): Int = bot.inventory.getItemByItemId(itemId)?.count ?: 0
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index f6e4a27..0a671d8 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -59,7 +59,7 @@ internal object Errands {
+             System.currentTimeMillis()-lastTripAt>=ROUTINE_TRIP_MINUTES*60_000L && Gear.surplus(bot).isNotEmpty(),
+             SkillLearner.hasLessons(bot),affordableUpgrade(bot)!=null,outOfShots(bot),
+             Gear.isArcher(bot) && Gear.count(bot,Gear.arrowId(bot))<50,
+-            System.currentTimeMillis()-lastTripAt,bot.life?.productiveHuntMs?:0L)
++            System.currentTimeMillis()-lastTripAt,bot.life?.productiveHuntMs?:0L,Gear.fundedEmptyBowTrip(bot))
+ 
+     private fun outOfShots(bot: Autobot): Boolean {
+         val shotId = Gear.shotId(bot)
