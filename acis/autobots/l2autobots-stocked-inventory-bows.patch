@@ -1,0 +1,94 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+index 12cf942..10c454d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -114,7 +114,7 @@ internal object OfflineChores {
+         }
+     }
+ 
+-    private fun optionalBudget(player: Player): Int {
++    internal fun optionalBudget(player: Player): Int {
+         val fare=if(player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN) &&
+                 dev.l2j.autobots.population.HuntingSpots.nearArrival(player,player.location(),emptySet(),20000).isEmpty())
+             HuntRecovery.plan(player,emptySet())?.exit?.price?:0 else 0
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+index 7d65d13..8f05344 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+@@ -6,6 +6,8 @@ import dev.l2j.autobots.autofarm.AutofarmManager
+ import dev.l2j.autobots.population.economy.Gear
+ import dev.l2j.autobots.population.trade.Loans
+ import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.enums.items.EtcItemType
++import net.sf.l2j.gameserver.enums.items.WeaponType
+ import net.sf.l2j.gameserver.enums.items.ArmorType
+ import net.sf.l2j.gameserver.enums.skills.Stats
+ import net.sf.l2j.gameserver.model.actor.Player
+@@ -24,7 +26,8 @@ internal object OfflineEquipment {
+         for (item in candidates) {
+             if (!OfflineFarmManager.isActive(player)) return
+             val slot = slot(player, item)
+-            if (slot < 0 || !fits(player, item)) continue
++            if (slot < 0 || !fits(player, item) ||
++                    !Gear.canEquipStockedWeapon(player,item) { OfflineChores.optionalBudget(player) }) continue
+             val worn = player.inventory.getPaperdollItem(slot)
+             if (worn == null || score(player, item) > score(player, worn) + 0.01) Gear.equip(player, item)
+         }
+@@ -78,7 +81,9 @@ internal object OfflineEquipment {
+             if (current == null && (expected == null || item.itemType != expected.itemType)) return false
+             if (item.weaponItem.isMagical != player.isMageClass) return false
+             // Avoid silently unequipping a shield or a second armor piece.
+-            if (item.item.bodyPart == Item.SLOT_LR_HAND && player.inventory.getPaperdollItem(Inventory.PAPERDOLL_LHAND) != null) return false
++            val left = player.inventory.getPaperdollItem(Inventory.PAPERDOLL_LHAND)
++            if (item.item.bodyPart == Item.SLOT_LR_HAND && left != null &&
++                    !(item.itemType == WeaponType.BOW && left.itemType == EtcItemType.ARROW)) return false
+         } else if (item.item.type2 != Item.TYPE2_ACCESSORY) {
+             if (current != null && (item.itemType != current.itemType || item.item.bodyPart != current.item.bodyPart)) return false
+             if (current == null && item.itemType == (if (player.isMageClass) ArmorType.HEAVY else ArmorType.MAGIC)) return false
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index b22b71d..950aff4 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -5,6 +5,7 @@ import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.behaviors.attributes.PetOwner
+ import dev.l2j.autobots.behaviors.preferences.PetOwnerPreferences
+ import dev.l2j.autobots.extensions.getCombatBehavior
++import dev.l2j.autobots.extensions.location
+ import dev.l2j.autobots.population.economy.craft.CraftStock
+ import dev.l2j.autobots.population.trade.Loans
+ import net.sf.l2j.gameserver.data.ItemTable
+@@ -89,6 +90,16 @@ internal object Gear {
+         return total.takeIf { it<=Int.MAX_VALUE }?.toInt()
+     }
+ 
++    /** Inventory upgrades must not replace a usable bow with one that cannot shoot. */
++    fun canEquipStockedWeapon(bot: Player,item: ItemInstance,available: () -> Int): Boolean {
++        if(!item.isWeapon || item.itemType!=WeaponType.BOW) return true
++        val have=count(bot,ARROWS.getValue(item.item.crystalType))
++        if(!bot.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN)) return have>0
++        if(have>=500) return true
++        val stock=weaponStockReserveAt(bot,item.item,bot.location()) ?: return false
++        return stock<=available()
++    }
++
+     fun count(bot: Player, itemId: Int): Int = bot.inventory.getItemByItemId(itemId)?.count ?: 0
+ 
+     /** The pieces of the target kit the bot still lacks, in buying order. */
+@@ -137,6 +148,7 @@ internal object Gear {
+         val replaced = mutableListOf<ItemInstance>()
+         val candidates = bot.inventory.items.filter { it.isEquipable && !it.isEquipped && (it.isWeapon || it.isArmor) && it.item.crystalType.id <= allowedGrade }
+         for (item in candidates) {
++            if(!canEquipStockedWeapon(bot,item) { Errands.spendable(bot) }) continue
+             if (wished.remove(item.itemId) || isUpgrade(bot, item)) {
+                 val previous = bot.inventory.getPaperdollItem(slotOf(bot, item))
+                 equip(bot, item)
+@@ -227,7 +239,8 @@ internal object Gear {
+         val lent = Loans.protectedObjects(bot)
+         return bot.inventory.items.filter {
+             !it.isEquipped && it.itemId !in keep && it.objectId !in lent && !it.isQuestItem && !it.isHeroItem && !it.isShadowItem &&
+-                    it.referencePrice >= 2 && (it.isSellable || it.isTradable)
++                    it.referencePrice >= 2 && (it.isSellable || it.isTradable) &&
++                    !(it.isWeapon && it.itemType==WeaponType.BOW && isUpgrade(bot,it))
+         }
+     }
+ }
