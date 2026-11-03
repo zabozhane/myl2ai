@@ -13,14 +13,14 @@ index 23bda68..f94afd8 100644
          buyArmor(player)
          // Stock matches the final weapon, including a new arrow/shot grade.
 diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
-index 4114884..22ca1c8 100644
+index 4114884..45cc60f 100644
 --- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
 @@ -815,6 +815,8 @@ object OfflineFarmManager {
                  val upgrade=if(!heavy && !lowHealing && !ready && !routine && gearWindow) OfflineWeaponTrip.ready(player) else null
                  val reason=dev.l2j.autobots.movement.TownPolicy.reason(heavy,lowHealing,
                          ready,routine,false,upgrade!=null,false,false,sinceTown,productiveMs,Gear.fundedEmptyBowTrip(player))
-+                        ?: if(sinceTown>=dev.l2j.autobots.population.economy.DeathPenaltyRecovery.TRIP_RETRY_MS &&
++                        ?: if(now-(lastTownTripAt[id]?:0L)>=dev.l2j.autobots.population.economy.DeathPenaltyRecovery.TRIP_RETRY_MS &&
 +                                dev.l2j.autobots.population.economy.DeathPenaltyRecovery.worthTrip(player,player.adena)) "death_penalty" else null
                  if(reason!=null) {
                      if(reason=="equipment" && upgrade!=null) LOGGER.info("Offline farm: ${player.name} id=$id plans weapon=${upgrade.product.item.name}" +
