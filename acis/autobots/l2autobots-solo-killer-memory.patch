@@ -1,0 +1,34 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index af3d91a..4114884 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -246,7 +246,7 @@ object OfflineFarmManager {
+             val attackers = player.getKnownTypeInRadius(Monster::class.java, 2000)
+                     .filter { !it.isDead && it.target === player }
+             val route = traveling[player.objectId]
+-            if(killer is Monster && killer.isAggressive && route==null) rememberDeadlySpots(player,killer)
++            if(killer is Monster && killer.isAggressive && route==null) rememberDeadlySpots(player,killer,attackers.size<=1)
+             LOGGER.info("Offline farm death: ${player.name} id=${player.objectId} lv ${player.level} ${player.classId}" +
+                     " killed by $by, attackers ${attackers.size} [${attackers.joinToString(" ") { "${it.name}/${it.level}" }}]" +
+                     ", healing=${dev.l2j.autobots.population.economy.Healing.count(player)} mp=${player.currentMp.toInt()}/${player.maxMp}" +
+@@ -266,15 +266,17 @@ object OfflineFarmManager {
+      * A monster below the deadly margin can still kill this character here (a caster against a fighter,
+      * several at once). The spawn data cannot tell that, so do not send it back to that prey for a while.
+      */
+-    private fun rememberDeadlySpots(player: Player,killer: Monster) {
++    private fun rememberDeadlySpots(player: Player,killer: Monster,alone: Boolean) {
+         val now=System.currentTimeMillis()
+-        val keys=HuntingSpots.keysWithNpcNear(player.location(),killer.npcId,DEADLY_SPOT_RADIUS)
++        // One such monster alone beat the character: it is too strong for it anywhere, not only here.
++        val radius=if(alone) Int.MAX_VALUE else DEADLY_SPOT_RADIUS
++        val keys=HuntingSpots.keysWithNpcNear(player.location(),killer.npcId,radius)
+         if(keys.isEmpty()) return
+         val marks=deadlyMarks(player.objectId,now)
+         keys.forEach { marks[it]=now }
+         DeadlySpotStore.save(player.objectId,keys.associateWith { now })
+         LOGGER.info("Offline farm: ${player.name} id=${player.objectId} avoids ${keys.size} spots of ${killer.name} (${killer.npcId})" +
+-                " within $DEADLY_SPOT_RADIUS for ${DEADLY_SPOT_MS/60_000} minutes after a death there.")
++                " within ${if(alone) "the world" else "$radius"} for ${DEADLY_SPOT_MS/60_000} minutes after a death there.")
+     }
+ 
+     private fun deadlyMarks(id: Int,now: Long): MutableMap<Long,Long> =
