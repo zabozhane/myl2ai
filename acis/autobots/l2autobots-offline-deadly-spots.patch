@@ -1,0 +1,77 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 3d09958..1e56f22 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -121,6 +121,8 @@ object OfflineFarmManager {
+     private val productiveSince = ConcurrentHashMap<Int, Long>()
+     private val huntedSpot = ConcurrentHashMap<Int, Long>()
+     private val emptySpots = ConcurrentHashMap<Int, MutableMap<Long,Long>>()
++    /** Spots where an aggressive monster of this kind already killed the character while it hunted there. */
++    private val deadlySpots = ConcurrentHashMap<Int, MutableMap<Long,Long>>()
+     private val pendingHunt = ConcurrentHashMap.newKeySet<Int>()
+     private val retryAfter = ConcurrentHashMap<Int, Long>()
+     private val recoveredAt = ConcurrentHashMap<Int,Long>()
+@@ -244,6 +246,7 @@ object OfflineFarmManager {
+             val attackers = player.getKnownTypeInRadius(Monster::class.java, 2000)
+                     .filter { !it.isDead && it.target === player }
+             val route = traveling[player.objectId]
++            if(killer is Monster && killer.isAggressive && route==null) rememberDeadlySpots(player,killer)
+             LOGGER.info("Offline farm death: ${player.name} id=${player.objectId} lv ${player.level} ${player.classId}" +
+                     " killed by $by, attackers ${attackers.size} [${attackers.joinToString(" ") { "${it.name}/${it.level}" }}]" +
+                     ", healing=${dev.l2j.autobots.population.economy.Healing.count(player)} mp=${player.currentMp.toInt()}/${player.maxMp}" +
+@@ -259,6 +262,20 @@ object OfflineFarmManager {
+         }
+     }
+ 
++    /**
++     * A monster below the deadly margin can still kill this character here (a caster against a fighter,
++     * several at once). The spawn data cannot tell that, so do not send it back to that prey for a while.
++     */
++    private fun rememberDeadlySpots(player: Player,killer: Monster) {
++        val now=System.currentTimeMillis()
++        val keys=HuntingSpots.keysWithNpcNear(player.location(),killer.npcId,DEADLY_SPOT_RADIUS)
++        if(keys.isEmpty()) return
++        val marks=deadlySpots.getOrPut(player.objectId){ConcurrentHashMap()}
++        keys.forEach { marks[it]=now }
++        LOGGER.info("Offline farm: ${player.name} id=${player.objectId} avoids ${keys.size} spots of ${killer.name} (${killer.npcId})" +
++                " within $DEADLY_SPOT_RADIUS for ${DEADLY_SPOT_MS/60_000} minutes after a death there.")
++    }
++
+     internal fun activityAvailable(player: Player): Boolean = isActive(player) && !traveling.containsKey(player.objectId) && !townJobs.containsKey(player.objectId)
+ 
+     internal fun isActive(player: Player): Boolean = !serverShuttingDown &&
+@@ -444,6 +461,10 @@ object OfflineFarmManager {
+             recent.entries.removeIf { now-it.value>30*60_000L }
+             excluded.addAll(recent.keys)
+         }
++        deadlySpots[player.objectId]?.let { recent ->
++            recent.entries.removeIf { now-it.value>DEADLY_SPOT_MS }
++            excluded.addAll(recent.keys)
++        }
+         var spot: HuntingSpot? = null
+         for (attempt in 1..MAX_SPOT_ATTEMPTS) {
+             val candidate = HuntingSpots.choose(player, level, excluded, maxWalk = MAX_WALK_TO_SPOT) ?: break
+@@ -1500,6 +1521,8 @@ object OfflineFarmManager {
+     private const val EXCLUSIONS_RETRY_MS = 5 * 60_000L
+     private const val DEATH_WAIT_MS = 15_000L
+     private const val TOWN_CHECK_MS = 60_000L
++    private const val DEADLY_SPOT_RADIUS = 6000
++    private const val DEADLY_SPOT_MS = 3*60*60_000L
+     private const val MIN_TRIP_GAP_MS = 15 * 60_000L
+     private const val ROUTINE_TRIP_MS = 90 * 60_000L
+     private const val MAX_WALK_TO_TOWN = dev.l2j.autobots.movement.TownWalk.MAX_DISTANCE
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index 712d7cf..6beab77 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -133,6 +133,10 @@ internal object HuntingSpots {
+         return (player.level-5).coerceAtLeast(1)..(player.level+above)
+     }
+ 
++    /** Spots near [location] where the given monster spawns; an offline death there should not repeat. */
++    fun keysWithNpcNear(location: Location,npcId: Int,radius: Int): List<Long> =
++            spots.filter { npcId in it.npcIds() && distance(it.location,location)<=radius }.map { it.key }
++
+     /** Autonomous novices must not plan ordinary prey under stronger aggressive guards. */
+     fun isDangerousFor(player: Player,monsterLevel: Int): Boolean =
+             if((player.level<20 && (player is dev.l2j.autobots.Autobot ||
