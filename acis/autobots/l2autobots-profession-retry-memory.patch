@@ -1,0 +1,144 @@
+diff --git a/sql/autobot_quest_retry.sql b/sql/autobot_quest_retry.sql
+new file mode 100644
+index 0000000..6564a4e
+--- /dev/null
++++ b/sql/autobot_quest_retry.sql
+@@ -0,0 +1,11 @@
++CREATE TABLE IF NOT EXISTS autobot_quest_retry (
++  obj_Id INT UNSIGNED NOT NULL,
++  class_id INT NOT NULL,
++  quest_name VARCHAR(96) NOT NULL,
++  retry_at BIGINT NOT NULL,
++  x INT NOT NULL,
++  y INT NOT NULL,
++  z INT NOT NULL,
++  stage VARCHAR(64) NOT NULL,
++  PRIMARY KEY(obj_Id)
++);
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 53bfdaf..23486c2 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -55,6 +55,7 @@ object AutobotsManager {
+         AutobotsDao.updateAllBotOnlineStatus(false)
+         AutobotScheduler
+         AutofarmManager
++        dev.l2j.autobots.population.quests.QuestRetryStore.initialize()
+         OfflineFarmManager.onServerStart()
+         dev.l2j.autobots.population.RouteSafety.load()
+         PopulationManager.start()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRetryStore.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRetryStore.kt
+new file mode 100644
+index 0000000..32e9e8c
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRetryStore.kt
+@@ -0,0 +1,47 @@
++package dev.l2j.autobots.population.quests
++
++import net.sf.l2j.L2DatabaseFactory
++import java.util.logging.Logger
++
++internal data class QuestRetryState(val classId: Int,val quest: String,val until: Long,
++        val x: Int,val y: Int,val z: Int,val stage: String)
++
++/** Failed profession work survives a runner, login or server restart; never stores quest rewards/progress. */
++internal object QuestRetryStore {
++    private val logger=Logger.getLogger(QuestRetryStore::class.java.name)
++
++    fun initialize() {
++        L2DatabaseFactory.getInstance().connection.use { c -> c.createStatement().use {
++            it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_quest_retry (obj_Id INT UNSIGNED NOT NULL, class_id INT NOT NULL, quest_name VARCHAR(96) NOT NULL, retry_at BIGINT NOT NULL, x INT NOT NULL, y INT NOT NULL, z INT NOT NULL, stage VARCHAR(64) NOT NULL, PRIMARY KEY(obj_Id))")
++        } }
++    }
++
++    fun save(id: Int,state: QuestRetryState) {
++        runCatching {
++            L2DatabaseFactory.getInstance().connection.use { c ->
++                c.prepareStatement("INSERT INTO autobot_quest_retry(obj_Id,class_id,quest_name,retry_at,x,y,z,stage) VALUES(?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE class_id=VALUES(class_id),quest_name=VALUES(quest_name),retry_at=VALUES(retry_at),x=VALUES(x),y=VALUES(y),z=VALUES(z),stage=VALUES(stage)").use {
++                    it.setInt(1,id);it.setInt(2,state.classId);it.setString(3,state.quest);it.setLong(4,state.until)
++                    it.setInt(5,state.x);it.setInt(6,state.y);it.setInt(7,state.z);it.setString(8,state.stage);it.executeUpdate()
++                }
++            }
++        }.onFailure { logger.warning("Profession retry write failed for $id: $it") }
++    }
++
++    fun load(id: Int): QuestRetryState? = runCatching {
++        L2DatabaseFactory.getInstance().connection.use { c ->
++            c.prepareStatement("SELECT class_id,quest_name,retry_at,x,y,z,stage FROM autobot_quest_retry WHERE obj_Id=?").use {
++                it.setInt(1,id)
++                it.executeQuery().use { rows ->
++                    if(!rows.next()) null else QuestRetryState(rows.getInt(1),rows.getString(2),rows.getLong(3),
++                            rows.getInt(4),rows.getInt(5),rows.getInt(6),rows.getString(7))
++                }
++            }
++        }
++    }.getOrElse { logger.warning("Profession retry read failed for $id: $it");null }
++
++    fun clear(id: Int) {
++        runCatching { L2DatabaseFactory.getInstance().connection.use { c ->
++            c.prepareStatement("DELETE FROM autobot_quest_retry WHERE obj_Id=?").use { it.setInt(1,id);it.executeUpdate() }
++        } }.onFailure { logger.warning("Profession retry delete failed for $id: $it") }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 0ab2f84..ff1d919 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -46,6 +46,7 @@ internal class QuestRunner(private val bot: Player) {
+     private var lastSignature = -1L
+     private var lastProgressAt = System.currentTimeMillis()
+     private var pausedUntil = 0L
++    private var retryLoaded = false
+     private var travelFailures = 0
+     private var lastFailure = ""
+     // After a failed teleport (no adena, no gatekeeper) or escape (no scroll) the bot walks for a while, like a
+@@ -78,8 +79,30 @@ internal class QuestRunner(private val bot: Player) {
+     /** A bot due for its profession quest plays this session rather than idling or trading, as a player would. */
+     fun hasBusiness(): Boolean = repeatReady() || professionBusiness()
+ 
+-    fun professionBusiness(): Boolean = AutobotData.settings.questsEnabled && bot.classId.level() == 0 && bot.level >= START_LEVEL &&
+-            !bot.isInParty && System.currentTimeMillis() >= pausedUntil && PathQuests.forBaseClass(bot.classId).any { it.to in getSupportedClasses }
++    fun professionBusiness(): Boolean {
++        if(!AutobotData.settings.questsEnabled || bot.classId.level()!=0 || bot.level<START_LEVEL || bot.isInParty) return false
++        restoreRetry()
++        return System.currentTimeMillis()>=pausedUntil && PathQuests.forBaseClass(bot.classId).any { it.to in getSupportedClasses }
++    }
++
++    /** Load once per runner; a changed class, quest step or region is a genuinely different attempt. */
++    private fun restoreRetry() {
++        if(retryLoaded) return
++        retryLoaded=true
++        val saved=QuestRetryStore.load(bot.objectId) ?: return
++        ensureLoaded()
++        val path=PathQuests.forBaseClass(bot.classId).firstOrNull { it.questName==saved.quest && it.to in getSupportedClasses }
++        val now=System.currentTimeMillis()
++        if(path==null || saved.classId!=bot.classId.id || saved.until<=now || saved.until>now+PAUSE_MS ||
++                distance(bot.location(),Location(saved.x,saved.y,saved.z))>5000 || describe(path)!=saved.stage) {
++            QuestRetryStore.clear(bot.objectId)
++            return
++        }
++        chosen=path
++        pausedUntil=saved.until
++        lastProgressAt=pausedUntil
++        println("Autobots quests: ${bot.name} id=${bot.objectId} resumes deferred ${saved.quest} retryAt=$pausedUntil")
++    }
+ 
+     fun repeatReady(): Boolean {
+         if (!AutobotData.settings.questsEnabled) return false
+@@ -189,6 +212,7 @@ internal class QuestRunner(private val bot: Player) {
+ 
+     private suspend fun update(): Boolean {
+         if (bot.classId.level() != 0 || bot.level < START_LEVEL) return false
++        restoreRetry()
+         if (System.currentTimeMillis() < pausedUntil) return false
+         if (!loaded) {
+             QuestWorld.loadQuestStates(bot)
+@@ -443,6 +467,8 @@ internal class QuestRunner(private val bot: Player) {
+         lastProgressAt = pausedUntil
+         travelFailures = 0
+         relax()
++        QuestRetryStore.save(bot.objectId,QuestRetryState(bot.classId.id,path.questName,pausedUntil,
++                bot.x,bot.y,bot.z,describe(path)))
+         QuestLog.log(bot, QuestEvent.Stuck, "${path.questName} put aside (${describe(path)}): $reason")
+     }
+ 
