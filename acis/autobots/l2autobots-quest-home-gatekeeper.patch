@@ -1,0 +1,75 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+index ed8cb07..e0f3e64 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+@@ -44,8 +44,12 @@ internal object GatekeeperTravel {
+                 RouteSafety.safeDestination(player,it.exit) && RouteSafety.safeSegment(player,it.exit,it.exit) }
+     }
+ 
+-    fun toward(player: Player,target: Location,minSaved: Double=2000.0): Offer? = offers(player)
+-            .filter { distance(player.location(),target)-distance(it.exit,target)>minSaved }
++    fun toward(player: Player,target: Location,minSaved: Double=2000.0): Offer? =
++            towardFrom(player,player.location(),target,minSaved)
++
++    /** Quote a real service at the intended town, without pretending it can be used from the field. */
++    fun towardFrom(player: Player,origin: Location,target: Location,minSaved: Double): Offer? = offersFrom(player,origin)
++            .filter { distance(origin,target)-distance(it.exit,target)>minSaved }
+             .minByOrNull { distance(it.exit,target)+it.price/10.0 }
+ 
+     suspend fun travel(player: Player,offer: Offer): Boolean {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index ff1d919..5e3a429 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -94,7 +94,7 @@ internal class QuestRunner(private val bot: Player) {
+         val path=PathQuests.forBaseClass(bot.classId).firstOrNull { it.questName==saved.quest && it.to in getSupportedClasses }
+         val now=System.currentTimeMillis()
+         if(path==null || saved.classId!=bot.classId.id || saved.until<=now || saved.until>now+PAUSE_MS ||
+-                distance(bot.location(),Location(saved.x,saved.y,saved.z))>5000 || describe(path)!=saved.stage) {
++                distance(bot.location(),Location(saved.x,saved.y,saved.z))>5000 || retryContext(path)!=saved.stage) {
+             QuestRetryStore.clear(bot.objectId)
+             return
+         }
+@@ -392,11 +392,25 @@ internal class QuestRunner(private val bot: Player) {
+         val far = distance(bot.location(), destination) > MIN_WALK_SAVED_BY_TELEPORT && System.currentTimeMillis() >= walkOnlyUntil
+         val inTown = bot.isInsideZone(ZoneId.TOWN)
+         val exit = if (far && inTown) gatekeeperExitFor(destination) else null
++        // There is usually no gatekeeper within reach in the field. Quote the actual
++        // town's service first; a current-position lookup would force a map-wide walk.
++        val homeExit=if(far && !inTown) {
++            val home=net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getLocationToTeleport(bot,
++                    net.sf.l2j.gameserver.data.xml.MapRegionData.TeleportType.TOWN)
++            dev.l2j.autobots.population.economy.GatekeeperTravel.towardFrom(bot,home,destination,
++                    MIN_WALK_SAVED_BY_TELEPORT.toDouble())?.takeIf {
++                it.price<=dev.l2j.autobots.population.economy.Errands.spendable(bot)
++            }
++        } else null
+         when {
+             exit != null -> TravelByGatekeeperSequence(bot, exit) { failed("no teleport to ${exit.x},${exit.y} (adena ${bot.adena})", walk = true) }.execute()
+             // Far from town and from the target: back to town first, then the gatekeeper.
+-            far && !inTown && gatekeeperExitFor(destination) != null && distance(bot.location(), destination) > FAR_FROM_TOWN ->
+-                GoToTownSequence(bot) { failed("couldn't get back to town", walk = true) }.execute()
++            far && !inTown && homeExit != null && distance(bot.location(), destination) > FAR_FROM_TOWN -> {
++                dev.l2j.autobots.population.economy.EconomyLog.note(bot,
++                        "quest route via=town gatekeeper=${homeExit.gatekeeper.name} menu=${homeExit.id} fare=${homeExit.price}" +
++                                " to=${destination.x},${destination.y},${destination.z}")
++                GoToTownSequence(bot,purpose="quest_route") { failed("couldn't get back to town", walk = true) }.execute()
++            }
+             else -> WalkToSequence(bot, destination, radius) {
+                 failed("stuck walking to ${destination.x},${destination.y} from ${bot.x},${bot.y}", walk = false)
+             }.execute()
+@@ -468,10 +482,13 @@ internal class QuestRunner(private val bot: Player) {
+         travelFailures = 0
+         relax()
+         QuestRetryStore.save(bot.objectId,QuestRetryState(bot.classId.id,path.questName,pausedUntil,
+-                bot.x,bot.y,bot.z,describe(path)))
++                bot.x,bot.y,bot.z,retryContext(path)))
+         QuestLog.log(bot, QuestEvent.Stuck, "${path.questName} put aside (${describe(path)}): $reason")
+     }
+ 
++    // Old route failures are no longer proof after town-origin services become available.
++    private fun retryContext(path: PathQuest): String = "home-gatekeeper-v1:${describe(path)}"
++
+     private fun describe(path: PathQuest): String {
+         val state = bot.getQuestState(path.questName)
+         return when {
