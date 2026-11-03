@@ -1,0 +1,58 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 1e56f22..eb0627a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -968,8 +968,14 @@ object OfflineFarmManager {
+             if(Gear.isArcher(player) && Gear.count(player,Gear.arrowId(player))==0) Gear.noteArrowTrip(player)
+             AutofarmManager.stopFarm(player, "going to town")
+             LOGGER.info("Offline farm: ${player.name} id=${player.objectId} heads to town reason=$reason productiveSeconds=$productiveSeconds healing=${dev.l2j.autobots.population.economy.Healing.count(player)} loadPercent=${Errands.loadPercent(player)} from=${player.x},${player.y},${player.z}.")
+-            if (Gear.count(player, Gear.SCROLL_OF_ESCAPE) > 0) {
++            for (attempt in 1..2) {
++                val scrolls=Gear.count(player, Gear.SCROLL_OF_ESCAPE)
++                if (scrolls == 0 || player.isInsideZone(ZoneId.TOWN)) break
++                // A resting character cannot read a scroll until the stand-up animation ends;
++                // the item was silently refused and the trip turned into a long walk.
+                 if (player.isSitting) player.standUp()
++                for (wait in 1..10) { if (!player.isSitting) break;delay(500) }
++                if (!isActive(player) || player.isDead) return@townAction
+                 player.useItem(Gear.SCROLL_OF_ESCAPE)
+                 for (second in 1..30) {
+                     delay(1000)
+@@ -977,6 +983,9 @@ object OfflineFarmManager {
+                     if (player.isInsideZone(ZoneId.TOWN)) break
+                     if (second > 3 && !player.isCastingNow && !player.isTeleporting) break
+                 }
++                if (player.isInsideZone(ZoneId.TOWN)) break
++                LOGGER.info("Offline farm: ${player.name} id=$id scroll of escape failed attempt=$attempt used=${Gear.count(player, Gear.SCROLL_OF_ESCAPE)<scrolls}" +
++                        " sitting=${player.isSitting} underAttack=${player.isUnderAttack()} at=${player.x},${player.y},${player.z}.")
+             }
+             if (player.isInsideZone(ZoneId.TOWN)) {
+                 choresThenBack(player, origin)
+@@ -1016,7 +1025,7 @@ object OfflineFarmManager {
+             return
+         }
+         val town=Location(interrupted.targetX,interrupted.targetY,interrupted.targetZ)
+-        val route=dev.l2j.autobots.movement.TownWalk.plan(player,town,MAX_WALK_TO_TOWN)
++        val route=dev.l2j.autobots.movement.TownWalk.plan(player,town,MAX_WALK_TO_TOWN) ?: rejoinRoute(player,interrupted)
+         if(route==null) {
+             LOGGER.info("Offline farm: ${player.name} id=$id route failed reason=no_safe_path trip=TO_TOWN after defense at=${player.x},${player.y},${player.z}")
+             onStuck(player,interrupted)
+@@ -1029,6 +1038,18 @@ object OfflineFarmManager {
+         walk(player,first.x,first.y,first.z)
+     }
+ 
++    /** The fight moved the character only a little: rejoin the checked road it was already walking. */
++    private fun rejoinRoute(player: Player,interrupted: Travel): dev.l2j.autobots.population.economy.NpcTravel.Walk? {
++        val rest=interrupted.route.drop(interrupted.routeIndex)
++        for(i in rest.indices.take(6)) {
++            val link=dev.l2j.autobots.population.economy.NpcTravel.toPoint(player,player.location(),rest[i],4000) ?: continue
++            val points=link.points+rest.drop(i+1)
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} rejoins the town road at waypoint ${interrupted.routeIndex+i}/${interrupted.route.size}.")
++            return dev.l2j.autobots.population.economy.NpcTravel.Walk(points,(listOf(player.location())+points).zipWithNext().sumOf { dev.l2j.autobots.utils.distance(it.first,it.second) })
++        }
++        return null
++    }
++
+     private fun runChoresThenBack(player: Player, spot: Location?) = townAction(player) { choresThenBack(player, spot) }
+ 
+     private suspend fun choresThenBack(player: Player, spot: Location?) {
