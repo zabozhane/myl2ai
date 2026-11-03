@@ -1,5 +1,5 @@
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
-index 393809a..4dc2e93 100644
+index 393809a..4971550 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
 @@ -96,10 +96,17 @@ internal object HuntingSpots {
@@ -44,7 +44,7 @@ index 393809a..4dc2e93 100644
      fun nearArrival(player: Player,origin: Location,excluded: Set<Long>,maxWalk: Int=8000,surfaceOnly: Boolean=false): List<HuntingSpot> =
 -            spots.asSequence().filter { it.key !in excluded && it.monstersIn(targetLevels(player))>0 && !isDangerousFor(player,it.dangerLevel) && !isCrowdedFor(player,it) && distance(origin,it.location)<=maxWalk }
 +            nearArrival(player,origin,excluded,maxWalk,surfaceOnly,allowCrowded=false).ifEmpty {
-+                if(player is dev.l2j.autobots.Autobot) nearArrival(player,origin,excluded,maxWalk,surfaceOnly,allowCrowded=true) else it }
++                if(player is dev.l2j.autobots.Autobot) nearArrival(player,origin,excluded,maxWalk,surfaceOnly,allowCrowded=true) else emptyList() }
 +
 +    private fun nearArrival(player: Player,origin: Location,excluded: Set<Long>,maxWalk: Int,surfaceOnly: Boolean,allowCrowded: Boolean): List<HuntingSpot> =
 +            spots.asSequence().filter { it.key !in excluded && it.monstersIn(targetLevels(player))>0 && !isDangerousFor(player,it.dangerLevel) && (allowCrowded || !isCrowdedFor(player,it)) && distance(origin,it.location)<=maxWalk }
