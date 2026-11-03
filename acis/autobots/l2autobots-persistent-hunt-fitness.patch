@@ -1,0 +1,157 @@
+diff --git a/sql/autobot_fitness.sql b/sql/autobot_fitness.sql
+new file mode 100644
+index 0000000..8ae402c
+--- /dev/null
++++ b/sql/autobot_fitness.sql
+@@ -0,0 +1,8 @@
++CREATE TABLE IF NOT EXISTS autobot_fitness (
++  obj_Id INT UNSIGNED NOT NULL,
++  mode VARCHAR(16) NOT NULL,
++  mode_since BIGINT NOT NULL,
++  last_death BIGINT NOT NULL,
++  deaths VARCHAR(128) NOT NULL,
++  PRIMARY KEY(obj_Id)
++);
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 23486c2..ac064e1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -56,6 +56,7 @@ object AutobotsManager {
+         AutobotScheduler
+         AutofarmManager
+         dev.l2j.autobots.population.quests.QuestRetryStore.initialize()
++        dev.l2j.autobots.population.economy.FitnessStore.initialize()
+         OfflineFarmManager.onServerStart()
+         dev.l2j.autobots.population.RouteSafety.load()
+         PopulationManager.start()
+diff --git a/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt b/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
+index a6ef8d8..3835d07 100644
+--- a/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
++++ b/src/main/kotlin/dev/l2j/autobots/dao/AutobotsDao.kt
+@@ -334,6 +334,10 @@ internal object AutobotsDao {
+                 ps.setInt(1, objectId)
+                 ps.execute()
+             }
++            con.prepareStatement("DELETE FROM autobot_fitness WHERE obj_Id=?").use { ps ->
++                ps.setInt(1,objectId)
++                ps.executeUpdate()
++            }
+         }
+     }
+     
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+index 3e13323..b6e196f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+@@ -13,25 +13,42 @@ internal class Fitness(private val bot: Autobot, private val clock: () -> Long =
+ 
+     enum class Mode(val levelOffset: Int) { Normal(0), Careful(-2), Farm(-5), NeedsGroup(-8) }
+ 
+-    var mode = Mode.Normal
++    @Volatile var mode = Mode.Normal
+         private set
+ 
+     private val deaths = ArrayDeque<Long>()
+     private var modeSince = clock()
+     private var lastDeathAt = 0L
+ 
+-    fun onDeath() {
++    init {
++        FitnessStore.load(bot.objectId)?.let { saved ->
++            val now=clock()
++            val restored=Mode.values().firstOrNull { it.name==saved.mode }
++            if(restored!=null && saved.since in 0..now && saved.lastDeath in 0..now) {
++                mode=restored
++                modeSince=saved.since
++                lastDeathAt=saved.lastDeath
++                deaths.addAll(saved.deaths.filter { it in (now-WINDOW_MS)..now }.takeLast(MAX_DEATHS_PER_HOUR-1))
++                if(mode==Mode.NeedsGroup) bot.needsGroup=true
++            }
++        }
++    }
++
++    private fun save() = FitnessStore.save(bot.objectId,FitnessState(mode.name,modeSince,lastDeathAt,deaths.toList()))
++
++    @Synchronized fun onDeath() {
+         val now = clock()
+         lastDeathAt = now
+         deaths.addLast(now)
+         while (deaths.isNotEmpty() && now - deaths.first() > WINDOW_MS) deaths.removeFirst()
+-        if (deaths.size < MAX_DEATHS_PER_HOUR) return
++        if (deaths.size < MAX_DEATHS_PER_HOUR) { save();return }
+ 
+         deaths.clear()
+         // A newbie has nothing far easier to fall back to: dying is part of learning there, so it only
+         // steps one or two levels down and keeps going.
+         if (bot.level < MIN_LEVEL) {
+             switchTo(Mode.Careful, "died $MAX_DEATHS_PER_HOUR times in an hour")
++            save()
+             return
+         }
+         when (mode) {
+@@ -46,14 +63,15 @@ internal class Fitness(private val bot: Autobot, private val clock: () -> Long =
+                 switchTo(Mode.NeedsGroup, "keeps dying even on easy monsters, needs a group")
+             }
+         }
++        save()
+     }
+ 
+     /** Re-evaluated whenever a new hunting spot is chosen. @return true if the mode changed. */
+-    fun update(): Boolean {
++    @Synchronized fun update(): Boolean {
+         val now = clock()
+         while (deaths.isNotEmpty() && now - deaths.first() > WINDOW_MS) deaths.removeFirst()
+         val weak = Gear.isWeak(bot)
+-        return when {
++        val changed = when {
+             mode == Mode.Normal && weak ->
+                 switchTo(if (bot.level < MIN_LEVEL) Mode.Careful else Mode.Farm, "gear is weak for level ${bot.level}")
+             mode != Mode.Normal && !weak && deaths.isEmpty() && now - maxOf(modeSince, lastDeathAt) > WINDOW_MS -> {
+@@ -62,6 +80,8 @@ internal class Fitness(private val bot: Autobot, private val clock: () -> Long =
+             }
+             else -> false
+         }
++        if(changed) save()
++        return changed
+     }
+ 
+     /** The level the bot picks monsters for. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/FitnessStore.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/FitnessStore.kt
+new file mode 100644
+index 0000000..d33516a
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/FitnessStore.kt
+@@ -0,0 +1,33 @@
++package dev.l2j.autobots.population.economy
++
++import net.sf.l2j.L2DatabaseFactory
++import java.util.logging.Logger
++
++internal data class FitnessState(val mode: String,val since: Long,val lastDeath: Long,val deaths: List<Long>)
++
++/** Survival decisions only: no levels, rewards, equipment or resources are stored here. */
++internal object FitnessStore {
++    private val logger=Logger.getLogger(FitnessStore::class.java.name)
++    fun initialize() {
++        L2DatabaseFactory.getInstance().connection.use { c -> c.createStatement().use {
++            it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_fitness (obj_Id INT UNSIGNED NOT NULL, mode VARCHAR(16) NOT NULL, mode_since BIGINT NOT NULL, last_death BIGINT NOT NULL, deaths VARCHAR(128) NOT NULL, PRIMARY KEY(obj_Id))")
++        } }
++    }
++    fun load(id: Int): FitnessState? = runCatching {
++        L2DatabaseFactory.getInstance().connection.use { c ->
++            c.prepareStatement("SELECT mode,mode_since,last_death,deaths FROM autobot_fitness WHERE obj_Id=?").use {
++                it.setInt(1,id)
++                it.executeQuery().use { r -> if(!r.next()) null else FitnessState(r.getString(1),r.getLong(2),r.getLong(3),
++                        r.getString(4).split(',').mapNotNull { value -> value.toLongOrNull() }) }
++            }
++        }
++    }.getOrElse { logger.warning("Fitness read failed for $id: $it");null }
++    fun save(id: Int,state: FitnessState) {
++        runCatching { L2DatabaseFactory.getInstance().connection.use { c ->
++            c.prepareStatement("INSERT INTO autobot_fitness(obj_Id,mode,mode_since,last_death,deaths) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE mode=VALUES(mode),mode_since=VALUES(mode_since),last_death=VALUES(last_death),deaths=VALUES(deaths)").use {
++                it.setInt(1,id);it.setString(2,state.mode);it.setLong(3,state.since);it.setLong(4,state.lastDeath)
++                it.setString(5,state.deaths.joinToString(","));it.executeUpdate()
++            }
++        } }.onFailure { logger.warning("Fitness write failed for $id: $it") }
++    }
++}
