@@ -36,6 +36,16 @@ public class DeathPenaltyVerify extends OfflineTownVerify {
   check(bought>=1&&cash-b.getAdena()==bought*price,"real purchase at the grocer's taxed price");
   check(b.getDeathPenaltyBuffLevel()==3-bought&&b.getInventory().getInventoryItemCount(8594,-1)==0,"each bought scroll is read and removes one penalty level");
   check(bought==3&&b.getDeathPenaltyBuffLevel()==0,"three levels are lifted one after another with the reuse delay");
+  check(!(Boolean)invoke(dp,"worthTrip",b,b.getAdena()),"no penalty is no reason for a trip");b.setDeathPenaltyBuffLevel(1);check((Boolean)invoke(dp,"worthTrip",b,b.getAdena()),"a payable penalty is a reason to visit town");b.setDeathPenaltyBuffLevel(0);
+  // A modest wallet below the generic reserve still pays: the penalty is essential like healing.
+  Autobot poor=(Autobot)invoke(singleton("dao.AutobotsDao"),"loadByName","Sladenkaya");check(poor!=null,"Sladenkaya restores");
+  suspendValue(singleton("AutobotsManager"),"spawnAutobot",poor);((Map<?,?>)invoke(singleton("AutobotsManager"),"getActiveBots")).remove(poor.getName());invoke(poor,"cancelSequence");Thread.sleep(300);poor.setAccessLevel(0);poor.setIsInvul(false);
+  warp(poor,net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getLocationToTeleport(poor,net.sf.l2j.gameserver.data.xml.MapRegionData.TeleportType.TOWN));
+  kotlin.Pair<?,?> poorOffer=(kotlin.Pair<?,?>)invoke(market,"findProduct",poor,8594);check(poorOffer!=null,"Sladenkaya's town sells it");Npc poorSeller=(Npc)invoke(poorOffer.getFirst(),"getMerchant");warp(poor,new Location(poorSeller.getX()+40,poorSeller.getY()+40,poorSeller.getZ()));
+  int poorPrice=(Integer)invoke(market,"priceWithTax",poorOffer.getFirst(),poorOffer.getSecond());poor.setDeathPenaltyBuffLevel(1);int poorCash=poor.getAdena();
+  System.out.println("DP INFO small wallet cash="+poorCash+" spendable="+invoke(singleton("population.economy.Errands"),"spendable",poor)+" price="+poorPrice);
+  suspendValue(dp,"lift",poor,poorCash,here);System.out.println("DP INFO small wallet penalty="+poor.getDeathPenaltyBuffLevel()+" cash="+poorCash+"->"+poor.getAdena());
+  check(poor.getDeathPenaltyBuffLevel()==0&&poorCash-poor.getAdena()==poorPrice,"below the generic reserve the scroll is still bought and read");
   // Offline owner: wrong owned version, D scroll needs money.
   Player p=Player.restore(268486152);check(p!=null,"Zenthen restores");p.setAccessLevel(0);p.setIsInvul(false);
   p.setClient((net.sf.l2j.gameserver.network.GameClient)Class.forName("dev.l2j.autobots.offlinelife.DetachedClient").getConstructor(Player.class).newInstance(p));
