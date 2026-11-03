@@ -1,0 +1,232 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
+index 530f41d..0f89cc9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/HuntRecovery.kt
+@@ -55,8 +55,15 @@ internal object HuntRecovery {
+                     val exit: TeleportLocation,val spot: HuntingSpot,val walk: NpcTravel.Walk,var paid: Int=0)
+     fun plan(player: Player,excluded: Set<Long>): Ride? = planFrom(player,player.location(),excluded)
+ 
+-    fun planFrom(player: Player,origin: Location,excluded: Set<Long>): Ride? {
+-        return dev.l2j.autobots.population.economy.GatekeeperTravel.offersFrom(player,origin)
++    fun planFrom(player: Player,origin: Location,excluded: Set<Long>): Ride? =
++            planFromOffers(player,origin,excluded,dev.l2j.autobots.population.economy.GatekeeperTravel.offersFrom(player,origin))
++
++    /** Projected proceeds can justify a sale, never a teleport or an invented balance. */
++    fun planWithBudget(player: Player,origin: Location,excluded: Set<Long>,budget: Int): Ride? =
++            planFromOffers(player,origin,excluded,dev.l2j.autobots.population.economy.GatekeeperTravel.offersWithBudget(player,origin,budget))
++
++    private fun planFromOffers(player: Player,origin: Location,excluded: Set<Long>,offers: List<dev.l2j.autobots.population.economy.GatekeeperTravel.Offer>): Ride? {
++        return offers
+                 .mapNotNull { offer ->
+                     HuntingSpots.nearArrival(player,offer.exit,excluded).firstNotNullOfOrNull { spot ->
+                         HuntingSpots.huntAnchor(player,spot,offer.exit,validateDirect=false)?.let { anchor ->
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 3cb7527..0f848b2 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -101,6 +101,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private var gatekeeperFailed = false
+     private var nextSpotRetryAt = 0L
+     private var nextRecoveryRetryAt = 0L
++    private var nextFundingRetryAt = 0L
++    private var funding: dev.l2j.autobots.population.economy.HuntFunding.Plan? = null
+     private var recovery: dev.l2j.autobots.offlinelife.HuntRecovery.WalkPlan? = null
+     private val huntJourney=dev.l2j.autobots.movement.HuntJourney()
+     private var reportedJourneyRetry=0L
+@@ -537,6 +539,13 @@ internal class LifeBehavior(private val bot: Autobot) {
+         }
+         val target = currentSpot()
+         if (target == null) {
++            funding?.let { plan ->
++                funding=null
++                val sale=dev.l2j.autobots.population.economy.HuntFunding.SaleSequence(bot,plan,excludedSpots.toSet())
++                sale.execute()
++                if(sale.earned>0) { nextSpotRetryAt=0;nextRecoveryRetryAt=0 }
++                return
++            }
+             if (!inTown) {
+                 // Give available prey its usual chance before considering a field escape.
+                 bot.combatBehavior.onUpdate()
+@@ -624,7 +633,12 @@ internal class LifeBehavior(private val bot: Autobot) {
+         val next = (if(repeatTargets.isNotEmpty()) HuntingSpots.choose(bot,repeatLevel,excludedSpots,wanted,MAX_TRAVEL_ON_FOOT,
+                 useExits=canRide,preferredNpcIds=repeatTargets) else null)
+                 ?: HuntingSpots.choose(bot, level, excludedSpots, wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide)
+-                ?: if(now>=nextRecoveryRetryAt) {
++                ?: if(economy && group==null && bot.isInsideZone(ZoneId.TOWN) && now>=nextFundingRetryAt) {
++                    nextFundingRetryAt=now+5*60_000L
++                    funding=dev.l2j.autobots.population.economy.HuntFunding.plan(bot,excludedSpots)
++                    null
++                } else null
++        val found = next ?: if(funding==null && now>=nextRecoveryRetryAt) {
+                     nextRecoveryRetryAt=now+60_000L
+                     dev.l2j.autobots.offlinelife.HuntRecovery.walkPlan(bot,excludedSpots) { failed ->
+                         badSpots[failed.key]=System.currentTimeMillis()
+@@ -638,23 +652,25 @@ internal class LifeBehavior(private val bot: Autobot) {
+                     }
+                 } else null
+ 
+-        if (next != null && wanted != null) EconomyLog.note(bot, "farming for ${if (wanted.spoil) "spoil" else "drops"} " +
+-                "${wanted.items.take(5).joinToString { ItemTable.getInstance().getTemplate(it)?.name ?: "$it" }} at ${next.location}")
+-        next?.let { HuntingSpots.join(it) }
+-        spot = next
+-        nextSpotRetryAt = if (next == null) now + 30_000L else 0L
+-        if (next == null && AutobotData.settings.populationSessionLog)
++        if(found!=null) funding=null
++        if (found != null && wanted != null) EconomyLog.note(bot, "farming for ${if (wanted.spoil) "spoil" else "drops"} " +
++                "${wanted.items.take(5).joinToString { ItemTable.getInstance().getTemplate(it)?.name ?: "$it" }} at ${found.location}")
++        found?.let { HuntingSpots.join(it) }
++        spot = found
++        nextSpotRetryAt = if (found == null) now + 30_000L else 0L
++        if (found == null && AutobotData.settings.populationSessionLog)
+             println("Autobots movement: ${bot.name} id=${bot.objectId} no non-excluded hunting spot; retry in 30 seconds, excluded=${excludedSpots.size}, at ${bot.x},${bot.y},${bot.z}")
+         spotLevel = level
+         idleTicks = 0
+         gatekeeperFailed = false
+-        return next
++        return found
+     }
+ 
+     private fun dropSpot() {
+         spot?.let { HuntingSpots.leave(it) }
+         spot = null
+         recovery=null
++        funding=null
+     }
+ 
+     private fun huntDeadline(): Long {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+index 7f05366..ec2f2ad 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+@@ -55,12 +55,17 @@ internal object GatekeeperTravel {
+ 
+     fun offers(player: Player): List<Offer> = offersFrom(player,player.location())
+ 
+-    fun offersFrom(player: Player,origin: Location): List<Offer> {
++    fun offersFrom(player: Player,origin: Location): List<Offer> = offersFor(player,origin) { fareBudgetAt(player,origin) }
++
++    /** Quote only; actual use always rechecks the real wallet and carried supplies. */
++    fun offersWithBudget(player: Player,origin: Location,budget: Int): List<Offer> = offersFor(player,origin) { budget }
++
++    private fun offersFor(player: Player,origin: Location,quoteBudget: () -> Int): List<Offer> {
+         val npc=net.sf.l2j.gameserver.model.World.getInstance().objects
+                 .filterIsInstance<net.sf.l2j.gameserver.model.actor.instance.Gatekeeper>()
+                 .minByOrNull { distance(origin,it.location()) } ?: return emptyList()
+         if(!npc.isVisible || distance(origin,npc.location())>8000 || NpcTravel.plan(player,npc,origin,8000)==null) return emptyList()
+-        val budget=fareBudgetAt(player,origin)
++        val budget=quoteBudget()
+         return menuIds(npc).mapNotNull { id ->
+             TeleportLocationData.getInstance().getTeleportLocation(id)?.let { Offer(npc,id,it,price(it)) }
+         }.filter { !it.exit.isNoble && it.price<=budget &&
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/HuntFunding.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/HuntFunding.kt
+new file mode 100644
+index 0000000..9cdf500
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/HuntFunding.kt
+@@ -0,0 +1,82 @@
++package dev.l2j.autobots.population.economy
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.behaviors.sequences.Sequence
++import dev.l2j.autobots.extensions.getActiveSequence
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.offlinelife.HuntRecovery
++import dev.l2j.autobots.population.isUnderAttack
++import dev.l2j.autobots.utils.CancellationToken
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.item.instance.ItemInstance
++
++/** Sell only unprotected owned surplus, only when it really funds a complete paid hunting route. */
++internal object HuntFunding {
++    data class Sale(val objectId: Int,val count: Int,val value: Int)
++    data class Plan(val sales: List<Sale>,val fare: Int,val destination: net.sf.l2j.gameserver.model.location.Location)
++
++    private fun prepared(bot: Autobot): Boolean = bot.isInsideZone(ZoneId.TOWN) && !bot.isDead && !bot.isInParty &&
++            !bot.isUnderAttack() && Healing.count(bot)>=10 && Gear.count(bot,Gear.SCROLL_OF_ESCAPE)>0
++    private fun goods(bot: Autobot): List<ItemInstance> = Gear.surplus(bot).filter { it.isSellable && it.referencePrice>=2 }
++    private fun proceeds(item: ItemInstance): Long = item.referencePrice/2L*item.count
++    private fun budget(bot: Autobot,cash: Long): Int = (if(Errands.usesNoviceTravelBudget(bot)) cash else cash-Errands.reserve(bot))
++            .coerceIn(0L,Int.MAX_VALUE.toLong()).toInt()
++
++    fun plan(bot: Autobot,excluded: Set<Long>): Plan? {
++        if(!prepared(bot)) return null
++        val available=goods(bot)
++        if(available.isEmpty()) return null
++        val maxCash=(bot.adena.toLong()+available.sumOf { proceeds(it) }).coerceAtMost(Int.MAX_VALUE.toLong())
++        val ride=HuntRecovery.planWithBudget(bot,bot.location(),excluded,budget(bot,maxCash)) ?: return null
++        val fare=GatekeeperTravel.price(ride.exit)
++        val required=fare.toLong()+(if(Errands.usesNoviceTravelBudget(bot)) 0 else Errands.reserve(bot))-bot.adena
++        if(required<=0) return null
++        // Prefer a single partial stack with the least unnecessary sale value.
++        val one=available.mapNotNull { item ->
++            val unit=item.referencePrice/2
++            val count=(required+unit-1)/unit
++            if(count>item.count || count>Int.MAX_VALUE || count*unit>Int.MAX_VALUE) null
++            else listOf(Sale(item.objectId,count.toInt(),(count*unit).toInt()))
++        }.minWithOrNull(compareBy<List<Sale>>({ it.sumOf { sale -> sale.value.toLong() } },{ it.sumOf { sale -> sale.count.toLong() } }))
++        val sales=one ?: run {
++            var left=required
++            val selected=mutableListOf<Sale>()
++            for(item in available.sortedBy { it.referencePrice }) {
++                val unit=item.referencePrice/2
++                val count=minOf(item.count.toLong(),(left+unit-1)/unit).coerceAtMost(Int.MAX_VALUE.toLong())
++                if(count>0 && count*unit<=Int.MAX_VALUE) {
++                    selected.add(Sale(item.objectId,count.toInt(),(count*unit).toInt()));left-=count*unit
++                }
++                if(left<=0) break
++            }
++            if(left>0) return null
++            selected
++        }
++        return Plan(sales,fare,ride.walk.points.last())
++    }
++
++    internal class SaleSequence(override val bot: Autobot,private val plan: Plan,private val excluded: Set<Long>): Sequence {
++        override var cancellationToken: CancellationToken?=null
++        var earned=0
++            private set
++        private fun active() = bot.getActiveSequence()===this && bot.isOnline && !bot.isDead && bot.controller==null &&
++                !bot.isInStoreMode && !bot.isUnderAttack()
++        override suspend fun definition() {
++            if(!active() || !prepared(bot)) return
++            val shop=Market.closestShop(bot) ?: return
++            EconomyLog.note(bot,"funds hunting travel fare=${plan.fare} to=${plan.destination.x},${plan.destination.y},${plan.destination.z} from owned surplus")
++            if(!NpcTravel.reach(bot,shop.merchant,8000) || !active() || !prepared(bot)) return
++            val currentPlan=HuntFunding.plan(bot,excluded) ?: return
++            val live=goods(bot).associateBy { it.objectId }
++            // Requote current prices, required quantity and protection before committing any sale.
++            if(currentPlan.sales.any { sale -> live[sale.objectId]?.let { it.count<sale.count || it.referencePrice/2L*sale.count!=sale.value.toLong() } != false }) return
++            for(sale in currentPlan.sales) {
++                if(!active()) return
++                val item=goods(bot).firstOrNull { it.objectId==sale.objectId } ?: return
++                val paid=Market.sellPartToNpc(bot,shop,item,sale.count)
++                if(paid<=0) return
++                earned+=paid
++            }
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+index 2811ef1..89c65b9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+@@ -138,6 +138,19 @@ internal object Market {
+         return earned
+     }
+ 
++    /** A bounded sale for a specific expense; the actor must really reach the merchant. */
++    fun sellPartToNpc(bot: Player,shop: Shop,item: ItemInstance,count: Int): Int {
++        if(count<=0 || count>item.count || !item.isSellable || item.isEquipped || item.ownerId!=bot.objectId ||
++                item.referencePrice<2 || !shop.merchant.isVisible ||
++                !shop.merchant.isInsideRadius(bot,net.sf.l2j.gameserver.model.actor.Npc.INTERACTION_DISTANCE,true,false)) return 0
++        val earned=item.referencePrice/2L*count
++        if(earned<=0 || earned>Int.MAX_VALUE-bot.adena.toLong()) return 0
++        if(bot.inventory.destroyItem("Sell",item.objectId,count,bot,shop.merchant)==null) return 0
++        bot.addAdena("Sell",earned.toInt(),shop.merchant,false)
++        EconomyLog.log(bot,Deal.NpcSell,"sold $count x ${item.itemName} to NPC for $earned to fund hunting travel")
++        return earned.toInt()
++    }
++
+     /** Private stores around the bot, other than its own. */
+     fun storesNear(bot: Player): List<Player> = bot.getKnownTypeInRadius(Player::class.java, STORE_RADIUS)
+             .filter { it !== bot && it.isOnline && !it.isDead }
