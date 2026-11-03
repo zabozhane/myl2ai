@@ -1,0 +1,48 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index 5a86cd7..712d7cf 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -127,13 +127,17 @@ internal object HuntingSpots {
+             player.level<20 && player is dev.l2j.autobots.Autobot -> 1
+             else -> 3
+         }
++        val recoveryLevel = (player as? dev.l2j.autobots.Autobot)?.life?.ordinaryTargetLevel ?: player.level
++        if (recoveryLevel < player.level)
++            return (recoveryLevel-5).coerceAtLeast(1)..minOf(player.level+above,recoveryLevel+2)
+         return (player.level-5).coerceAtLeast(1)..(player.level+above)
+     }
+ 
+     /** Autonomous novices must not plan ordinary prey under stronger aggressive guards. */
+     fun isDangerousFor(player: Player,monsterLevel: Int): Boolean =
+-            if(player.level<20 && (player is dev.l2j.autobots.Autobot ||
+-                    dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(player)))
++            if((player.level<20 && (player is dev.l2j.autobots.Autobot ||
++                    dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(player))) ||
++                    (player is dev.l2j.autobots.Autobot && !player.isInParty && player.life?.isFallingBack==true))
+                 monsterLevel>targetLevels(player).last else isDeadly(monsterLevel,player.level)
+ 
+     fun huntAnchor(player: Player, spot: HuntingSpot, origin: Location=player.location(),validateDirect: Boolean=true): Location? = SpawnTable.getInstance().spawns.asSequence()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 0245d28..3cb7527 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -341,6 +341,9 @@ internal class LifeBehavior(private val bot: Autobot) {
+     /** True while the bot hunts easier monsters because it dies too often or is undergeared. */
+     val isFallingBack get() = fitness.isSaving
+ 
++    /** Solo recovery must constrain actual prey as well as the chosen hunting cell. */
++    val ordinaryTargetLevel get() = if (!bot.isInParty && fitness.isSaving) fitness.huntLevel() else bot.level
++
+     /**
+      * One line per death for `economyLog`, to tell what kills bots: the killer and whether it attacks on sight or the bot
+      * pulled it, how many monsters were on the bot, potions left, the spot and the mode it hunted in.
+@@ -605,7 +608,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+                 !HuntingSpots.isDeadly(current.dangerLevel,bot.level)
+         val recoverySuitable=current!=null && recovery?.spot?.key==current.key &&
+                 current.monstersIn(HuntingSpots.targetLevels(bot))>0 && !HuntingSpots.isDeadly(current.dangerLevel,bot.level)
+-        if (current != null && (HuntingSpots.isSuitable(current,level)||repeatSuitable||recoverySuitable) && RouteSafety.safeDestination(bot,current.location)) {
++        if (current != null && !HuntingSpots.isDangerousFor(bot,current.dangerLevel) &&
++                (HuntingSpots.isSuitable(current,level)||repeatSuitable||recoverySuitable) && RouteSafety.safeDestination(bot,current.location)) {
+             spotLevel = level
+             return current
+         }
