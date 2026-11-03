@@ -1,0 +1,111 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 2743410..3d09958 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -111,6 +111,8 @@ object OfflineFarmManager {
+     private val equipmentCheckedAt = ConcurrentHashMap<Int, Long>()
+     private val townCheckedAt = ConcurrentHashMap<Int, Long>()
+     private val townRetryAfter=ConcurrentHashMap<Int,Long>()
++    /** A supply walk interrupted by an attacker: fight back, then continue to town instead of hunting. */
++    private val supplyDefense=ConcurrentHashMap<Int,Travel>()
+     private val lastTownTripAt = ConcurrentHashMap<Int, Long>()
+     private val diedAt = ConcurrentHashMap<Int, Long>()
+     private val townJobs = ConcurrentHashMap<Int, Job>()
+@@ -338,6 +340,7 @@ object OfflineFarmManager {
+             OfflineWeaponTrip.forget(id)
+             townCheckedAt.remove(id)
+             townRetryAfter.remove(id)
++            supplyDefense.remove(id)
+             lastTownTripAt.remove(id)
+             diedAt.remove(id)
+             questsLoaded.remove(id)
+@@ -572,9 +575,11 @@ object OfflineFarmManager {
+                     continue
+                 }
+                 if (player.isUnderAttack()) {
+-                    // Jumped by a monster on the road: fight back right here, the trip is over.
+                     if(clearTravel(id,travel)==null) continue
+-                    startFarmLogged(player, "jumped on the road")
++                    // A supply walk keeps its purpose: defend here, then resume the road to town.
++                    // Ordinary hunting on the road would fight on without the missing healing.
++                    if(travel.trip==Trip.TO_TOWN) defendSupplyWalk(player,travel)
++                    else startFarmLogged(player, "jumped on the road")
+                     continue
+                 }
+                 val huntDeadline=if(travel.trip==Trip.TO_SPOT && huntJourneys.containsKey(id)) huntDeadline(player,now) else Long.MAX_VALUE
+@@ -741,6 +746,7 @@ object OfflineFarmManager {
+             try {
+                 AutofarmManager.stopFarm(player, "died")
+                 clearTravel(id)
++                supplyDefense.remove(id)
+                 diedAt.remove(id)
+                 player.doRevive()
+                 if (player.isDead) continue
+@@ -753,8 +759,18 @@ object OfflineFarmManager {
+             }
+         }
+ 
++        for ((id, interrupted) in supplyDefense) {
++            val player=farming[id]
++            if(player==null || !isActive(player) || player.isDead) { supplyDefense.remove(id);continue }
++            if(traveling.containsKey(id) || townJobs.containsKey(id) || player.isUnderAttack()) continue
++            if(!supplyDefense.remove(id,interrupted)) continue
++            // The attackers are gone: do not let the fight become a new hunt on the road.
++            AutofarmManager.stopFarm(player,"supply walk resumes")
++            resumeSupplyWalk(player,interrupted)
++        }
++
+         for ((id, player) in farming) {
+-            if (!isActive(player) || player.isDead || OfflineLife.owns(player) || traveling.containsKey(id) || townJobs.containsKey(id)) continue
++            if (!isActive(player) || player.isDead || OfflineLife.owns(player) || traveling.containsKey(id) || townJobs.containsKey(id) || supplyDefense.containsKey(id)) continue
+             if(now<(townRetryAfter[id]?:0L)) continue
+             if (now - (townCheckedAt[id] ?: 0L) < TOWN_CHECK_MS) continue
+             townCheckedAt[id] = now
+@@ -952,15 +968,46 @@ object OfflineFarmManager {
+                             route=route.points,lastMoveAt = System.currentTimeMillis()))
+                     LOGGER.info("Offline farm: ${player.name} id=$id returns to town on a checked walk without SoE length=${route.length.toInt()} waypoints=${route.points.size}.")
+                     walk(player, town.x, town.y, town.z)
++                } else if(player.isUnderAttack()) {
++                    defendSupplyWalk(player,Travel(Trip.TO_TOWN, town.x, town.y, town.z,
++                            spotX = origin?.x?:0, spotY = origin?.y?:0, spotZ = origin?.z?:0, thenHunt=!returnToSpot))
+                 } else {
+                     townRetryAfter[id]=System.currentTimeMillis()+TOWN_TRAVEL_RETRY_MS
+-                    LOGGER.info("Offline farm: ${player.name} id=$id postpones town reason=no_safe_route_or_attacked retryAt=${townRetryAfter[id]}; productive hunting time preserved.")
++                    LOGGER.info("Offline farm: ${player.name} id=$id postpones town reason=no_safe_route retryAt=${townRetryAfter[id]}; productive hunting time preserved.")
+                     startFarmLogged(player,"no safe town walk without a scroll")
+                 }
+             }
+         }
+     }
+ 
++    private fun defendSupplyWalk(player: Player,travel: Travel) {
++        supplyDefense[player.objectId]=travel
++        LOGGER.info("Offline farm: ${player.name} id=${player.objectId} defends the town walk healing=${dev.l2j.autobots.population.economy.Healing.count(player)}" +
++                " at=${player.x},${player.y},${player.z}; resumes the walk after the fight.")
++        startFarmLogged(player,"defends the town walk")
++    }
++
++    /** Plan the rest of an interrupted supply walk from here; the original return point is kept. */
++    private fun resumeSupplyWalk(player: Player,interrupted: Travel) {
++        val id=player.objectId
++        if(player.isInsideZone(ZoneId.TOWN)) {
++            runChoresThenBack(player,if(interrupted.thenHunt) null else Location(interrupted.spotX,interrupted.spotY,interrupted.spotZ))
++            return
++        }
++        val town=Location(interrupted.targetX,interrupted.targetY,interrupted.targetZ)
++        val route=dev.l2j.autobots.movement.TownWalk.plan(player,town,MAX_WALK_TO_TOWN)
++        if(route==null) {
++            LOGGER.info("Offline farm: ${player.name} id=$id route failed reason=no_safe_path trip=TO_TOWN after defense at=${player.x},${player.y},${player.z}")
++            onStuck(player,interrupted)
++            return
++        }
++        setTravel(player,Travel(Trip.TO_TOWN,town.x,town.y,town.z,spotX=interrupted.spotX,spotY=interrupted.spotY,spotZ=interrupted.spotZ,
++                thenHunt=interrupted.thenHunt,route=route.points,lastMoveAt=System.currentTimeMillis()))
++        LOGGER.info("Offline farm: ${player.name} id=$id resumes the town walk after defense length=${route.length.toInt()} waypoints=${route.points.size}.")
++        val first=route.points.first()
++        walk(player,first.x,first.y,first.z)
++    }
++
+     private fun runChoresThenBack(player: Player, spot: Location?) = townAction(player) { choresThenBack(player, spot) }
+ 
+     private suspend fun choresThenBack(player: Player, spot: Location?) {
