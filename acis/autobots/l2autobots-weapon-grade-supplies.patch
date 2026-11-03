@@ -1,0 +1,158 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+index 3382c2e..12cf942 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -34,8 +34,10 @@ internal object OfflineChores {
+         OfflineEquipment.equip(player)
+         turnInQuests(player)
+         sellJunk(player)
+-        buySupplies(player)
++        buyEssentialSupplies(player)
+         buyWeapon(player)
++        // Stock matches the final weapon, including a new arrow/shot grade.
++        buySupplies(player)
+         newbieBuffs(player)
+         player.target=null
+         player.refreshOverloaded()
+@@ -94,14 +96,18 @@ internal object OfflineChores {
+         Market.sellToNpc(player, shop, junk)
+     }
+ 
+-    private suspend fun buySupplies(player: Player) {
++    private suspend fun buyEssentialSupplies(player: Player) {
+         if(Gear.isArcher(player)) buy(player,Gear.arrowId(player),target=50,onlyBelow=10,budgetShare=1.0)
+         val potions=dev.l2j.autobots.population.economy.Healing.count(player)
+         val potion=dev.l2j.autobots.population.economy.Healing.product(player)
+         if(potion!=null) buy(player,potion,target=dev.l2j.autobots.population.economy.Healing.restockTarget(player,potion),onlyBelow=3,budgetShare=1.0,have=potions)
+         // No town shop sells mana potions in Interlude: mages rest, as players did.
+         buy(player, Gear.SCROLL_OF_ESCAPE, target = if(player.level<20) 1 else 2, onlyBelow = 1, budgetShare = 1.0)
+-        if (Gear.isArcher(player)) buy(player, Gear.arrowId(player), target = 1500, onlyBelow = 500, budgetShare = 0.6)
++    }
++
++    private suspend fun buySupplies(player: Player) {
++        buyEssentialSupplies(player)
++        if(Gear.isArcher(player)) buy(player,Gear.arrowId(player),target=1500,onlyBelow=500,budgetShare=1.0,essential=false)
+         if (Gear.canBuyShots(player)) {
+             val shotId = Gear.shotId(player)
+             if (shotId > 0) buy(player, shotId, target = if(player.level<20) 200 else 500, onlyBelow = if(player.level<20) 50 else 150, budgetShare = 0.4, essential=false)
+@@ -121,7 +127,8 @@ internal object OfflineChores {
+         val (shop,product)=OfflineEquipment.weaponPurchase(player,budget) ?: return
+         val reserved=player.adena-budget
+         if(!approach(player,shop.merchant)) return
+-        if(Market.priceWithTax(shop,product)>(player.adena-reserved).coerceAtLeast(0)) return
++        val stock=Gear.weaponStockReserveAt(player,product.item,player.location()) ?: return
++        if(Market.priceWithTax(shop,product).toLong()+stock>(player.adena-reserved).coerceAtLeast(0)) return
+         if(Market.buyFromNpc(player,shop,product,1)) OfflineEquipment.equip(player)
+     }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+index f9e86fa..7d65d13 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+@@ -45,7 +45,8 @@ internal object OfflineEquipment {
+                         score(player,candidate)<=score(player,current)*1.2)) return null
+         val offer=dev.l2j.autobots.population.economy.Market.findProductAt(wish.itemId,origin) ?: return null
+         val price=dev.l2j.autobots.population.economy.Market.priceWithTax(offer.first,offer.second)
+-        return offer.takeIf { price>0 && price<=budget }
++        val stock=Gear.weaponStockReserveAt(player,candidate.item,origin) ?: return null
++        return offer.takeIf { price>0 && price.toLong()+stock<=budget }
+     }
+ 
+     /** Keep consumables, materials, recipes, future-grade and enhanced/borrowed gear. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index 4d4e65f..b22b71d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -75,6 +75,20 @@ internal object Gear {
+ 
+     fun arrowId(bot: Player): Int = ARROWS.getValue(weaponGrade(bot))
+ 
++    /** A bow purchase must also fund the ordinary arrow stock of the weapon it will equip. */
++    fun weaponStockReserveAt(bot: Player,target: Item,origin: net.sf.l2j.gameserver.model.location.Location): Int? {
++        if(target !is net.sf.l2j.gameserver.model.item.kind.Weapon || target.itemType!=WeaponType.BOW) return 0
++        val arrows=ARROWS.getValue(target.crystalType)
++        val have=count(bot,arrows)
++        if(have>=500) return 0
++        val needed=(1500-have).coerceAtLeast(0)
++        val offer=Market.findProductAt(arrows,origin) ?: return null
++        val price=Market.priceWithTax(offer.first,offer.second)
++        if(price<=0 || offer.second.hasLimitedStock() && offer.second.count<needed) return null
++        val total=needed.toLong()*price
++        return total.takeIf { it<=Int.MAX_VALUE }?.toInt()
++    }
++
+     fun count(bot: Player, itemId: Int): Int = bot.inventory.getItemByItemId(itemId)?.count ?: 0
+ 
+     /** The pieces of the target kit the bot still lacks, in buying order. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index b16fff5..f6e4a27 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -70,7 +70,10 @@ internal object Errands {
+     /** The next piece of the kit that town shops sell and the bot can pay for. */
+     fun affordableUpgrade(bot: Autobot): Wish? = Gear.wishes(bot).firstOrNull { wish ->
+         val price = Market.npcPrice(wish.itemId) ?: return@firstOrNull false
+-        price <= spendable(bot)
++        val origin=if(bot.isInsideZone(ZoneId.TOWN)) bot.location() else
++            MapRegionData.getInstance().getLocationToTeleport(bot,MapRegionData.TeleportType.TOWN)
++        val stock=Gear.weaponStockReserveAt(bot,wish.template,origin) ?: return@firstOrNull false
++        price.toLong()+stock <= spendable(bot)
+     }
+ }
+ 
+@@ -130,11 +133,13 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         sellToNpc(junk())
+         // Skills before gear: a spellbook and the trainer's lesson come first, like for a player.
+         SkillLearner.learn(bot)
+-        buySupplies()
++        buyEssentialSupplies()
+         SocialTrade.borrowForGear(bot)
+         buyGear()
+         // What the new gear replaced is junk now, and so are store goods if the bag is still heavy.
+         val leftovers = (Gear.equipUpgradesFromInventory(bot) + junk()).filter { it.objectId !in Loans.protectedObjects(bot) }
++        // Final combat stock follows the weapon actually equipped, including a changed grade.
++        buySupplies()
+         val heavy = if (Errands.loadPercent(bot) >= 40) StoreKeeper.storeGoods(bot) + Gear.surplus(bot).filter { it.isSellable } else emptyList()
+         sellToNpc((leftovers + heavy).distinct().filter { bot.inventory.getItemByObjectId(it.objectId) != null })
+         Enchanter.enchantWorn(bot, cautious)
+@@ -220,7 +225,7 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         Market.sellToNpc(bot, shop, items)
+     }
+ 
+-    private suspend fun buySupplies() {
++    private suspend fun buyEssentialSupplies() {
+         // Shares of what the bot can spend now: a scroll home and potions are cheap insurance, and the rest stays
+         // for gear. The reserve is travel money, and a scroll or a potion is exactly what it is kept for, so
+         // essentials may use all of the adena. No town shop sells mana potions in Interlude: mages rest, as players did.
+@@ -232,11 +237,15 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         } else {
+             buy(Gear.SCROLL_OF_ESCAPE, target = 2, budgetShare = 1.0, onlyBelow = 1, essential = true)
+         }
++    }
++
++    private suspend fun buySupplies() {
++        buyEssentialSupplies()
++        // Minimum arrows are essential; bulk arrows and shots use only money above the reserve.
++        if (Gear.isArcher(bot)) buy(Gear.arrowId(bot),target=1500,budgetShare=1.0,onlyBelow=500)
+         if (Gear.canBuyShots(bot)) {
+-            buy(Gear.shotId(bot), target = shotsFor(bot.level), budgetShare = 0.4, onlyBelow = shotsFor(bot.level) / 3)
++            buy(Gear.shotId(bot),target=shotsFor(bot.level),budgetShare=0.4,onlyBelow=shotsFor(bot.level)/3)
+         }
+-        // A bow without arrows can't hunt at all.
+-        if (Gear.isArcher(bot)) buy(Gear.arrowId(bot), target = 1500, budgetShare = 0.6, onlyBelow = 500, essential = true)
+     }
+ 
+     private suspend fun buyHealing() {
+@@ -264,8 +273,11 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+     private suspend fun buyGear() {
+         val wish = Errands.affordableUpgrade(bot) ?: return
+         val (shop, product) = Market.findProduct(bot, wish.itemId) ?: return
+-        if (Market.priceWithTax(shop, product) > Errands.spendable(bot)) return
++        val stock=Gear.weaponStockReserveAt(bot,product.item,bot.location()) ?: return
++        if (Market.priceWithTax(shop,product).toLong()+stock>Errands.spendable(bot)) return
+         if (!walkTo(shop.merchant, "for ${product.item.name}")) return
++        val remaining=Gear.weaponStockReserveAt(bot,product.item,bot.location()) ?: return
++        if(Market.priceWithTax(shop,product).toLong()+remaining>Errands.spendable(bot)) return
+         if (!Market.buyFromNpc(bot, shop, product, 1)) return
+         val item = bot.inventory.getItemsByItemId(wish.itemId).firstOrNull { !it.isEquipped } ?: return
+         Gear.equip(bot, item)
