@@ -1,0 +1,91 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+index fbcf097..249427e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+@@ -23,6 +23,7 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+     private var recoveryRoute: NpcTravel.Walk? = null
+     private var npcRoute=false
+     private var huntDeadline=Long.MAX_VALUE
++    private var goalIsCurrent: () -> Boolean = { true }
+     var failureReason: String? = null
+         private set
+ 
+@@ -43,6 +44,12 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+         return this
+     }
+ 
++    /** A moving party target can invalidate a valid road without making it a failed road. */
++    fun whileGoalIsCurrent(check: () -> Boolean): WalkToSequence {
++        goalIsCurrent=check
++        return this
++    }
++
+     override suspend fun definition() {
+         val started = System.currentTimeMillis()
+         fun arrived() = distance(bot.location(), destination) <= arrivalRadius && abs(bot.z-destination.z) < 200
+@@ -54,7 +61,15 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+                     " elapsedMs=${System.currentTimeMillis()-started}")
+             onStuck()
+         }
++        fun currentGoal(): Boolean {
++            if(goalIsCurrent()) return true
++            bot.stopMove(null)
++            println("Autobots movement: ${bot.name} id=${bot.objectId} interrupted reason=goal_changed" +
++                    " to=${destination.x},${destination.y},${destination.z} at=${bot.x},${bot.y},${bot.z}")
++            return false
++        }
+         if (bot.isDead || bot.isUnderAttack()) return
++        if (!currentGoal()) return
+         if (arrived()) return
+         if(started>=huntDeadline) return failed("hunt_chain_timeout")
+         if (bot.isInsideZone(ZoneId.WATER)) return failed("water")
+@@ -74,6 +89,7 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+         try {
+             while (true) {
+                 if (bot.isDead || bot.isUnderAttack()) return
++                if (!currentGoal()) return
+                 if (arrived()) {
+                     println("Autobots movement: ${bot.name} id=${bot.objectId} arrived to=${destination.x},${destination.y},${destination.z}" +
+                             " elapsedMs=${System.currentTimeMillis()-started}")
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+index fc8bb0a..90ead0f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+@@ -179,16 +179,27 @@ internal class PartyBehavior(private val bot: Player) {
+                 if (exit != null && distance(bot.location(), leader.location()) - distance(exit, leader.location()) > MIN_WALK_SAVED_BY_TELEPORT) {
+                     TravelByGatekeeperSequence(bot, exit) { failed = true }.execute()
+                 } else {
+-                    WalkToSequence(bot, leader.location(), FOLLOW_DISTANCE) { failed = true }.execute()
++                    walkToLeader(leader) { failed = true }.execute()
+                 }
+             }
+             gap > SCROLL_DISTANCE && !inTown -> GoToTownSequence(bot) { failed = true }.execute()
+-            else -> WalkToSequence(bot, leader.location(), FOLLOW_DISTANCE) { failed = true }.execute()
++            else -> walkToLeader(leader) { failed = true }.execute()
+         }
+         if (failed) travelFailedAt = System.currentTimeMillis()
+         return true
+     }
+ 
++    private fun walkToLeader(leader: Player,onStuck: () -> Unit): WalkToSequence {
++        val party=bot.party
++        val destination=leader.location()
++        return WalkToSequence(bot,destination,FOLLOW_DISTANCE,onStuck).whileGoalIsCurrent {
++            party!=null && bot.party===party && party.leader===leader && !leader.isDead && !leader.isTeleporting &&
++                    distance(destination,leader.location())<=FOLLOW_REPLAN_DISTANCE &&
++                    kotlin.math.abs(destination.z-leader.z)<200 &&
++                    (distance(bot,leader)>FOLLOW_DISTANCE || kotlin.math.abs(bot.z-leader.z)>=200)
++        }
++    }
++
+     /** A separated bot leaves after repeated failed travel, rather than following forever without experience. */
+     private fun lostTooLong(party: Party, leader: Player): Boolean {
+         val gap=distance(bot,leader)
+@@ -228,6 +239,7 @@ internal class PartyBehavior(private val bot: Player) {
+     companion object {
+         private const val FOLLOW_DISTANCE = 300
+         private const val FOLLOW_DISTANCE_CASTER = 500
++        private const val FOLLOW_REPLAN_DISTANCE = 1000.0
+         private const val FAR = 2500
+         private const val SCROLL_DISTANCE = 15000
+         private const val MIN_WALK_SAVED_BY_TELEPORT = 8000
