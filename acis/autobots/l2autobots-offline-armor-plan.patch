@@ -1,0 +1,96 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+index 10c454d..75e8c87 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -27,6 +27,7 @@ import net.sf.l2j.gameserver.model.actor.Player
+  * for free: the quest script pays, the merchant pays, the shop charges.
+  */
+ internal object OfflineChores {
++    private const val MAX_ARMOR_PIECES = 3
+ 
+     /** One visit to town: quests first (their adena pays for the rest), then sell, then buy, then buffs. */
+     suspend fun run(player: Player) {
+@@ -36,6 +37,7 @@ internal object OfflineChores {
+         sellJunk(player)
+         buyEssentialSupplies(player)
+         buyWeapon(player)
++        buyArmor(player)
+         // Stock matches the final weapon, including a new arrow/shot grade.
+         buySupplies(player)
+         newbieBuffs(player)
+@@ -132,6 +134,27 @@ internal object OfflineChores {
+         if(Market.buyFromNpc(player,shop,product,1)) OfflineEquipment.equip(player)
+     }
+ 
++    /** Armor and jewelry from ordinary merchants, one useful piece at a time, after supplies and the road are reserved. */
++    private suspend fun buyArmor(player: Player) {
++        for(piece in 1..MAX_ARMOR_PIECES) {
++            if(!OfflineFarmManager.isActive(player) || player.isDead || !player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN)) return
++            val budget=optionalBudget(player)
++            val (plan,goal)=OfflineEquipment.armorPlan(player,budget)
++            if(plan==null) {
++                goal?.let { println("Offline gear: ${player.name} id=${player.objectId} waits slot=${it.slot} current=${it.current?.itemName ?: "-"}" +
++                        " target=${it.product.item.name} gain=${"%.1f".format(it.gain)} price=${it.price} budget=$budget reason=money") }
++                return
++            }
++            println("Offline gear: ${player.name} id=${player.objectId} plans slot=${plan.slot} current=${plan.current?.itemName ?: "-"}" +
++                    " target=${plan.product.item.name} gain=${"%.1f".format(plan.gain)} price=${plan.price} budget=$budget")
++            val reserved=player.adena-budget
++            if(!approach(player,plan.shop.merchant)) return
++            if(plan.price>(player.adena-reserved).coerceAtLeast(0)) return
++            if(!Market.buyFromNpc(player,plan.shop,plan.product,1)) return
++            OfflineEquipment.equip(player)
++        }
++    }
++
+     /** Buys up to [target] pieces when the character has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */
+     private suspend fun buy(player: Player, itemId: Int, target: Int, onlyBelow: Int, budgetShare: Double,
+                             have: Int = Gear.count(player, itemId), essential: Boolean = true) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+index 8f05344..4672d98 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+@@ -52,6 +52,34 @@ internal object OfflineEquipment {
+         return offer.takeIf { price>0 && price.toLong()+stock<=budget }
+     }
+ 
++    class ArmorPlan(val slot: Int,val shop: dev.l2j.autobots.population.economy.Shop,val product: net.sf.l2j.gameserver.model.buylist.Product,
++                    val current: ItemInstance?,val gain: Double,val price: Int)
++
++    /**
++     * The best armor or jewelry upgrade the town's ordinary merchants sell, judged by the real defence it adds
++     * over the worn piece per adena, never by price alone. [affordable] is false when only dearer goals exist.
++     */
++    fun armorPlan(player: Player,budget: Int): Pair<ArmorPlan?,ArmorPlan?> {
++        val plans=dev.l2j.autobots.population.economy.Market.shopsNear(player).flatMap { shop -> shop.products.values.map { shop to it } }
++                .filter { (_,product) -> product.item.type2==Item.TYPE2_SHIELD_ARMOR || product.item.type2==Item.TYPE2_ACCESSORY }
++                .mapNotNull { (shop,product) ->
++                    // A detached value object for stat calculation: never registered, saved or added to an inventory.
++                    val candidate=ItemInstance(0,product.itemId)
++                    if(!eligible(player,candidate) || !fits(player,candidate)) return@mapNotNull null
++                    val slot=slot(player,candidate)
++                    val worn=player.inventory.getPaperdollItem(slot)
++                    if(worn!=null && (worn.enchantLevel>0 || worn.isAugmented)) return@mapNotNull null
++                    // A piece already carried is equipped by equip(); buying a second one is a duplicate.
++                    if(player.inventory.getItemByItemId(product.itemId)!=null) return@mapNotNull null
++                    val gain=score(player,candidate)-(worn?.let { score(player,it) } ?: 0.0)
++                    val price=dev.l2j.autobots.population.economy.Market.priceWithTax(shop,product)
++                    if(gain<MIN_ARMOR_GAIN || price<=0) null else ArmorPlan(slot,shop,product,worn,gain,price)
++                }
++        val affordable=plans.filter { it.price<=budget }.maxByOrNull { it.gain/it.price }
++        val goal=plans.filter { it.price>budget }.minByOrNull { it.price }
++        return affordable to goal
++    }
++
+     /** Keep consumables, materials, recipes, future-grade and enhanced/borrowed gear. */
+     fun surplus(player: Player): List<ItemInstance> {
+         val protected = Loans.protectedObjects(player)
+@@ -123,6 +151,8 @@ internal object OfflineEquipment {
+         else -> -1
+     }
+ 
++    private const val MIN_ARMOR_GAIN = 1.0
++
+     private fun weaker(player: Player, left: Int, right: Int): Int {
+         val a = player.inventory.getPaperdollItem(left) ?: return left
+         val b = player.inventory.getPaperdollItem(right) ?: return right
