@@ -1,5 +1,5 @@
 diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
-index f94afd8..4a3664e 100644
+index f94afd8..95d7648 100644
 --- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
 @@ -41,6 +41,7 @@ internal object OfflineChores {
@@ -10,19 +10,23 @@ index f94afd8..4a3664e 100644
          buyArmor(player)
          // Stock matches the final weapon, including a new arrow/shot grade.
          buySupplies(player)
-@@ -149,6 +150,23 @@ internal object OfflineChores {
+@@ -149,6 +150,30 @@ internal object OfflineChores {
          if(Market.buyFromNpc(player,shop,product,1)) OfflineEquipment.equip(player)
      }
  
 +    /** Books for lessons the character already has the SP for, from an ordinary town shop; the trainer visit follows. */
 +    private suspend fun buySpellbooks(player: Player) {
 +        val lessons=dev.l2j.autobots.population.skills.SkillLearner.lessons(player).filter { player.sp>=it.correctedCost }
-+        for(book in lessons.map { dev.l2j.autobots.population.skills.SkillLearner.bookFor(it) }.filter { it>0 }.distinct()) {
-+            if(!OfflineFarmManager.isActive(player) || player.isDead || Gear.count(player,book)>0) continue
++                .sortedByDescending { offensive(it.id,it.value) }
++        for(node in lessons) {
++            val book=dev.l2j.autobots.population.skills.SkillLearner.bookFor(node)
++            if(book<=0 || !OfflineFarmManager.isActive(player) || player.isDead || Gear.count(player,book)>0) continue
 +            val (shop,product)=Market.findProduct(player,book) ?: continue
 +            val price=Market.priceWithTax(shop,product)
-+            if(price>optionalBudget(player)) {
-+                println("Offline skills: ${player.name} id=${player.objectId} waits book=${product.item.name} price=$price budget=${optionalBudget(player)} reason=money")
++            // An attack spell is how a mystic fights at all: its book is essential like healing, the rest is optional.
++            val budget=if(offensive(node.id,node.value)) (player.adena-returnFare(player)).coerceAtLeast(0) else optionalBudget(player)
++            if(price>budget) {
++                println("Offline skills: ${player.name} id=${player.objectId} waits book=${product.item.name} price=$price budget=$budget reason=money")
 +                continue
 +            }
 +            if(!approach(player,shop.merchant)) return
@@ -30,6 +34,9 @@ index f94afd8..4a3664e 100644
 +                println("Offline skills: ${player.name} id=${player.objectId} bought book=${product.item.name} for $price")
 +        }
 +    }
++
++    private fun offensive(id: Int,level: Int): Boolean =
++            net.sf.l2j.gameserver.data.SkillTable.getInstance().getInfo(id,level)?.isOffensive==true
 +
      /** Armor and jewelry from ordinary merchants, one useful piece at a time, after supplies and the road are reserved. */
      private suspend fun buyArmor(player: Player) {
