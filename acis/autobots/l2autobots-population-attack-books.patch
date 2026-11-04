@@ -1,0 +1,74 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt b/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt
+index 12fbc13..657a90b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/skills/SkillLearner.kt
+@@ -42,7 +42,14 @@ internal object SkillLearner {
+     }
+ 
+     /** Next skill levels the bot has reached, cheapest level requirement first. */
+-    fun lessons(bot: Player): List<GeneralSkillNode> = bot.availableSkills.sortedWith(compareBy({ it.minLvl }, { it.correctedCost }))
++    fun lessons(bot: Player): List<GeneralSkillNode> {
++        val all = bot.availableSkills.sortedWith(compareBy({ it.minLvl }, { it.correctedCost }))
++        // Lv 7 mystics spent their few hundred SP on masteries and never reached Life Drain's 520:
++        // until the first attack spell is known, SP is saved for it.
++        if (!needsAttackSpell(bot)) return all
++        val attack = all.filter { SkillTable.getInstance().getInfo(it.id, it.value)?.isOffensive == true }
++        return attack.ifEmpty { all }
++    }
+ 
+     fun bookFor(node: GeneralSkillNode): Int = SpellbookData.getInstance().getBookForSkill(node.id, node.value)
+ 
+@@ -59,9 +66,19 @@ internal object SkillLearner {
+     /** A lesson the bot can take on its next town visit: enough SP, and the book in the bag or on a shop shelf. */
+     fun hasLessons(bot: Autobot): Boolean = bot.learnsSkills && System.currentTimeMillis() >= (retryAt[bot.objectId] ?: 0L) && lessons(bot).any { node ->
+         val book = bookFor(node)
+-        bot.sp >= node.correctedCost && (book == 0 || Gear.count(bot, book) > 0 || (Market.npcPrice(book) ?: Int.MAX_VALUE) <= Errands.spendable(bot))
++        bot.sp >= node.correctedCost && (book == 0 || Gear.count(bot, book) > 0 || (Market.npcPrice(book) ?: Int.MAX_VALUE) <= bookBudget(bot, node))
+     }
+ 
++    /**
++     * A mystic with no attack spell punches with Training Gloves and dies to the first imp: the book of its first
++     * attack spell is essential like healing and may use all the adena. Other books keep the travel reserve.
++     */
++    private fun bookBudget(bot: Player, node: GeneralSkillNode): Int =
++            if (needsAttackSpell(bot) && net.sf.l2j.gameserver.data.SkillTable.getInstance().getInfo(node.id, node.value)?.isOffensive == true)
++                bot.adena else Errands.spendable(bot)
++
++    private fun needsAttackSpell(bot: Player): Boolean = bot.isMageClass && bot.skills.values.none { it.isOffensive && it.isMagic && it.isActive }
++
+     /** One visit: buy the missing books the bot can afford, walk to a trainer of its class, learn all it can pay for. */
+     suspend fun learn(bot: Autobot) {
+         if (!bot.learnsSkills || bot.isDead) return
+@@ -74,7 +91,11 @@ internal object SkillLearner {
+     private suspend fun visitTrainer(bot: Autobot): Int {
+         val affordable = lessons(bot).filter { bot.sp >= it.correctedCost }
+ 
+-        for (book in affordable.map { bookFor(it) }.filter { it > 0 && Gear.count(bot, it) == 0 }.distinct()) buyBook(bot, book)
++        // The first attack spell goes first: with little money its book must not lose to a buff's.
++        for (node in affordable.sortedByDescending { needsAttackSpell(bot) && SkillTable.getInstance().getInfo(it.id, it.value)?.isOffensive == true }) {
++            val book = bookFor(node)
++            if (book > 0 && Gear.count(bot, book) == 0) buyBook(bot, book, bookBudget(bot, node))
++        }
+ 
+         val learnable = affordable.filter { bookFor(it).let { book -> book == 0 || Gear.count(bot, book) > 0 } }
+         if (learnable.isEmpty()) return 0
+@@ -124,16 +145,16 @@ internal object SkillLearner {
+     }
+ 
+     /** From a town shop if one sells it, otherwise from a private store at a fair price. */
+-    private suspend fun buyBook(bot: Autobot, book: Int) {
++    private suspend fun buyBook(bot: Autobot, book: Int, budget: Int) {
+         val inShop = Market.findProduct(bot, book)
+         if (inShop != null) {
+             val (shop, product) = inShop
+-            if (Market.priceWithTax(shop, product) > Errands.spendable(bot) || !walkTo(bot, shop.merchant)) return
++            if (Market.priceWithTax(shop, product) > budget || !walkTo(bot, shop.merchant)) return
+             if (Market.buyFromNpc(bot, shop, product, 1)) SkillLog.count(SkillLog.BOOKS)
+             return
+         }
+         val limit = (Market.fairValue(book) * 1.5).toInt()
+-        val offer = Market.sellOffers(bot, book).firstOrNull { it.tradeItem.price in 1..minOf(limit, Errands.spendable(bot)) } ?: return
++        val offer = Market.sellOffers(bot, book).firstOrNull { it.tradeItem.price in 1..minOf(limit, budget) } ?: return
+         if (!walkTo(bot, offer.owner)) return
+         if (Market.buyFromStore(bot, offer, 1)) SkillLog.count(SkillLog.BOOKS)
+     }
