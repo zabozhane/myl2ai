@@ -1,5 +1,5 @@
 diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
-index f94afd8..95d7648 100644
+index f94afd8..e70041a 100644
 --- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
 @@ -41,6 +41,7 @@ internal object OfflineChores {
@@ -10,7 +10,7 @@ index f94afd8..95d7648 100644
          buyArmor(player)
          // Stock matches the final weapon, including a new arrow/shot grade.
          buySupplies(player)
-@@ -149,6 +150,30 @@ internal object OfflineChores {
+@@ -149,6 +150,35 @@ internal object OfflineChores {
          if(Market.buyFromNpc(player,shop,product,1)) OfflineEquipment.equip(player)
      }
  
@@ -18,20 +18,25 @@ index f94afd8..95d7648 100644
 +    private suspend fun buySpellbooks(player: Player) {
 +        val lessons=dev.l2j.autobots.population.skills.SkillLearner.lessons(player).filter { player.sp>=it.correctedCost }
 +                .sortedByDescending { offensive(it.id,it.value) }
++        // Only the first attack spell is essential; once one is known the rest are optional purchases.
++        var attackBookOwed=player.skills.values.none { it.isOffensive && it.isMagic && it.isActive }
 +        for(node in lessons) {
 +            val book=dev.l2j.autobots.population.skills.SkillLearner.bookFor(node)
 +            if(book<=0 || !OfflineFarmManager.isActive(player) || player.isDead || Gear.count(player,book)>0) continue
 +            val (shop,product)=Market.findProduct(player,book) ?: continue
 +            val price=Market.priceWithTax(shop,product)
 +            // An attack spell is how a mystic fights at all: its book is essential like healing, the rest is optional.
-+            val budget=if(offensive(node.id,node.value)) (player.adena-returnFare(player)).coerceAtLeast(0) else optionalBudget(player)
++            val essential=attackBookOwed && offensive(node.id,node.value)
++            val budget=if(essential) (player.adena-returnFare(player)).coerceAtLeast(0) else optionalBudget(player)
 +            if(price>budget) {
 +                println("Offline skills: ${player.name} id=${player.objectId} waits book=${product.item.name} price=$price budget=$budget reason=money")
 +                continue
 +            }
 +            if(!approach(player,shop.merchant)) return
-+            if(Market.buyFromNpc(player,shop,product,1))
++            if(Market.buyFromNpc(player,shop,product,1)) {
++                if(essential) attackBookOwed=false
 +                println("Offline skills: ${player.name} id=${player.objectId} bought book=${product.item.name} for $price")
++            }
 +        }
 +    }
 +
@@ -42,10 +47,23 @@ index f94afd8..95d7648 100644
      private suspend fun buyArmor(player: Player) {
          for(piece in 1..MAX_ARMOR_PIECES) {
 diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
-index 45cc60f..b8a6c24 100644
+index 45cc60f..fd2f30c 100644
 --- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
-@@ -1179,7 +1179,8 @@ object OfflineFarmManager {
+@@ -1077,8 +1077,10 @@ object OfflineFarmManager {
+             LOGGER.warning("Offline farm chores failed for ${player.name} id=${player.objectId}: $e")
+         }
+         if (!isActive(player) || player.isDead) return
+-        if (spot == null) {
+-            val trainer=if(learnableNow(player).isNotEmpty()) nearestTrainer(player) else null
++        // Books bought on this visit make lessons available now; a trainer in this town is
++        // cheaper than a later ride from the field, which a poor character cannot pay for.
++        val trainer=if(learnableNow(player).isNotEmpty()) nearestTrainer(player) else null
++        if (spot == null || trainer!=null && distance(player.x,player.y,trainer.x,trainer.y)<=TOWN_TRAINER_RADIUS) {
+             if(trainer!=null) goToTrainer(player,trainer,thenHunt=true) else pendingHunt.add(player.objectId)
+         } else {
+             setTravel(player,Travel(Trip.BACK_TO_SPOT, spot.x, spot.y, spot.z, lastMoveAt = System.currentTimeMillis()))
+@@ -1179,7 +1181,8 @@ object OfflineFarmManager {
  
      /** Next skill levels the character can take right now: enough SP, and no spellbook needed (book shopping is not in stage 1). */
      private fun learnableNow(player: Player): List<GeneralSkillNode> =
@@ -55,7 +73,7 @@ index 45cc60f..b8a6c24 100644
  
      /** The nearest visible trainer of the character's class within a walkable distance. */
      private fun nearestTrainer(player: Player): Folk? {
-@@ -1196,6 +1197,9 @@ object OfflineFarmManager {
+@@ -1196,6 +1199,9 @@ object OfflineFarmManager {
          val gsn = player.template.findSkill(node.id, node.value) ?: return false
          val skill = SkillTable.getInstance().getInfo(node.id, node.value) ?: return false
          if (player.sp < gsn.correctedCost) return false
@@ -65,3 +83,11 @@ index 45cc60f..b8a6c24 100644
  
          player.removeExpAndSp(0, gsn.correctedCost)
          player.addSkill(skill, true, true)
+@@ -1550,6 +1556,7 @@ object OfflineFarmManager {
+     private const val EXCLUSIONS_RETRY_MS = 5 * 60_000L
+     private const val DEATH_WAIT_MS = 15_000L
+     private const val TOWN_CHECK_MS = 60_000L
++    private const val TOWN_TRAINER_RADIUS = 6000.0
+     private const val DEADLY_SPOT_RADIUS = 6000
+     private const val DEADLY_SPOT_MS = 3*60*60_000L
+     private const val MIN_TRIP_GAP_MS = 15 * 60_000L
