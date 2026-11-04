@@ -1,0 +1,60 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+index f94afd8..4a3664e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -41,6 +41,7 @@ internal object OfflineChores {
+             // Lifting the penalty is essential like healing: only the fare back to the prey is kept.
+             dev.l2j.autobots.population.economy.DeathPenaltyRecovery.lift(player,(player.adena-returnFare(player)).coerceAtLeast(0)) { approach(player,it) }
+         buyWeapon(player)
++        buySpellbooks(player)
+         buyArmor(player)
+         // Stock matches the final weapon, including a new arrow/shot grade.
+         buySupplies(player)
+@@ -149,6 +150,23 @@ internal object OfflineChores {
+         if(Market.buyFromNpc(player,shop,product,1)) OfflineEquipment.equip(player)
+     }
+ 
++    /** Books for lessons the character already has the SP for, from an ordinary town shop; the trainer visit follows. */
++    private suspend fun buySpellbooks(player: Player) {
++        val lessons=dev.l2j.autobots.population.skills.SkillLearner.lessons(player).filter { player.sp>=it.correctedCost }
++        for(book in lessons.map { dev.l2j.autobots.population.skills.SkillLearner.bookFor(it) }.filter { it>0 }.distinct()) {
++            if(!OfflineFarmManager.isActive(player) || player.isDead || Gear.count(player,book)>0) continue
++            val (shop,product)=Market.findProduct(player,book) ?: continue
++            val price=Market.priceWithTax(shop,product)
++            if(price>optionalBudget(player)) {
++                println("Offline skills: ${player.name} id=${player.objectId} waits book=${product.item.name} price=$price budget=${optionalBudget(player)} reason=money")
++                continue
++            }
++            if(!approach(player,shop.merchant)) return
++            if(Market.buyFromNpc(player,shop,product,1))
++                println("Offline skills: ${player.name} id=${player.objectId} bought book=${product.item.name} for $price")
++        }
++    }
++
+     /** Armor and jewelry from ordinary merchants, one useful piece at a time, after supplies and the road are reserved. */
+     private suspend fun buyArmor(player: Player) {
+         for(piece in 1..MAX_ARMOR_PIECES) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 45cc60f..b8a6c24 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -1179,7 +1179,8 @@ object OfflineFarmManager {
+ 
+     /** Next skill levels the character can take right now: enough SP, and no spellbook needed (book shopping is not in stage 1). */
+     private fun learnableNow(player: Player): List<GeneralSkillNode> =
+-            SkillLearner.lessons(player).filter { SkillLearner.bookFor(it) == 0 && player.sp >= it.correctedCost }
++            SkillLearner.lessons(player).filter { node -> player.sp >= node.correctedCost &&
++                    SkillLearner.bookFor(node).let { book -> book == 0 || Gear.count(player,book) > 0 } }
+ 
+     /** The nearest visible trainer of the character's class within a walkable distance. */
+     private fun nearestTrainer(player: Player): Folk? {
+@@ -1196,6 +1197,9 @@ object OfflineFarmManager {
+         val gsn = player.template.findSkill(node.id, node.value) ?: return false
+         val skill = SkillTable.getInstance().getInfo(node.id, node.value) ?: return false
+         if (player.sp < gsn.correctedCost) return false
++        // Interlude spells need their spellbook, which the lesson consumes like RequestAcquireSkill does.
++        val book = SkillLearner.bookFor(node)
++        if (book > 0 && !player.destroyItemByItemId("SkillLearn", book, 1, trainer, false)) return false
+ 
+         player.removeExpAndSp(0, gsn.correctedCost)
+         player.addSkill(skill, true, true)
