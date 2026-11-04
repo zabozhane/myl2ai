@@ -1,0 +1,28 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/KnightBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/KnightBehavior.kt
+index e34d6e0..1ed12d8 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/KnightBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/KnightBehavior.kt
+@@ -20,12 +20,21 @@ internal class KnightBehavior(player: Player, combatPreferences: CombatPreferenc
+         return ShotType.SOULSHOT
+     }
+ 
++    // Knights keep the Power Strike learned as fighters and Drain Health; without them every
++    // fight against a monster was plain auto-attack while the skills sat unused.
+     override val getOffensiveSkills: List<BotSkill> = listOf(
+-            BotSkill(shieldStun) { _, _, target -> target is Player && !target.isStunned })
++            BotSkill(shieldStun) { _, _, target -> target is Player && !target.isStunned },
++            BotSkill(POWER_STRIKE),
++            BotSkill(DRAIN_HEALTH) { player, _, _ -> player.getHealthPercentage() < 70 })
+ 
+     override val getSelfSupportSkills: List<BotSkill> = listOf(
+             BotSkill(ultimateDefense) { player, _, _ -> player.getHealthPercentage() < 40 }
+     )
+ 
+     override val conditionalSkills: List<Int> = emptyList()
++
++    companion object {
++        private const val POWER_STRIKE = 3
++        private const val DRAIN_HEALTH = 70
++    }
+ }
+\ No newline at end of file
