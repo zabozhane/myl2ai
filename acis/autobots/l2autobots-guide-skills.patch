@@ -1,0 +1,130 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/DarkElvenWizardBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/DarkElvenWizardBehavior.kt
+index 5f8db39..21f7901 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/DarkElvenWizardBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/DarkElvenWizardBehavior.kt
+@@ -1,5 +1,6 @@
+ package dev.l2j.autobots.behaviors.classes.pre
+ 
++import dev.l2j.autobots.utils.getHealthPercentage
+ import dev.l2j.autobots.behaviors.CombatBehavior
+ import dev.l2j.autobots.behaviors.attributes.SecretManaRegen
+ import dev.l2j.autobots.behaviors.preferences.CombatPreferences
+@@ -19,10 +20,16 @@ internal class DarkElvenWizardBehavior(player: Player, combatPreferences: Combat
+     }
+ 
+     override val getOffensiveSkills: List<BotSkill> = listOf(
++            // Guides: a wizard keeps itself alive with Vampiric Touch when a monster reaches it.
++            BotSkill(VAMPIRIC_TOUCH) { player, _, _ -> player.getHealthPercentage() < 60 },
+             BotSkill(1266),
+             BotSkill(1172){player, _, target -> target != null && distance(player, target) < 200 },
+             BotSkill(1178),
+             BotSkill(1175))
+ 
+     override val conditionalSkills: List<Int> = emptyList()
+-}
+\ No newline at end of file
++
++    companion object {
++        private const val VAMPIRIC_TOUCH = 1147
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/HumanWizardBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/HumanWizardBehavior.kt
+index c081f61..0b9bb3b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/HumanWizardBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/HumanWizardBehavior.kt
+@@ -1,5 +1,6 @@
+ package dev.l2j.autobots.behaviors.classes.pre
+ 
++import dev.l2j.autobots.utils.getHealthPercentage
+ import dev.l2j.autobots.behaviors.CombatBehavior
+ import dev.l2j.autobots.behaviors.attributes.SecretManaRegen
+ import dev.l2j.autobots.behaviors.preferences.CombatPreferences
+@@ -19,10 +20,16 @@ internal class HumanWizardBehavior(player: Player, combatPreferences: CombatPref
+     }
+ 
+     override val getOffensiveSkills: List<BotSkill> = listOf(
++            // Guides: a wizard keeps itself alive with Vampiric Touch when a monster reaches it.
++            BotSkill(VAMPIRIC_TOUCH) { player, _, _ -> player.getHealthPercentage() < 60 },
+             BotSkill(1172){player, _, target -> target != null && distance(player, target) < 200 },
+             BotSkill(1220),
+             BotSkill(1274),
+             BotSkill(1181))
+ 
+     override val conditionalSkills: List<Int> = emptyList()
+-}
+\ No newline at end of file
++
++    companion object {
++        private const val VAMPIRIC_TOUCH = 1147
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/OrcRaiderBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/OrcRaiderBehavior.kt
+index bd5b7c3..5f367d9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/OrcRaiderBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/OrcRaiderBehavior.kt
+@@ -1,5 +1,7 @@
+ package dev.l2j.autobots.behaviors.classes.pre
+ 
++import dev.l2j.autobots.utils.getHealthPercentage
++import dev.l2j.autobots.utils.hasEffect
+ import dev.l2j.autobots.behaviors.CombatBehavior
+ import dev.l2j.autobots.behaviors.attributes.SecretManaRegen
+ import dev.l2j.autobots.behaviors.preferences.CombatPreferences
+@@ -22,5 +24,15 @@ internal class OrcRaiderBehavior(player: Player, combatPreferences: CombatPrefer
+             BotSkill(stunAttack){ _, _, target -> target is Player && !target.isStunned},
+             BotSkill(255))
+ 
++    // Guides: a raider fights under Rage and saves itself with Guts; both were learned and never cast.
++    override val getSelfSupportSkills: List<BotSkill> = listOf(
++            BotSkill(GUTS) { player, _, _ -> player.getHealthPercentage() < 30 },
++            BotSkill(RAGE) { player, _, target -> target is net.sf.l2j.gameserver.model.actor.instance.Monster && player.getHealthPercentage() > 50 && !player.hasEffect(RAGE) })
++
+     override val conditionalSkills: List<Int> = emptyList()
++
++    companion object {
++        private const val RAGE = 94
++        private const val GUTS = 139
++    }
+ }
+\ No newline at end of file
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/WarriorBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/WarriorBehavior.kt
+index 42e9568..916284d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/WarriorBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/pre/WarriorBehavior.kt
+@@ -1,5 +1,7 @@
+ package dev.l2j.autobots.behaviors.classes.pre
+ 
++import dev.l2j.autobots.utils.getHealthPercentage
++import dev.l2j.autobots.utils.hasEffect
+ import dev.l2j.autobots.behaviors.CombatBehavior
+ import dev.l2j.autobots.behaviors.attributes.SecretManaRegen
+ import dev.l2j.autobots.behaviors.preferences.CombatPreferences
+@@ -21,5 +23,13 @@ internal class WarriorBehavior(player: Player, combatPreferences: CombatPreferen
+             BotSkill(255),
+             BotSkill(3))
+ 
++    // Guides: War Cry before the fight; it was learned at 20 and never cast.
++    override val getSelfSupportSkills: List<BotSkill> = listOf(
++            BotSkill(WAR_CRY) { player, _, target -> target is net.sf.l2j.gameserver.model.actor.instance.Monster && !player.hasEffect(WAR_CRY) })
++
+     override val conditionalSkills: List<Int> = emptyList()
++
++    companion object {
++        private const val WAR_CRY = 78
++    }
+ }
+\ No newline at end of file
+diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+index bc2b4a9..3e1673b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
++++ b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+@@ -178,7 +178,8 @@ internal val allBehaviors = mapOf<ClassId, (Player, CombatPreferences) -> Combat
+         Pair(ClassId.MONK, { bot, prefs -> MonkBehavior(bot, prefs)}),
+         Pair(ClassId.ORC_MYSTIC, { bot, prefs -> OrcMysticBehavior(bot, prefs)}),
+         Pair(ClassId.ORC_SHAMAN, { bot, prefs -> WarcryerBehavior(bot, prefs)}),
+-        Pair(ClassId.DWARVEN_FIGHTER, { bot, prefs -> MaestroBehavior(bot, prefs)}),
++        // Guides: a young dwarf spoils and sweeps from level 10; the Maestro kit had no skill it knows.
++        Pair(ClassId.DWARVEN_FIGHTER, { bot, prefs -> FortuneSeekerBehavior(bot, prefs)}),
+         Pair(ClassId.ARTISAN, { bot, prefs -> FortuneSeekerBehavior(bot, prefs)}),
+         Pair(ClassId.SCAVENGER, { bot, prefs -> FortuneSeekerBehavior(bot, prefs)}),
+         Pair(ClassId.SPELLHOWLER, { bot, prefs -> StormScreamerBehavior(bot, prefs)}),
