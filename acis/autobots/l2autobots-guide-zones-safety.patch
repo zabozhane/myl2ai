@@ -1,0 +1,36 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt b/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
+index 926dbeb..90dd2cf 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
+@@ -63,5 +63,17 @@ internal object GuideZones {
+         }
+     }
+ 
+-    fun bonus(player: Player, level: Int, spot: HuntingSpot): Double = if (recommends(player, level, spot.location)) BONUS else 1.0
++    /**
++     * The guides assume a geared player; a resident in starter gear is killed by aggressive monsters of its own
++     * level there (live: Kaboo orcs 10-12 killed elves 11-15 at Elven Forest). Only a spot whose aggressive
++     * monsters stay [SAFE_AGGRO_BELOW] levels under the hunter, and that is not an aggressive nest, is promoted.
++     */
++    fun bonus(player: Player, level: Int, spot: HuntingSpot): Double =
++            if (safeFor(level, spot) && recommends(player, level, spot.location)) BONUS else 1.0
++
++    private const val SAFE_AGGRO_BELOW = 3
++    private const val SAFE_AGGRO_CROWD = 2
++
++    fun safeFor(level: Int, spot: HuntingSpot): Boolean =
++            (spot.dangerLevel == 0 || spot.dangerLevel <= level - SAFE_AGGRO_BELOW) && spot.aggressiveCrowd <= SAFE_AGGRO_CROWD
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index 782d167..4bf7561 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -268,7 +268,7 @@ internal object HuntingSpots {
+      */
+     private fun effectiveDistance(spot: HuntingSpot, bot: Player, level: Int, exits: List<TeleportLocation>): Double {
+         val direct = distance(bot.location(), spot.location)
+-        if (exits.isEmpty() || !GuideZones.recommends(bot, level, spot.location)) return direct
++        if (exits.isEmpty() || !GuideZones.safeFor(level, spot) || !GuideZones.recommends(bot, level, spot.location)) return direct
+         val ride = exits.minOfOrNull { distance(it, spot.location) } ?: return direct
+         return minOf(direct, ride + GUIDE_RIDE_COST)
+     }
