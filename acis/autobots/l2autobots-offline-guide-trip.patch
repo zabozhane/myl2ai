@@ -1,0 +1,107 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+index 7619b65..3945590 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -194,6 +194,22 @@ internal object OfflineChores {
+             if(!OfflineFarmManager.isActive(player) || player.isDead || !player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN)) return
+             val budget=armorBudget(player)
+             val (plan,goal)=OfflineEquipment.armorPlan(player,budget)
++            val guide=Gear.wishes(player).map { it.itemId }.toSet()
++            // The guide's piece sold in another town beats a local stand-in: one paid ride there.
++            if(plan==null || plan.product.itemId !in guide) {
++                when(buyGuidePieceElsewhere(player,budget,guide)) {
++                    GuideTripResult.Bought -> continue
++                    // Saving for the guide's piece: a stand-in would spend the money it needs.
++                    GuideTripResult.Saving -> return
++                    GuideTripResult.None -> {}
++                }
++            }
++            // The guide's piece is sold here but costs more than the budget: save for it rather than a stand-in.
++            if(plan!=null && plan.product.itemId !in guide && goal!=null && goal.product.itemId in guide) {
++                println("Offline gear: ${player.name} id=${player.objectId} saves for guide=${goal.product.item.name} price=${goal.price} budget=$budget" +
++                        " instead of ${plan.product.item.name}")
++                return
++            }
+             if(plan==null) {
+                 goal?.let { println("Offline gear: ${player.name} id=${player.objectId} waits slot=${it.slot} current=${it.current?.itemName ?: "-"}" +
+                         " target=${it.product.item.name} gain=${"%.1f".format(it.gain)} price=${it.price} budget=$budget reason=money") }
+@@ -209,6 +225,58 @@ internal object OfflineChores {
+         }
+     }
+ 
++    private class GuideTrip(val rides: List<dev.l2j.autobots.population.economy.GatekeeperTravel.Offer>,val shop: dev.l2j.autobots.population.economy.Shop,
++                            val product: net.sf.l2j.gameserver.model.buylist.Product,val price: Int,val gain: Double) {
++        /** The rides there and, kept aside, the same fares back. */
++        val total get() = price.toLong()+2L*rides.sumOf { it.price }
++        val town get() = rides.last().exit
++    }
++
++    private enum class GuideTripResult { Bought, Saving, None }
++
++    /**
++     * A guide piece no merchant of this town sells (HawkEye's D-grade kit is sold in Dion and Giran, two rides
++     * from Gludin): ride to a town whose ordinary merchant has it, when the item and the fares there and back fit
++     * the gear budget, buy and wear it. The character hunts on from there; later town visits bring it onwards.
++     */
++    private suspend fun buyGuidePieceElsewhere(player: Player,budget: Int,guide: Set<Int>): GuideTripResult {
++        if(guide.isEmpty()) return GuideTripResult.None
++        val service=dev.l2j.autobots.population.economy.GatekeeperTravel
++        val gains=guide.mapNotNull { id -> OfflineEquipment.guideGain(player,id)?.let { id to it } }
++                .filter { (id,_) -> Market.findProduct(player,id)==null }
++        if(gains.isEmpty()) return GuideTripResult.None
++        fun sellersAt(rides: List<dev.l2j.autobots.population.economy.GatekeeperTravel.Offer>) = gains.mapNotNull { (id,gain) ->
++            val (shop,product)=Market.findProductAt(id,rides.last().exit) ?: return@mapNotNull null
++            GuideTrip(rides,shop,product,Market.priceWithTax(shop,product),gain)
++        }
++        val first=service.offers(player)
++        val direct=first.flatMap { sellersAt(listOf(it)) }
++        val trips=direct.ifEmpty {
++            first.flatMap { ride ->
++                service.offersWithBudget(player,ride.exit,Int.MAX_VALUE).flatMap { sellersAt(listOf(ride,it)) }
++            }
++        }
++        val trip=trips.filter { it.total<=budget }.maxWithOrNull(compareBy<GuideTrip> { it.gain }.thenByDescending { it.total })
++        if(trip==null) {
++            trips.minByOrNull { it.total }?.let { println("Offline gear: ${player.name} id=${player.objectId} waits guide=${it.product.item.name}" +
++                    " town=${it.town.x},${it.town.y} rides=${it.rides.size} price=${it.price} total=${it.total} budget=$budget reason=money") }
++            return if(trips.isEmpty()) GuideTripResult.None else GuideTripResult.Saving
++        }
++        println("Offline gear: ${player.name} id=${player.objectId} rides for guide=${trip.product.item.name} gain=${"%.1f".format(trip.gain)}" +
++                " town=${trip.town.x},${trip.town.y} rides=${trip.rides.size} price=${trip.price} total=${trip.total} budget=$budget")
++        val reserved=player.adena-budget
++        for(ride in trip.rides) {
++            // The second ride is bought from the gatekeeper actually reached, at its real menu and price.
++            val offer=if(ride===trip.rides.first()) ride else service.offers(player).firstOrNull { it.id==ride.id } ?: return GuideTripResult.None
++            if(!service.travel(player,offer) || !OfflineFarmManager.isActive(player) || player.isDead) return GuideTripResult.None
++        }
++        if(!approach(player,trip.shop.merchant)) return GuideTripResult.None
++        if(trip.price>(player.adena-reserved+2*trip.rides.sumOf { it.price }).coerceAtLeast(0)) return GuideTripResult.None
++        if(!Market.buyFromNpc(player,trip.shop,trip.product,1)) return GuideTripResult.None
++        OfflineEquipment.equip(player)
++        return GuideTripResult.Bought
++    }
++
+     /** Buys up to [target] pieces when the character has fewer than [onlyBelow], spending at most [budgetShare] of its adena. */
+     private suspend fun buy(player: Player, itemId: Int, target: Int, onlyBelow: Int, budgetShare: Double,
+                             have: Int = Gear.count(player, itemId), essential: Boolean = true) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+index 13a6e32..e5e039e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+@@ -88,6 +88,16 @@ internal object OfflineEquipment {
+         return affordable to goal
+     }
+ 
++    /** The defence a guide piece would add over what is worn in its slot, or null when it does not fit this character. */
++    fun guideGain(player: Player,itemId: Int): Double? {
++        val candidate=ItemInstance(0,itemId)
++        if(!eligible(player,candidate) || !fits(player,candidate)) return null
++        val worn=player.inventory.getPaperdollItem(slot(player,candidate))
++        if(worn!=null && (worn.enchantLevel>0 || worn.isAugmented)) return null
++        if(player.inventory.getItemByItemId(itemId)!=null) return null
++        return (score(player,candidate)-(worn?.let { score(player,it) } ?: 0.0)).takeIf { it>=MIN_ARMOR_GAIN }
++    }
++
+     /** Keep consumables, materials, recipes, future-grade and enhanced/borrowed gear. */
+     fun surplus(player: Player): List<ItemInstance> {
+         val protected = Loans.protectedObjects(player)
