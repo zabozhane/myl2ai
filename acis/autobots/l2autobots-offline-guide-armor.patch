@@ -1,0 +1,25 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+index 0951ddd..13a6e32 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+@@ -75,10 +75,16 @@ internal object OfflineEquipment {
+                     val price=dev.l2j.autobots.population.economy.Market.priceWithTax(shop,product)
+                     if(gain<MIN_ARMOR_GAIN || price<=0) null else ArmorPlan(slot,shop,product,worn,gain,price)
+                 }
+-        // The largest defence gain the wallet allows; among equal gains the cheaper piece. Ranking by gain per
+-        // adena alone kept buying +2 pants while a real upgrade was affordable.
+-        val affordable=plans.filter { it.price<=budget }.maxWithOrNull(compareBy<ArmorPlan> { it.gain }.thenByDescending { it.price })
+-        val goal=plans.filter { it.price>budget }.minByOrNull { it.price }
++        // The class guide's piece for a slot comes first (equipment.xml, the same kits the population wears);
++        // the largest defence gain the wallet allows is the fallback for slots the guide leaves open.
++        // Among equal gains the cheaper piece: ranking by gain per adena kept buying +2 pants.
++        val guide=Gear.wishes(player).map { it.itemId }.toSet()
++        val byGain=compareBy<ArmorPlan> { it.gain }.thenByDescending { it.price }
++        val guided=plans.filter { it.product.itemId in guide }
++        val affordable=guided.filter { it.price<=budget }.maxWithOrNull(byGain)
++                ?: plans.filter { it.price<=budget }.maxWithOrNull(byGain)
++        val goal=(guided.filter { it.price>budget }.minByOrNull { it.price }
++                ?: plans.filter { it.price>budget }.minByOrNull { it.price })
+         return affordable to goal
+     }
+ 
