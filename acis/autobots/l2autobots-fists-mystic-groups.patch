@@ -1,3 +1,16 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index e1a096b..6f854e7 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -46,7 +46,7 @@
+        online population plays in parties; the rest hunt alone. groupLog prints every formed party. -->
+   <groupFinderEnabled>true</groupFinderEnabled>
+   <!-- Lowest level at which bots look for a party on their own (players group up from about 10-15 in Interlude). -->
+-  <groupFinderMinLevel>10</groupFinderMinLevel>
++  <groupFinderMinLevel>5</groupFinderMinLevel>
+   <groupMaxPopulationPercent>40</groupMaxPopulationPercent>
+   <groupLog>true</groupLog>
+   <!-- Population bots earn their first profession through the real Path quest and a guild master, with no free
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
 index 5941710..ebba8dc 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
