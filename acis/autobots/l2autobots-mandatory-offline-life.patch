@@ -1,0 +1,120 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmSettings.kt b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmSettings.kt
+index e0e2d40..2617124 100644
+--- a/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/autofarm/AutofarmSettings.kt
+@@ -13,7 +13,7 @@ internal data class AutofarmSettings(
+         @JsonProperty("rest") var rest: Boolean = true,
+         @JsonProperty("loot") var loot: Boolean = true,
+         @JsonProperty("attackRaids") var attackRaids: Boolean = false,
+-        /** Keep auto hunting after the owner logs out: the character stays online (offline farm, stage 1 of offline-life). On by default; `.offlinefarm off` disables it. */
++        /** Legacy flag kept for stored settings: offline life after a logout is now always on and ignores it. */
+         @JsonProperty("offlineEnabled") var offlineEnabled: Boolean = true,
+         @JsonProperty("disabledSkills") var disabledSkills: MutableSet<Int> = mutableSetOf()
+ ) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmCommandHandler.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmCommandHandler.kt
+index 285639a..6bdb599 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmCommandHandler.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmCommandHandler.kt
+@@ -4,7 +4,7 @@ import dev.l2j.autobots.autofarm.AutofarmManager
+ import net.sf.l2j.gameserver.model.actor.Player
+ 
+ /**
+- * Chat command `.offlinefarm`: whether the character keeps auto hunting after its owner logs out.
++ * Chat command `.offlinefarm`: explains that offline life after a logout is always on.
+  * The flag lives in the auto hunt settings (character_autofarm_settings) and survives relogins.
+  */
+ internal object OfflineFarmCommandHandler {
+@@ -16,23 +16,10 @@ internal object OfflineFarmCommandHandler {
+         val command = text.trim().lowercase()
+         if (command != COMMAND && !command.startsWith("$COMMAND ")) return false
+ 
+-        val settings = AutofarmManager.getSettings(player)
+-        when (command.removePrefix(COMMAND).trim()) {
+-            "" -> {
+-                settings.offlineEnabled = !settings.offlineEnabled
+-                AutofarmManager.onSettingsChanged(player)
+-                player.sendMessage("Offline farm: " + (if (settings.offlineEnabled)
+-                    "ON — the character keeps auto hunting where it stands when you log out."
+-                else
+-                    "OFF."))
+-            }
+-            "on", "off" -> {
+-                settings.offlineEnabled = command.removePrefix(COMMAND).trim() == "on"
+-                AutofarmManager.onSettingsChanged(player)
+-                player.sendMessage("Offline farm: " + (if (settings.offlineEnabled) "ON." else "OFF."))
+-            }
+-            else -> player.sendMessage("Offline farm: $COMMAND toggles, $COMMAND on|off. The hunt starts where you log out; in a town the character just idles online.")
+-        }
++        // Offline life after a logout is always on (owner's rule); the command only explains it now.
++        // `.autofarm on|off` controls auto hunting while you are connected.
++        player.sendMessage("Offline farm: always ON — after you log out the character keeps living on its own " +
++                "(hunting, town errands, supplies). A private store, olympiad, siege, mount or cursed weapon keeps it offline.")
+         return true
+     }
+ }
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index fd2f30c..056fcf9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -301,12 +301,13 @@ object OfflineFarmManager {
+         // deletion call deleteMe on objects that were never online.
+         if (!player.isOnline) return false
+         if (World.getInstance().getPlayer(id) !== player) return false
+-        if (!AutofarmManager.getSettings(player).offlineEnabled) return false
+-        // A store wins over the farm; the rest mirrors what auto hunt itself refuses.
+-        if (player.isInStoreMode || player.activeTradeList != null) return false
+-        if (player.isDead || player.isInOlympiadMode || player.isInObserverMode || player.isMounted) return false
+-        if (player.isInsideZone(ZoneId.SIEGE)) return false
+-        if (player.isCursedWeaponEquipped) return false
++        // Offline life is mandatory after a logout (owner's rule): an old offlineEnabled=false or
++        // `.autofarm off` before leaving no longer turns it off. The game's own refusals stay.
++        refusedLogout(player)?.let { reason ->
++            LOGGER.info("Offline farm: ${player.name} id=$id logs out without offline life reason=$reason.")
++            return false
++        }
++        // A dead character stays online too: the death handler revives it in town after the usual wait.
+ 
+         player.client = DetachedClient(player)
+         farming[id] = player
+@@ -318,11 +319,29 @@ object OfflineFarmManager {
+         return true
+     }
+ 
++    /**
++     * The states the game itself keeps out of automation: a private store or trade owns the character,
++     * an olympiad, observation, mount, siege or cursed weapon must not be farmed. Null when it may stay.
++     */
++    private fun refusedLogout(player: Player): String? = when {
++        player.isInStoreMode || player.activeTradeList != null -> "store_or_trade"
++        player.isInOlympiadMode -> "olympiad"
++        player.isInObserverMode -> "observer"
++        player.isMounted -> "mounted"
++        player.isInsideZone(ZoneId.SIEGE) -> "siege"
++        player.isCursedWeaponEquipped -> "cursed_weapon"
++        else -> null
++    }
++
+     /**
+      * Starts the farm life of a character already kept online: a town/peace logout learns what the
+      * character can afford before leaving the town; a field logout anchors the hunt right there.
+      */
+     private fun beginFarm(player: Player) {
++        if (player.isDead) {
++            LOGGER.info("Offline farm: ${player.name} id=${player.objectId} logged out dead; waits for the revive in town.")
++            return
++        }
+         if(player.isInParty) {
+             if(OfflineLife.validParty(player)) {
+                 recordEvent(player,"PartyJoined","preserved bot party on logout")
+@@ -1295,11 +1314,6 @@ object OfflineFarmManager {
+                 }
+                 player.client = DetachedClient(player)
+                 AutofarmManager.onEnterWorld(player)
+-                if (!AutofarmManager.getSettings(player).offlineEnabled) {
+-                    // The owner turned the feature off meanwhile: leave the character offline.
+-                    unmarkFarming(id)
+-                    continue
+-                }
+                 World.getInstance().addPlayer(player)
+                 player.setOnlineStatus(true, true)
+                 player.spawnMe(player.x, player.y, player.z)
