@@ -1,0 +1,45 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt b/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
+index 90dd2cf..cd33ce0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
+@@ -41,11 +41,24 @@ internal object GuideZones {
+             Zone(94, 15..18, ALL),                      // Immortal Plateau, Southern Region
+     )
+ 
+-    private val located: List<Pair<Zone, Location>> by lazy {
+-        zones.mapNotNull { zone -> TeleportLocationData.getInstance().getTeleportLocation(zone.teleportId)?.let { zone to Location(it.x, it.y, it.z) } }
+-                .also { println("Autobots population: ${it.size} of ${zones.size} guide hunting zones located.") }
++    private class Located(val zone: Zone, val at: Location, val aggroLevel: Int)
++
++    private val located: List<Located> by lazy {
++        val aggressive = net.sf.l2j.gameserver.data.sql.SpawnTable.getInstance().spawns
++                .filter { it.template.isType("Monster") && it.template.aggroRange > 0 }
++                .mapNotNull { spawn -> (spawn.loc ?: spawn.npc?.position)?.let { Triple(it.x, it.y, it.z) to spawn.template.level.toInt() } }
++        zones.mapNotNull { zone -> TeleportLocationData.getInstance().getTeleportLocation(zone.teleportId)?.let { tp ->
++            val at = Location(tp.x, tp.y, tp.z)
++            // A spot's own cell can look calm while the camp next to it is not (live: Balor orcs 11-12 at Dark Forest).
++            val aggro = aggressive.filter { (p, _) -> inside(at, p.first, p.second, p.third) }.maxOfOrNull { it.second } ?: 0
++            Located(zone, at, aggro)
++        } }.also { list -> println("Autobots population: ${list.size} of ${zones.size} guide hunting zones located, aggressive levels " +
++                list.joinToString { "${it.zone.teleportId}:${it.aggroLevel}" } + ".") }
+     }
+ 
++    private fun inside(at: Location, x: Int, y: Int, z: Int) = kotlin.math.abs(at.z - z) <= FLOOR &&
++            kotlin.math.hypot((at.x - x).toDouble(), (at.y - y).toDouble()) <= RADIUS
++
+     private val SCOUT_ROOTS = listOf(ClassId.ROGUE, ClassId.ELVEN_SCOUT, ClassId.ASSASSIN)
+ 
+     fun role(player: Player): Role = when {
+@@ -57,9 +70,9 @@ internal object GuideZones {
+     /** True when [location] lies in a zone the guide gives [player] at [level]. */
+     fun recommends(player: Player, level: Int, location: Location): Boolean {
+         val role = role(player)
+-        return located.any { (zone, at) ->
+-            level in zone.levels && role in zone.roles && kotlin.math.abs(at.z - location.z) <= FLOOR &&
+-                    kotlin.math.hypot((at.x - location.x).toDouble(), (at.y - location.y).toDouble()) <= RADIUS
++        return located.any { z ->
++            level in z.zone.levels && role in z.zone.roles && (z.aggroLevel == 0 || z.aggroLevel <= level - SAFE_AGGRO_BELOW) &&
++                    inside(z.at, location.x, location.y, location.z)
+         }
+     }
+ 
