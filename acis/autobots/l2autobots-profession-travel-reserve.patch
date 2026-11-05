@@ -1,0 +1,38 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+index e70041a..7619b65 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
+@@ -28,6 +28,8 @@ import net.sf.l2j.gameserver.model.actor.Player
+  */
+ internal object OfflineChores {
+     private const val MAX_ARMOR_PIECES = 3
++    private const val PROFESSION_LEVEL = 19
++    private const val PROFESSION_TRAVEL_RESERVE = 25000
+     private const val MIN_ARMOR_HEALING = 5
+ 
+     /** One visit to town: quests first (their adena pays for the rest), then sell, then buy, then buffs. */
+@@ -122,7 +124,14 @@ internal object OfflineChores {
+     }
+ 
+     internal fun optionalBudget(player: Player): Int =
+-            (dev.l2j.autobots.population.economy.Errands.spendable(player)-returnFare(player)).coerceAtLeast(0)
++            (dev.l2j.autobots.population.economy.Errands.spendable(player)-returnFare(player)-professionReserve(player)).coerceAtLeast(0)
++
++    /**
++     * A base class past level 19 still owes its first profession, whose quest giver can be a long paid ride away
++     * (Zenthen: 18000 from the Elven Village to the Orc Village). Optional gear must not eat that fare.
++     */
++    private fun professionReserve(player: Player): Int =
++            if (player.classId.level() == 0 && player.level >= PROFESSION_LEVEL) PROFESSION_TRAVEL_RESERVE else 0
+ 
+     private fun returnFare(player: Player): Int =
+             if(player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN) &&
+@@ -136,7 +145,7 @@ internal object OfflineChores {
+     private fun armorBudget(player: Player): Int {
+         val stocked=dev.l2j.autobots.population.economy.Healing.count(player)>=MIN_ARMOR_HEALING &&
+                 Gear.count(player,Gear.SCROLL_OF_ESCAPE)>0
+-        return if(stocked) (player.adena-returnFare(player)).coerceAtLeast(0) else optionalBudget(player)
++        return if(stocked) (player.adena-returnFare(player)-professionReserve(player)).coerceAtLeast(0) else optionalBudget(player)
+     }
+ 
+     private suspend fun buyWeapon(player: Player) {
