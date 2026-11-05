@@ -1,0 +1,44 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 0f848b2..26f044d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -344,7 +344,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     val isFallingBack get() = fitness.isSaving
+ 
+     /** Solo recovery must constrain actual prey as well as the chosen hunting cell. */
+-    val ordinaryTargetLevel get() = if (!bot.isInParty && fitness.isSaving) fitness.huntLevel() else bot.level
++    val ordinaryTargetLevel get() = if (!bot.isInParty && (fitness.isSaving || fitness.fistsOnly)) fitness.huntLevel() else bot.level
+ 
+     /**
+      * One line per death for `economyLog`, to tell what kills bots: the killer and whether it attacks on sight or the bot
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+index b6e196f..5941710 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+@@ -86,12 +86,14 @@ internal class Fitness(private val bot: Autobot, private val clock: () -> Long =
+ 
+     /** The level the bot picks monsters for. */
+     fun huntLevel(): Int {
+-        // An orc mystic punches until Life Drain (learned at a trainer around level 7): even monsters of its own
+-        // level are too hard on fists, so it aims a step down until the spell is there.
+-        val fistsOnly = bot.classId == ClassId.ORC_MYSTIC && bot.getSkill(LIFE_DRAIN) == null
+-        return (bot.level + mode.levelOffset - if (fistsOnly) 1 else 0).coerceAtLeast(1)
++        // A mystic without an attack spell punches (an orc mystic until Life Drain): live level 7 orc mystics
++        // died to level 6-7 imps and even a level 4 wolf, so it aims three steps down until the spell is there.
++        return (bot.level + mode.levelOffset - if (fistsOnly) FISTS_LEVEL_OFFSET else 0).coerceAtLeast(1)
+     }
+ 
++    /** A mystic with no attack spell yet fights with its fists. */
++    val fistsOnly get() = bot.isMageClass && bot.skills.values.none { it.isOffensive && it.isMagic && it.isActive }
++
+     /** Farming bots only take safe enchants: they can't afford to lose an item. */
+     val isSaving get() = mode != Mode.Normal
+ 
+@@ -107,6 +109,6 @@ internal class Fitness(private val bot: Autobot, private val clock: () -> Long =
+         private const val WINDOW_MS = 60 * 60 * 1000L
+         private const val MAX_DEATHS_PER_HOUR = 3
+         private const val MIN_LEVEL = 10
+-        private const val LIFE_DRAIN = 1090
++        private const val FISTS_LEVEL_OFFSET = 3
+     }
+ }
