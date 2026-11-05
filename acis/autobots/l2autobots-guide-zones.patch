@@ -1,0 +1,81 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt b/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
+new file mode 100644
+index 0000000..a85a93f
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
+@@ -0,0 +1,62 @@
++package dev.l2j.autobots.population
++
++import net.sf.l2j.gameserver.data.xml.TeleportLocationData
++import net.sf.l2j.gameserver.enums.actors.ClassId
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.location.Location
++
++/**
++ * Hunting grounds the classic leveling guides send each kind of class to (docs/leveling-guides.md, section 3.1),
++ * anchored on the gatekeeper destination that serves them. A spot inside one gets a bonus to its weight in
++ * [HuntingSpots.choose]: the guide is a preference, never a filter, so safety and level checks keep the last word.
++ */
++internal object GuideZones {
++    enum class Role { FIGHTER, MAGE, SCOUT }
++
++    private class Zone(val teleportId: Int, val levels: IntRange, val roles: Set<Role>)
++
++    /** A spot this close to the zone's teleport point, on the same floor, is part of the zone. */
++    private const val RADIUS = 4000.0
++    private const val FLOOR = 1000
++    /** Weight of a guide spot against an ordinary one with the same monsters and distance. */
++    const val BONUS = 3.0
++
++    private val ALL = setOf(Role.FIGHTER, Role.MAGE, Role.SCOUT)
++    private val SOLO = setOf(Role.FIGHTER, Role.MAGE)
++
++    /** Levels 10–20; below 10 the guides keep everyone at their own newbie village, which distance already does. */
++    private val zones = listOf(
++            Zone(464, 10..13, ALL),                     // Dark Forest
++            Zone(468, 11..15, ALL),                     // Elven Forest
++            Zone(1022, 12..17, SOLO),                   // Western Mining Zone (Central Shore)
++            Zone(466, 13..16, SOLO),                    // Swampland
++            Zone(465, 15..19, setOf(Role.SCOUT)),       // Spider Nest
++            Zone(9100, 16..20, SOLO),                   // Evil Hunting Grounds
++            Zone(1042, 16..20, setOf(Role.MAGE)),       // Ruins of Agony: undead for nukers
++            Zone(1013, 16..20, setOf(Role.SCOUT)),      // Neutral Zone
++    )
++
++    private val located: List<Pair<Zone, Location>> by lazy {
++        zones.mapNotNull { zone -> TeleportLocationData.getInstance().getTeleportLocation(zone.teleportId)?.let { zone to Location(it.x, it.y, it.z) } }
++                .also { println("Autobots population: ${it.size} of ${zones.size} guide hunting zones located.") }
++    }
++
++    private val SCOUT_ROOTS = listOf(ClassId.ROGUE, ClassId.ELVEN_SCOUT, ClassId.ASSASSIN)
++
++    fun role(player: Player): Role = when {
++        player.isMageClass -> Role.MAGE
++        SCOUT_ROOTS.any { player.classId == it || player.classId.childOf(it) } -> Role.SCOUT
++        else -> Role.FIGHTER
++    }
++
++    /** True when [location] lies in a zone the guide gives [player] at [level]. */
++    fun recommends(player: Player, level: Int, location: Location): Boolean {
++        val role = role(player)
++        return located.any { (zone, at) ->
++            level in zone.levels && role in zone.roles && kotlin.math.abs(at.z - location.z) <= FLOOR &&
++                    kotlin.math.hypot((at.x - location.x).toDouble(), (at.y - location.y).toDouble()) <= RADIUS
++        }
++    }
++
++    fun bonus(player: Player, level: Int, spot: HuntingSpot): Double = if (recommends(player, level, spot.location)) BONUS else 1.0
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index 4971550..1d0524b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -110,7 +110,7 @@ internal object HuntingSpots {
+                 .filter { preferredNpcIds.isEmpty() || it.npcIds().any { id -> id in preferredNpcIds } }
+                 .filter { withinReach(bot, it, maxWalk, exits) }
+                 .filter { !crossesLedge(bot, it) && RouteSafety.safeDestination(bot,it.location) }
+-                .map { it to score(it, bot, level) * lootBonus(it, level, wanted) }
++                .map { it to score(it, bot, level) * lootBonus(it, level, wanted) * GuideZones.bonus(bot, level, it) }
+                 .sortedByDescending { it.second }
+                 .filter { (spot, _) ->
+                     val start = if (useExits && distance(bot.location(),spot.location)>maxWalk)
