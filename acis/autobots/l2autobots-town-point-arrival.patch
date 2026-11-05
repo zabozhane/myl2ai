@@ -1,0 +1,97 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index d78f02a..fda7a05 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -300,20 +300,20 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     /** The end of a session: back to town, a last visit to the shops, then waiting there for the logout. */
+     private suspend fun goHome() {
+-        if (!bot.isInsideZone(ZoneId.TOWN) && !homeUnreachable) {
++        if (!Errands.atTown(bot) && !homeUnreachable) {
+             // The end of a session leaves time for a long walk, which a quick trip for loot would not take.
+             if (bot.isSitting) {
+                 bot.standUp()
+             } else if (System.currentTimeMillis() - townTravelFailedAt < HOME_RETRY_MS) {
+                 bot.combatBehavior.idleUpdate()
+-            } else if (!goToTown(HOME_MAX_WALK) && !bot.isInsideZone(ZoneId.TOWN) && ++homeFailures >= MAX_HOME_FAILURES) {
++            } else if (!goToTown(HOME_MAX_WALK) && !Errands.atTown(bot) && ++homeFailures >= MAX_HOME_FAILURES) {
+                 // A scroll can report a failure while the teleport into town is still settling.
+                 homeUnreachable = true
+                 if (AutobotData.settings.populationSessionLog) println("Autobots session: ${bot.name} id=${bot.objectId} lv ${bot.level} can't get to town, logs out at ${bot.x},${bot.y}")
+             }
+             return
+         }
+-        if (bot.isInsideZone(ZoneId.TOWN) && economy && !tripDoneInTown) {
++        if (Errands.atTown(bot) && economy && !tripDoneInTown) {
+             visitShops()
+             return
+         }
+@@ -328,13 +328,13 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private suspend fun updateInParty(): Boolean {
+         if (bot.party?.leader === bot) return party.onUpdate()
+         if (!partyErrand && !bot.isDead && economy && System.currentTimeMillis() - townTravelFailedAt > TOWN_RETRY_MS &&
+-                !bot.isInsideZone(ZoneId.TOWN) && Errands.shouldLeaveSpot(bot, lastTripAt)) {
++                !Errands.atTown(bot) && Errands.shouldLeaveSpot(bot, lastTripAt)) {
+             partyErrand = true
+             bot.partySay(listOf("brb town", "need to go to town, brb", "gonna sell stuff, back soon", "bag full, brb").random())
+         }
+         if (!partyErrand || bot.isDead) return party.onUpdate()
+ 
+-        if (!bot.isInsideZone(ZoneId.TOWN)) {
++        if (!Errands.atTown(bot)) {
+             if (!goToTown()) partyErrand = false
+             return true
+         }
+@@ -624,7 +624,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         GoToTownSequence(bot, maxWalk,purpose=reason) { failed = true }.execute()
+         // A walk that ends short of town without reporting a failure is a failure too: the callers
+         // restarted it at once, a party member three times a second for half an hour.
+-        if (!failed && !bot.isDead && !bot.isInsideZone(ZoneId.TOWN) && !bot.isTeleporting) failed = true
++        if (!failed && !bot.isDead && !Errands.atTown(bot) && !bot.isTeleporting) failed = true
+         if (failed) townTravelFailedAt = System.currentTimeMillis()
+         return !failed
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index f4d854c..e64e0da 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -34,6 +34,8 @@ import net.sf.l2j.gameserver.geoengine.GeoEngine
+ 
+ /** When a bot should leave its hunting spot for town, and what it can afford there. */
+ internal object Errands {
++    private const val TOWN_POINT_RADIUS = 1500.0
++
+     private const val MIN_MINUTES_BETWEEN_TRIPS = 15
+     private const val ROUTINE_TRIP_MINUTES = 90
+     /** The weight penalty starts at 50% of the limit; a player heads to town before that. */
+@@ -51,6 +53,13 @@ internal object Errands {
+     fun travelSpendable(bot: Player): Int = if(usesNoviceTravelBudget(bot) && Healing.count(bot)>=10 && Gear.count(bot,Gear.SCROLL_OF_ESCAPE)>0)
+         bot.adena else spendable(bot)
+ 
++    /**
++     * In town, or standing at its own teleport point: for some regions (the Orc village) that point lies outside
++     * the town zone, and residents read a Scroll of Escape every minute to get where they already were.
++     */
++    fun atTown(bot: Player): Boolean = bot.isInsideZone(ZoneId.TOWN) ||
++            distance(bot.location(), MapRegionData.getInstance().getLocationToTeleport(bot, MapRegionData.TeleportType.TOWN)) <= TOWN_POINT_RADIUS
++
+     fun loadPercent(bot: Player): Int = if (bot.maxLoad <= 0) 0 else (bot.currentLoad.toLong() * 100 / bot.maxLoad).toInt()
+ 
+     fun shouldLeaveSpot(bot: Autobot,lastTripAt: Long): Boolean = leaveReason(bot,lastTripAt)!=null
+@@ -89,6 +98,7 @@ internal class GoToTownSequence(override val bot: Player, private val maxWalk: I
+     override var cancellationToken: CancellationToken? = null
+ 
+     override suspend fun definition() {
++        if (Errands.atTown(bot)) return
+         if (Gear.count(bot, Gear.SCROLL_OF_ESCAPE) > 0) {
+             if (bot.isSitting) bot.standUp()
+             delay(Rnd.get(500, 1500).toLong())
+@@ -97,7 +107,7 @@ internal class GoToTownSequence(override val bot: Player, private val maxWalk: I
+             // The scroll is a 20 second cast that ends in a teleport.
+             repeat(30) { second ->
+                 delay(1000)
+-                if (bot.isInsideZone(ZoneId.TOWN) || bot.isDead) return
++                if (Errands.atTown(bot) || bot.isDead) return
+                 // The cast was interrupted (an attack, a stun): no teleport is coming.
+                 if (second > 3 && !bot.isCastingNow && !bot.isTeleporting) return onFail()
+             }
