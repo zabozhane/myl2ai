@@ -1,0 +1,92 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+index 5941710..ebba8dc 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Fitness.kt
+@@ -92,7 +92,7 @@ internal class Fitness(private val bot: Autobot, private val clock: () -> Long =
+     }
+ 
+     /** A mystic with no attack spell yet fights with its fists. */
+-    val fistsOnly get() = bot.isMageClass && bot.skills.values.none { it.isOffensive && it.isMagic && it.isActive }
++    val fistsOnly get() = bot.fistsOnlyMystic()
+ 
+     /** Farming bots only take safe enchants: they can't afford to lose an item. */
+     val isSaving get() = mode != Mode.Normal
+@@ -112,3 +112,7 @@ internal class Fitness(private val bot: Autobot, private val clock: () -> Long =
+         private const val FISTS_LEVEL_OFFSET = 3
+     }
+ }
++
++/** A mystic with no attack spell yet fights with its fists. */
++internal fun net.sf.l2j.gameserver.model.actor.Player.fistsOnlyMystic(): Boolean =
++        isMageClass && skills.values.none { it.isOffensive && it.isMagic && it.isActive }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+index 968be3e..24171bd 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+@@ -1,5 +1,6 @@
+ package dev.l2j.autobots.population.group
+ 
++import dev.l2j.autobots.population.economy.fistsOnlyMystic
+ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.AutobotData
+ import dev.l2j.autobots.CoScopes
+@@ -33,6 +34,7 @@ import java.util.concurrent.ConcurrentHashMap
+  */
+ internal object GroupFinder {
+     const val FULL_FROM_LEVEL = 20
++    private const val FISTS_GROUP_MIN_LEVEL = 5
+     private const val MAX_LEVEL_SPREAD = 5
+     private const val MIN_SIZE = 3
+     private const val WAIT_FOR_FULL_MS = 10 * 60_000L
+@@ -64,6 +66,8 @@ internal object GroupFinder {
+ 
+     /** Decided once per session, when the bot logs in. */
+     fun onSessionStart(bot: Autobot) {
++        // A mystic still punching dies alone even to weak prey: it looks for a group from its first levels.
++        if (enabled && seeksGroupEarly(bot)) { startLooking(bot); return }
+         if (!enabled || bot.level < settings.groupFinderMinLevel) return
+         val percent = when (Sociability.of(bot)) {
+             Sociability.TeamPlayer -> 60
+@@ -75,9 +79,12 @@ internal object GroupFinder {
+ 
+     /** A bot that keeps dying, or whose spot is too hard, wants a group before it falls back to farming. */
+     fun wantGroup(bot: Autobot) {
+-        if (enabled && bot.level >= settings.groupFinderMinLevel && !bot.isInParty && !looking.containsKey(bot.objectId)) startLooking(bot)
++        if (enabled && (bot.level >= settings.groupFinderMinLevel || seeksGroupEarly(bot)) && !bot.isInParty && !looking.containsKey(bot.objectId)) startLooking(bot)
+     }
+ 
++    private fun seeksGroupEarly(bot: Autobot) = bot.level >= FISTS_GROUP_MIN_LEVEL && !bot.isInParty &&
++            bot.fistsOnlyMystic()
++
+     /** From [FULL_FROM_LEVEL] a bot may set out to gather a full party: most team players, some regular ones. */
+     private fun startLooking(bot: Autobot) {
+         looking[bot.objectId] = System.currentTimeMillis()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
+index 5da8fec..d1702e3 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
+@@ -1,5 +1,6 @@
+ package dev.l2j.autobots.population.group
+ 
++import dev.l2j.autobots.population.economy.fistsOnlyMystic
+ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.CoScopes
+ import kotlinx.coroutines.delay
+@@ -43,7 +44,7 @@ internal object PartyInvites {
+             val started = System.currentTimeMillis()
+             // Hard rules (busy, PK, level gap) stay with the code; the mood part may go to the language model.
+             if (accept || reason == GroupChat.Line.NotNow) {
+-                val eager = bot.needsGroup || Role.of(bot.classId) == Role.Healer
++                val eager = bot.needsGroup || Role.of(bot.classId) == Role.Healer || bot.fistsOnlyMystic()
+                 val usual = if (eager) 98 else Sociability.of(bot).acceptPercent
+                 val relation = dev.l2j.autobots.population.llm.Persona.relationText(bot, requestor)
+                 val party = requestor.party?.let { " Their party: ${it.membersCount} people." } ?: ""
+@@ -80,7 +81,7 @@ internal object PartyInvites {
+             if(!StaticParties.same(bot.objectId,requestor.objectId)) return false to GroupChat.Line.Busy
+             return true to null
+         }
+-        val eager = bot.needsGroup || Role.of(bot.classId) == Role.Healer
++        val eager = bot.needsGroup || Role.of(bot.classId) == Role.Healer || bot.fistsOnlyMystic()
+         val chance = if (eager) 98 else Sociability.of(bot).acceptPercent
+         return if (Rnd.get(100) < chance) true to null else false to GroupChat.Line.NotNow
+     }
