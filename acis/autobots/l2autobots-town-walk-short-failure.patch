@@ -1,0 +1,42 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 1ff68e1..d78f02a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -127,6 +127,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     val productiveHuntMs: Long get() = if(productiveSince==0L) 0L else System.currentTimeMillis()-productiveSince
+     private var tripDoneInTown = false
+     private var townTravelFailedAt = 0L
++    private var homeFailures = 0
+ 
+     // Staying online past the session in a store, like a player who leaves a merchant for the night.
+     private var lingerDecided = false
+@@ -303,7 +304,9 @@ internal class LifeBehavior(private val bot: Autobot) {
+             // The end of a session leaves time for a long walk, which a quick trip for loot would not take.
+             if (bot.isSitting) {
+                 bot.standUp()
+-            } else if (!goToTown(HOME_MAX_WALK) && !bot.isInsideZone(ZoneId.TOWN)) {
++            } else if (System.currentTimeMillis() - townTravelFailedAt < HOME_RETRY_MS) {
++                bot.combatBehavior.idleUpdate()
++            } else if (!goToTown(HOME_MAX_WALK) && !bot.isInsideZone(ZoneId.TOWN) && ++homeFailures >= MAX_HOME_FAILURES) {
+                 // A scroll can report a failure while the teleport into town is still settling.
+                 homeUnreachable = true
+                 if (AutobotData.settings.populationSessionLog) println("Autobots session: ${bot.name} id=${bot.objectId} lv ${bot.level} can't get to town, logs out at ${bot.x},${bot.y}")
+@@ -619,6 +622,9 @@ internal class LifeBehavior(private val bot: Autobot) {
+         var failed = false
+         if(Gear.isArcher(bot) && Gear.count(bot,Gear.arrowId(bot))==0) Gear.noteArrowTrip(bot)
+         GoToTownSequence(bot, maxWalk,purpose=reason) { failed = true }.execute()
++        // A walk that ends short of town without reporting a failure is a failure too: the callers
++        // restarted it at once, a party member three times a second for half an hour.
++        if (!failed && !bot.isDead && !bot.isInsideZone(ZoneId.TOWN) && !bot.isTeleporting) failed = true
+         if (failed) townTravelFailedAt = System.currentTimeMillis()
+         return !failed
+     }
+@@ -831,6 +837,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+         // Home is kept past the scheduled end while the population manager waits for a fight to end.
+         private const val HOME_EXTRA_MINUTES = 15
+         private const val HOME_MAX_WALK = 40000
++        private const val HOME_RETRY_MS = 60_000L
++        private const val MAX_HOME_FAILURES = 3
+         private const val AFK_SAFE_RADIUS = 700
+         private const val AFK_RETREAT = 800
+         private const val MAX_AFK_RETREATS = 3

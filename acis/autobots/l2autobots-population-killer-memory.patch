@@ -1,0 +1,44 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 26f044d..1ff68e1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -406,7 +406,9 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     /** Killed at its spot by an aggressive monster far above it: the spot is marked for everyone and this bot moves on. */
+     private fun avoidDeadlySpot(killer: net.sf.l2j.gameserver.model.actor.Creature?) {
+-        if (killer !is Monster || !killer.isAggressive || !HuntingSpots.isDeadly(killer.level, bot.level)) return
++        if (killer !is Monster || !killer.isAggressive) return
++        rememberKillerSpots(killer)
++        if (!HuntingSpots.isDeadly(killer.level, bot.level)) return
+         // The mark goes to the place of death, not only to the bot's own spot: a hunter killed on the way, and a
+         // party member following its leader into a pit, say just as much about where it died.
+         HuntingSpots.reportKillerAt(bot.location(), killer.level, bot.level)
+@@ -414,6 +416,28 @@ internal class LifeBehavior(private val bot: Autobot) {
+         if (current != null && distance(bot.location(), current.location) <= DEADLY_SPOT_RADIUS) abandon(current)
+     }
+ 
++    /**
++     * An aggressive monster below the deadly margin still killed this bot (a caster, a pack): its spots are not
++     * this bot's prey for a while. Alone it beat the bot anywhere; with company only around this place.
++     * Live residents died again and again to the same werewolves and Kaboo orcs without this memory.
++     */
++    private fun rememberKillerSpots(killer: Monster) {
++        val alone = bot.getKnownTypeInRadius(Monster::class.java, ATTACKER_RADIUS).count { !it.isDead && it.target === bot } <= 1
++        val keys = HuntingSpots.keysWithNpcNear(bot.location(), killer.npcId, if (alone) Int.MAX_VALUE else DEADLY_SPOT_RADIUS.toInt())
++        if (keys.isEmpty()) return
++        markBadSpots(keys)
++        // In a party the leader picks the spot: the member's death has to reach it too.
++        (bot.party?.leader as? dev.l2j.autobots.Autobot)?.takeIf { it !== bot }?.life?.markBadSpots(keys)
++        println("Autobots movement: ${bot.name} id=${bot.objectId} avoids ${keys.size} spots of ${killer.name} (${killer.npcId})" +
++                " ${if (alone) "everywhere" else "around ${bot.x},${bot.y}"} after a death")
++    }
++
++    internal fun markBadSpots(keys: Collection<Long>) {
++        val now = System.currentTimeMillis()
++        keys.forEach { badSpots[it] = now }
++        spot?.takeIf { it.key in keys }?.let { abandon(it) }
++    }
++
+     /**
+      * A bot logs in where it logged out. If that is next to aggressive monsters far above its level (it died its way
+      * there, or a spot turned out deadly), it gets out to town at once, as a player would with a scroll or a restart.

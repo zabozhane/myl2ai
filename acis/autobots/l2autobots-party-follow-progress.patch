@@ -1,0 +1,20 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+index 90ead0f..139289b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyBehavior.kt
+@@ -185,10 +185,15 @@ internal class PartyBehavior(private val bot: Player) {
+             gap > SCROLL_DISTANCE && !inTown -> GoToTownSequence(bot) { failed = true }.execute()
+             else -> walkToLeader(leader) { failed = true }.execute()
+         }
++        // A trip that ended without failing but brought the bot no closer (a town walk that returns at
++        // once) is retried after the same pause: live it restarted three times a second for half an hour.
++        if (!failed && !bot.isDead && !bot.isInsideZone(ZoneId.TOWN) && distance(bot, leader) > gap - MIN_FOLLOW_PROGRESS) failed = true
+         if (failed) travelFailedAt = System.currentTimeMillis()
+         return true
+     }
+ 
++    private val MIN_FOLLOW_PROGRESS = 300.0
++
+     private fun walkToLeader(leader: Player,onStuck: () -> Unit): WalkToSequence {
+         val party=bot.party
+         val destination=leader.location()
