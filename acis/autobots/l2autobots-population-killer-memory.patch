@@ -1,5 +1,5 @@
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index 26f044d..ee97cf1 100644
+index 26f044d..1ff68e1 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 @@ -406,7 +406,9 @@ internal class LifeBehavior(private val bot: Autobot) {
@@ -13,7 +13,7 @@ index 26f044d..ee97cf1 100644
          // The mark goes to the place of death, not only to the bot's own spot: a hunter killed on the way, and a
          // party member following its leader into a pit, say just as much about where it died.
          HuntingSpots.reportKillerAt(bot.location(), killer.level, bot.level)
-@@ -414,6 +416,22 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -414,6 +416,28 @@ internal class LifeBehavior(private val bot: Autobot) {
          if (current != null && distance(bot.location(), current.location) <= DEADLY_SPOT_RADIUS) abandon(current)
      }
  
@@ -26,11 +26,17 @@ index 26f044d..ee97cf1 100644
 +        val alone = bot.getKnownTypeInRadius(Monster::class.java, ATTACKER_RADIUS).count { !it.isDead && it.target === bot } <= 1
 +        val keys = HuntingSpots.keysWithNpcNear(bot.location(), killer.npcId, if (alone) Int.MAX_VALUE else DEADLY_SPOT_RADIUS.toInt())
 +        if (keys.isEmpty()) return
++        markBadSpots(keys)
++        // In a party the leader picks the spot: the member's death has to reach it too.
++        (bot.party?.leader as? dev.l2j.autobots.Autobot)?.takeIf { it !== bot }?.life?.markBadSpots(keys)
++        println("Autobots movement: ${bot.name} id=${bot.objectId} avoids ${keys.size} spots of ${killer.name} (${killer.npcId})" +
++                " ${if (alone) "everywhere" else "around ${bot.x},${bot.y}"} after a death")
++    }
++
++    internal fun markBadSpots(keys: Collection<Long>) {
 +        val now = System.currentTimeMillis()
 +        keys.forEach { badSpots[it] = now }
 +        spot?.takeIf { it.key in keys }?.let { abandon(it) }
-+        println("Autobots movement: ${bot.name} id=${bot.objectId} avoids ${keys.size} spots of ${killer.name} (${killer.npcId})" +
-+                " ${if (alone) "everywhere" else "around ${bot.x},${bot.y}"} after a death")
 +    }
 +
      /**
