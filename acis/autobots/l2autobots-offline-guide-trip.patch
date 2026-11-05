@@ -1,16 +1,8 @@
 diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
-index 7619b65..1803b6f 100644
+index 7619b65..84ed828 100644
 --- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
-@@ -28,6 +28,7 @@ import net.sf.l2j.gameserver.model.actor.Player
-  */
- internal object OfflineChores {
-     private const val MAX_ARMOR_PIECES = 3
-+    private const val MAX_FIRST_RIDES = 8
-     private const val PROFESSION_LEVEL = 19
-     private const val PROFESSION_TRAVEL_RESERVE = 25000
-     private const val MIN_ARMOR_HEALING = 5
-@@ -194,6 +195,16 @@ internal object OfflineChores {
+@@ -194,6 +194,16 @@ internal object OfflineChores {
              if(!OfflineFarmManager.isActive(player) || player.isDead || !player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN)) return
              val budget=armorBudget(player)
              val (plan,goal)=OfflineEquipment.armorPlan(player,budget)
@@ -27,7 +19,7 @@ index 7619b65..1803b6f 100644
              if(plan==null) {
                  goal?.let { println("Offline gear: ${player.name} id=${player.objectId} waits slot=${it.slot} current=${it.current?.itemName ?: "-"}" +
                          " target=${it.product.item.name} gain=${"%.1f".format(it.gain)} price=${it.price} budget=$budget reason=money") }
-@@ -209,6 +220,58 @@ internal object OfflineChores {
+@@ -209,6 +219,58 @@ internal object OfflineChores {
          }
      }
  
@@ -58,7 +50,7 @@ index 7619b65..1803b6f 100644
 +        val first=service.offers(player)
 +        val direct=first.flatMap { sellersAt(listOf(it)) }
 +        val trips=direct.ifEmpty {
-+            first.sortedBy { it.price }.take(MAX_FIRST_RIDES).flatMap { ride ->
++            first.flatMap { ride ->
 +                service.offersWithBudget(player,ride.exit,Int.MAX_VALUE).flatMap { sellersAt(listOf(ride,it)) }
 +            }
 +        }
