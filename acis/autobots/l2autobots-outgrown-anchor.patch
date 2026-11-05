@@ -1,0 +1,48 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 056fcf9..c31f90a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -118,6 +118,7 @@ object OfflineFarmManager {
+     private val townJobs = ConcurrentHashMap<Int, Job>()
+     private val trainerFailures=ConcurrentHashMap<Int,MutableMap<Int,Long>>()
+     private val huntProgress = ConcurrentHashMap<Int, Pair<Long, Long>>()
++    private val outgrownCheckAt = ConcurrentHashMap<Int, Long>()
+     private val productiveSince = ConcurrentHashMap<Int, Long>()
+     private val huntedSpot = ConcurrentHashMap<Int, Long>()
+     private val emptySpots = ConcurrentHashMap<Int, MutableMap<Long,Long>>()
+@@ -883,6 +884,26 @@ object OfflineFarmManager {
+         for ((id,player) in farming) {
+             if (!isActive(player) || player.isDead || OfflineLife.owns(player) || traveling.containsKey(id) || townJobs.containsKey(id) ||
+                     !AutofarmManager.isAutoFarming(player)) { huntProgress.remove(id); continue }
++            // An anchor can be outgrown: a level 20 orc fighter was left at Kaboo grunts (7-10), where the odd
++            // aggressor still gave a little experience and kept the "unproductive" rule from ever firing.
++            if (now-(outgrownCheckAt[id]?:0L)>=OUTGROWN_CHECK_MS && !player.isSitting && !player.isUnderAttack() &&
++                    !player.isAttackingNow && !player.isCastingNow && (player.target as? Monster)?.isDead!=false) {
++                outgrownCheckAt[id]=now
++                val levels=HuntingSpots.targetLevels(player)
++                // Spawns, not live monsters: a cleared spot waiting for respawns is not outgrown.
++                val prey=net.sf.l2j.gameserver.data.sql.SpawnTable.getInstance().spawns.any { spawn ->
++                    spawn.template.isType("Monster") && spawn.template.level.toInt() in levels &&
++                            (spawn.loc ?: spawn.npc?.position)?.let { distance(player.x,player.y,it.x,it.y)<=OUTGROWN_RADIUS && kotlin.math.abs(player.z-it.z)<=1000 }==true
++                }
++                if(!prey) {
++                    huntedSpot[id]?.let { key -> emptySpots.getOrPut(id){mutableMapOf()}[key]=now }
++                    huntProgress.remove(id)
++                    AutofarmManager.stopFarm(player,"no monster of the character's level around the anchor")
++                    LOGGER.info("Offline farm: ${player.name} id=${player.objectId} left an outgrown hunting anchor (no prey in $levels within $OUTGROWN_RADIUS).")
++                    goHunting(player)
++                    continue
++                }
++            }
+             val previous=huntProgress[id]
+             if (previous==null || previous.first!=player.exp.toLong()) {
+                 if(previous!=null && player.exp.toLong()>previous.first) {
+@@ -1570,6 +1591,8 @@ object OfflineFarmManager {
+     private const val EXCLUSIONS_RETRY_MS = 5 * 60_000L
+     private const val DEATH_WAIT_MS = 15_000L
+     private const val TOWN_CHECK_MS = 60_000L
++    private const val OUTGROWN_CHECK_MS = 60_000L
++    private const val OUTGROWN_RADIUS = 2500
+     private const val TOWN_TRAINER_RADIUS = 6000.0
+     private const val DEADLY_SPOT_RADIUS = 6000
+     private const val DEADLY_SPOT_MS = 3*60*60_000L
