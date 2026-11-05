@@ -1,8 +1,16 @@
 diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
-index 7619b65..8f1d2f6 100644
+index 7619b65..1803b6f 100644
 --- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
-@@ -194,6 +194,16 @@ internal object OfflineChores {
+@@ -28,6 +28,7 @@ import net.sf.l2j.gameserver.model.actor.Player
+  */
+ internal object OfflineChores {
+     private const val MAX_ARMOR_PIECES = 3
++    private const val MAX_FIRST_RIDES = 8
+     private const val PROFESSION_LEVEL = 19
+     private const val PROFESSION_TRAVEL_RESERVE = 25000
+     private const val MIN_ARMOR_HEALING = 5
+@@ -194,6 +195,16 @@ internal object OfflineChores {
              if(!OfflineFarmManager.isActive(player) || player.isDead || !player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN)) return
              val budget=armorBudget(player)
              val (plan,goal)=OfflineEquipment.armorPlan(player,budget)
@@ -19,46 +27,57 @@ index 7619b65..8f1d2f6 100644
              if(plan==null) {
                  goal?.let { println("Offline gear: ${player.name} id=${player.objectId} waits slot=${it.slot} current=${it.current?.itemName ?: "-"}" +
                          " target=${it.product.item.name} gain=${"%.1f".format(it.gain)} price=${it.price} budget=$budget reason=money") }
-@@ -209,6 +219,47 @@ internal object OfflineChores {
+@@ -209,6 +220,58 @@ internal object OfflineChores {
          }
      }
  
-+    private class GuideTrip(val offer: dev.l2j.autobots.population.economy.GatekeeperTravel.Offer,val shop: dev.l2j.autobots.population.economy.Shop,
++    private class GuideTrip(val rides: List<dev.l2j.autobots.population.economy.GatekeeperTravel.Offer>,val shop: dev.l2j.autobots.population.economy.Shop,
 +                            val product: net.sf.l2j.gameserver.model.buylist.Product,val price: Int,val gain: Double) {
-+        /** The ride there and, kept aside, a ride of the same price back. */
-+        val total get() = price.toLong()+2L*offer.price
++        /** The rides there and, kept aside, the same fares back. */
++        val total get() = price.toLong()+2L*rides.sumOf { it.price }
++        val town get() = rides.last().exit
 +    }
 +
-+    /**
-+     * A guide piece no merchant of this town sells (HawkEye's D-grade kit): ride once to a town whose ordinary
-+     * merchant has it, when the item and both fares fit the gear budget, buy and wear it. The character hunts
-+     * on from there; the next town visit brings it home or onwards as usual.
-+     */
 +    private enum class GuideTripResult { Bought, Saving, None }
 +
++    /**
++     * A guide piece no merchant of this town sells (HawkEye's D-grade kit is sold in Dion and Giran, two rides
++     * from Gludin): ride to a town whose ordinary merchant has it, when the item and the fares there and back fit
++     * the gear budget, buy and wear it. The character hunts on from there; later town visits bring it onwards.
++     */
 +    private suspend fun buyGuidePieceElsewhere(player: Player,budget: Int,guide: Set<Int>): GuideTripResult {
 +        if(guide.isEmpty()) return GuideTripResult.None
 +        val service=dev.l2j.autobots.population.economy.GatekeeperTravel
-+        val trips=service.offers(player).flatMap { offer ->
-+            guide.mapNotNull { id ->
-+                val gain=OfflineEquipment.guideGain(player,id) ?: return@mapNotNull null
-+                val (shop,product)=Market.findProductAt(id,offer.exit) ?: return@mapNotNull null
-+                if(Market.findProduct(player,id)!=null) return@mapNotNull null
-+                GuideTrip(offer,shop,product,Market.priceWithTax(shop,product),gain)
++        val gains=guide.mapNotNull { id -> OfflineEquipment.guideGain(player,id)?.let { id to it } }
++                .filter { (id,_) -> Market.findProduct(player,id)==null }
++        if(gains.isEmpty()) return GuideTripResult.None
++        fun sellersAt(rides: List<dev.l2j.autobots.population.economy.GatekeeperTravel.Offer>) = gains.mapNotNull { (id,gain) ->
++            val (shop,product)=Market.findProductAt(id,rides.last().exit) ?: return@mapNotNull null
++            GuideTrip(rides,shop,product,Market.priceWithTax(shop,product),gain)
++        }
++        val first=service.offers(player)
++        val direct=first.flatMap { sellersAt(listOf(it)) }
++        val trips=direct.ifEmpty {
++            first.sortedBy { it.price }.take(MAX_FIRST_RIDES).flatMap { ride ->
++                service.offersWithBudget(player,ride.exit,Int.MAX_VALUE).flatMap { sellersAt(listOf(ride,it)) }
 +            }
 +        }
 +        val trip=trips.filter { it.total<=budget }.maxWithOrNull(compareBy<GuideTrip> { it.gain }.thenByDescending { it.total })
 +        if(trip==null) {
 +            trips.minByOrNull { it.total }?.let { println("Offline gear: ${player.name} id=${player.objectId} waits guide=${it.product.item.name}" +
-+                    " town=${it.offer.exit.x},${it.offer.exit.y} price=${it.price} fare=${it.offer.price} total=${it.total} budget=$budget reason=money") }
++                    " town=${it.town.x},${it.town.y} rides=${it.rides.size} price=${it.price} total=${it.total} budget=$budget reason=money") }
 +            return if(trips.isEmpty()) GuideTripResult.None else GuideTripResult.Saving
 +        }
 +        println("Offline gear: ${player.name} id=${player.objectId} rides for guide=${trip.product.item.name} gain=${"%.1f".format(trip.gain)}" +
-+                " town=${trip.offer.exit.x},${trip.offer.exit.y} price=${trip.price} fare=${trip.offer.price} budget=$budget")
++                " town=${trip.town.x},${trip.town.y} rides=${trip.rides.size} price=${trip.price} total=${trip.total} budget=$budget")
 +        val reserved=player.adena-budget
-+        if(!service.travel(player,trip.offer) || !OfflineFarmManager.isActive(player) || player.isDead) return GuideTripResult.None
++        for(ride in trip.rides) {
++            // The second ride is bought from the gatekeeper actually reached, at its real menu and price.
++            val offer=if(ride===trip.rides.first()) ride else service.offers(player).firstOrNull { it.id==ride.id } ?: return GuideTripResult.None
++            if(!service.travel(player,offer) || !OfflineFarmManager.isActive(player) || player.isDead) return GuideTripResult.None
++        }
 +        if(!approach(player,trip.shop.merchant)) return GuideTripResult.None
-+        if(trip.price>(player.adena-reserved+2*trip.offer.price).coerceAtLeast(0)) return GuideTripResult.None
++        if(trip.price>(player.adena-reserved+2*trip.rides.sumOf { it.price }).coerceAtLeast(0)) return GuideTripResult.None
 +        if(!Market.buyFromNpc(player,trip.shop,trip.product,1)) return GuideTripResult.None
 +        OfflineEquipment.equip(player)
 +        return GuideTripResult.Bought
