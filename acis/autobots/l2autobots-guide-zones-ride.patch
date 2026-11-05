@@ -1,0 +1,62 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt b/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
+index a85a93f..926dbeb 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
+@@ -34,6 +34,11 @@ internal object GuideZones {
+             Zone(9100, 16..20, SOLO),                   // Evil Hunting Grounds
+             Zone(1042, 16..20, setOf(Role.MAGE)),       // Ruins of Agony: undead for nukers
+             Zone(1013, 16..20, setOf(Role.SCOUT)),      // Neutral Zone
++            // Race regions: the guides keep orcs and Talking Island humans near home until 15-20.
++            Zone(1002, 12..15, ALL),                    // Western Territory of Talking Island (Northern Area)
++            Zone(93, 11..14, ALL),                      // Immortal Plateau, Northern Region
++            Zone(96, 13..16, ALL),                      // Frozen Waterfall
++            Zone(94, 15..18, ALL),                      // Immortal Plateau, Southern Region
+     )
+ 
+     private val located: List<Pair<Zone, Location>> by lazy {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index 1d0524b..782d167 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -65,6 +65,8 @@ internal object HuntingSpots {
+     private const val MIN_SUITABLE_MONSTERS = 4
+     private const val DISTANCE_DECAY = 10000.0
+     private const val CANDIDATES = 5
++    /** A gatekeeper ride to a guide zone weighs like this much extra walking. */
++    private const val GUIDE_RIDE_COST = 3000.0
+     /** Live deaths: 14 aggressive spawns within 1500 swarmed a lv 20 fighter; productive spots had at most 3. */
+     private const val AGGRESSIVE_CROWD_RADIUS = 1500.0
+     private const val AGGRESSIVE_CROWD_LIMIT = 6
+@@ -110,7 +112,7 @@ internal object HuntingSpots {
+                 .filter { preferredNpcIds.isEmpty() || it.npcIds().any { id -> id in preferredNpcIds } }
+                 .filter { withinReach(bot, it, maxWalk, exits) }
+                 .filter { !crossesLedge(bot, it) && RouteSafety.safeDestination(bot,it.location) }
+-                .map { it to score(it, bot, level) * lootBonus(it, level, wanted) * GuideZones.bonus(bot, level, it) }
++                .map { it to score(it, bot, level, exits) * lootBonus(it, level, wanted) * GuideZones.bonus(bot, level, it) }
+                 .sortedByDescending { it.second }
+                 .filter { (spot, _) ->
+                     val start = if (useExits && distance(bot.location(),spot.location)>maxWalk)
+@@ -254,9 +256,21 @@ internal object HuntingSpots {
+         hunters[spot.key]?.decrementAndGet()
+     }
+ 
+-    private fun score(spot: HuntingSpot, bot: Player, level: Int): Double {
++    private fun score(spot: HuntingSpot, bot: Player, level: Int, exits: List<TeleportLocation> = emptyList()): Double {
+         val crowd = hunters[spot.key]?.get() ?: 0
+-        return spot.monstersFor(level) * exp(-distance(bot.location(), spot.location) / DISTANCE_DECAY) / (1 + crowd)
++        return spot.monstersFor(level) * exp(-effectiveDistance(spot, bot, level, exits) / DISTANCE_DECAY) / (1 + crowd)
++    }
++
++    /**
++     * How far a spot feels. A guide zone is where players ride the village gatekeeper to, so for it the walk left
++     * after the best affordable exit counts, plus [GUIDE_RIDE_COST]; other spots keep the straight distance, so
++     * bots don't start buying rides to ordinary places.
++     */
++    private fun effectiveDistance(spot: HuntingSpot, bot: Player, level: Int, exits: List<TeleportLocation>): Double {
++        val direct = distance(bot.location(), spot.location)
++        if (exits.isEmpty() || !GuideZones.recommends(bot, level, spot.location)) return direct
++        val ride = exits.minOfOrNull { distance(it, spot.location) } ?: return direct
++        return minOf(direct, ride + GUIDE_RIDE_COST)
+     }
+ 
+     /**
