@@ -1,8 +1,8 @@
 diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
-index 7619b65..84ed828 100644
+index 7619b65..3945590 100644
 --- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineChores.kt
-@@ -194,6 +194,16 @@ internal object OfflineChores {
+@@ -194,6 +194,22 @@ internal object OfflineChores {
              if(!OfflineFarmManager.isActive(player) || player.isDead || !player.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN)) return
              val budget=armorBudget(player)
              val (plan,goal)=OfflineEquipment.armorPlan(player,budget)
@@ -16,10 +16,16 @@ index 7619b65..84ed828 100644
 +                    GuideTripResult.None -> {}
 +                }
 +            }
++            // The guide's piece is sold here but costs more than the budget: save for it rather than a stand-in.
++            if(plan!=null && plan.product.itemId !in guide && goal!=null && goal.product.itemId in guide) {
++                println("Offline gear: ${player.name} id=${player.objectId} saves for guide=${goal.product.item.name} price=${goal.price} budget=$budget" +
++                        " instead of ${plan.product.item.name}")
++                return
++            }
              if(plan==null) {
                  goal?.let { println("Offline gear: ${player.name} id=${player.objectId} waits slot=${it.slot} current=${it.current?.itemName ?: "-"}" +
                          " target=${it.product.item.name} gain=${"%.1f".format(it.gain)} price=${it.price} budget=$budget reason=money") }
-@@ -209,6 +219,58 @@ internal object OfflineChores {
+@@ -209,6 +225,58 @@ internal object OfflineChores {
          }
      }
  
