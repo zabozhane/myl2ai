@@ -19,6 +19,9 @@ MAGES = {'HUMAN_MYSTIC', 'HUMAN_WIZARD', 'CLERIC', 'ELVEN_MYSTIC', 'ELVEN_WIZARD
          'STORM_SCREAMER', 'SPECTRAL_MASTER', 'SHILLIEN_SAINT', 'DOMINATOR', 'DOOMCRYER'}
 FIRST = {'WARRIOR', 'KNIGHT', 'ROGUE', 'HUMAN_WIZARD', 'CLERIC', 'ELVEN_KNIGHT', 'ELVEN_SCOUT', 'ELVEN_WIZARD', 'ELVEN_ORACLE',
          'PALUS_KNIGHT', 'ASSASSIN', 'DARK_WIZARD', 'SHILLIEN_ORACLE', 'ORC_RAIDER', 'MONK', 'ORC_SHAMAN', 'ARTISAN', 'SCAVENGER'}
+# Base classes too: offline characters and bots that have not taken a profession dress from these kits.
+BASE = {'HUMAN_FIGHTER', 'HUMAN_MYSTIC', 'ELVEN_FIGHTER', 'ELVEN_MYSTIC', 'DARK_FIGHTER', 'DARK_MYSTIC',
+        'ORC_FIGHTER', 'ORC_MYSTIC', 'DWARVEN_FIGHTER'}
 
 
 def grade_for(level):
@@ -51,7 +54,7 @@ def main():
         chest = items.get(slots.get('chest'))
         if chest and chest['armor'] == ('HEAVY' if cls in MAGES else 'MAGIC'):
             problems.append(f"{where}: {chest['name']} ({chest['armor']}) on a {'mage' if cls in MAGES else 'fighter'}")
-    for cls in FIRST:
+    for cls in sorted(FIRST | BASE):
         covered = set()
         for lo, hi in levels.get(cls, []):
             covered.update(range(lo, hi + 1))

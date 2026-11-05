@@ -1,0 +1,112 @@
+diff --git a/data/autobots/equipment.xml b/data/autobots/equipment.xml
+index 42cbcbf..81ce691 100644
+--- a/data/autobots/equipment.xml
++++ b/data/autobots/equipment.xml
+@@ -3,6 +3,11 @@
+ <equipmentSets>
+ 
+     <equipment classId="HUMAN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="34" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="HUMAN_FIGHTER" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
++    <equipment classId="HUMAN_FIGHTER" minLevel="40" maxLevel="51" rhand="4708" lhand="2497" head="2414" chest="356" legs="" hands="2462" feet="2438" neck="919" lear="857" rear="857" lring="888" rring="888"/>
++    <equipment classId="HUMAN_FIGHTER" minLevel="52" maxLevel="60" rhand="4717" lhand="110" head="2417" chest="2381" legs="" hands="5722" feet="5738" neck="926" lear="864" rear="864" lring="895" rring="895"/>
++    <equipment classId="HUMAN_FIGHTER" minLevel="61" maxLevel="75" rhand="5648" lhand="2498" head="2418" chest="374" legs="" hands="5771" feet="5783" neck="924" lear="862" rear="862" lring="893" rring="893"/>
++    <equipment classId="HUMAN_FIGHTER" minLevel="76" maxLevel="80" rhand="6582" lhand="6377" head="6378" chest="6373" legs="6374" hands="6375" feet="6376" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     <equipment classId="WARRIOR" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="WARRIOR" minLevel="40" maxLevel="51" rhand="4852" lhand="" head="2414" chest="356" legs="" hands="2462" feet="2438" neck="919" lear="857" rear="857" lring="888" rring="888"/>
+     <equipment classId="WARRIOR" minLevel="52" maxLevel="60" rhand="4859" lhand="" head="2417" chest="2381" legs="" hands="5722" feet="5738" neck="926" lear="864" rear="864" lring="895" rring="895"/>
+@@ -20,6 +25,11 @@
+     <equipment classId="ROGUE" minLevel="76" maxLevel="80" rhand="7577" lhand="" head="6382" chest="6379" legs="" hands="6380" feet="6381" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     
+     <equipment classId="HUMAN_MYSTIC" minLevel="1" maxLevel="19" rhand="177" lhand="" head="44" chest="1101" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="HUMAN_MYSTIC" minLevel="20" maxLevel="39" rhand="90" lhand="" head="47" chest="436" legs="469" hands="2447" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
++    <equipment classId="HUMAN_MYSTIC" minLevel="40" maxLevel="51" rhand="6313" lhand="" head="2414" chest="439" legs="471" hands="2459" feet="2430" neck="919" lear="857" rear="857" lring="888" rring="888"/>
++    <equipment classId="HUMAN_MYSTIC" minLevel="52" maxLevel="60" rhand="8117" lhand="673" head="2415" chest="2406" legs="" hands="5715" feet="5732" neck="926" lear="864" rear="864" lring="895" rring="895"/>
++    <equipment classId="HUMAN_MYSTIC" minLevel="61" maxLevel="75" rhand="5643" lhand="2498" head="512" chest="2407" legs="" hands="5767" feet="5779" neck="924" lear="862" rear="862" lring="893" rring="893"/>
++    <equipment classId="HUMAN_MYSTIC" minLevel="76" maxLevel="80" rhand="6608" lhand="" head="6386" chest="6383" legs="" hands="6384" feet="6385" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     <equipment classId="HUMAN_WIZARD" minLevel="20" maxLevel="39" rhand="90" lhand="" head="47" chest="436" legs="469" hands="2447" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="HUMAN_WIZARD" minLevel="40" maxLevel="51" rhand="6313" lhand="" head="2414" chest="439" legs="471" hands="2459" feet="2430" neck="919" lear="857" rear="857" lring="888" rring="888"/>
+     <equipment classId="HUMAN_WIZARD" minLevel="52" maxLevel="60" rhand="8117" lhand="673" head="2415" chest="2406" legs="" hands="5715" feet="5732" neck="926" lear="864" rear="864" lring="895" rring="895"/>
+@@ -32,6 +42,11 @@
+     <equipment classId="CLERIC" minLevel="76" maxLevel="80" rhand="6608" lhand="" head="6386" chest="6383" legs="" hands="6384" feet="6385" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     
+     <equipment classId="ELVEN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="34" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="ELVEN_FIGHTER" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
++    <equipment classId="ELVEN_FIGHTER" minLevel="40" maxLevel="51" rhand="4708" lhand="2497" head="2414" chest="356" legs="" hands="2462" feet="2438" neck="919" lear="857" rear="857" lring="888" rring="888"/>
++    <equipment classId="ELVEN_FIGHTER" minLevel="52" maxLevel="60" rhand="4717" lhand="110" head="2417" chest="2381" legs="" hands="5722" feet="5738" neck="926" lear="864" rear="864" lring="895" rring="895"/>
++    <equipment classId="ELVEN_FIGHTER" minLevel="61" maxLevel="75" rhand="5648" lhand="2498" head="2418" chest="374" legs="" hands="5771" feet="5783" neck="924" lear="862" rear="862" lring="893" rring="893"/>
++    <equipment classId="ELVEN_FIGHTER" minLevel="76" maxLevel="80" rhand="6582" lhand="6377" head="6378" chest="6373" legs="6374" hands="6375" feet="6376" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     <equipment classId="ELVEN_KNIGHT" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ELVEN_KNIGHT" minLevel="40" maxLevel="51" rhand="4708" lhand="2497" head="2414" chest="356" legs="" hands="2462" feet="2438" neck="919" lear="857" rear="857" lring="888" rring="888"/>
+     <equipment classId="ELVEN_KNIGHT" minLevel="52" maxLevel="60" rhand="4717" lhand="110" head="2417" chest="2381" legs="" hands="5722" feet="5738" neck="926" lear="864" rear="864" lring="895" rring="895"/>
+@@ -44,6 +59,11 @@
+     <equipment classId="ELVEN_SCOUT" minLevel="76" maxLevel="80" rhand="7577" lhand="" head="6382" chest="6379" legs="" hands="6380" feet="6381" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     
+     <equipment classId="ELVEN_MYSTIC" minLevel="1" maxLevel="19" rhand="177" lhand="" head="44" chest="1101" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="ELVEN_MYSTIC" minLevel="20" maxLevel="39" rhand="90" lhand="" head="47" chest="436" legs="469" hands="2447" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
++    <equipment classId="ELVEN_MYSTIC" minLevel="40" maxLevel="51" rhand="6313" lhand="" head="2414" chest="439" legs="471" hands="2459" feet="2430" neck="919" lear="857" rear="857" lring="888" rring="888"/>
++    <equipment classId="ELVEN_MYSTIC" minLevel="52" maxLevel="60" rhand="8117" lhand="673" head="2415" chest="2406" legs="" hands="5715" feet="5732" neck="926" lear="864" rear="864" lring="895" rring="895"/>
++    <equipment classId="ELVEN_MYSTIC" minLevel="61" maxLevel="75" rhand="5643" lhand="2498" head="512" chest="2407" legs="" hands="5767" feet="5779" neck="924" lear="862" rear="862" lring="893" rring="893"/>
++    <equipment classId="ELVEN_MYSTIC" minLevel="76" maxLevel="80" rhand="6608" lhand="" head="6386" chest="6383" legs="" hands="6384" feet="6385" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     <equipment classId="ELVEN_WIZARD" minLevel="20" maxLevel="39" rhand="90" lhand="" head="47" chest="436" legs="469" hands="2447" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ELVEN_WIZARD" minLevel="40" maxLevel="51" rhand="6313" lhand="" head="2414" chest="439" legs="471" hands="2459" feet="2430" neck="919" lear="857" rear="857" lring="888" rring="888"/>
+     <equipment classId="ELVEN_WIZARD" minLevel="52" maxLevel="60" rhand="8117" lhand="673" head="2415" chest="2406" legs="" hands="5715" feet="5732" neck="926" lear="864" rear="864" lring="895" rring="895"/>
+@@ -56,6 +76,11 @@
+     <equipment classId="ELVEN_ORACLE" minLevel="76" maxLevel="80" rhand="6608" lhand="" head="6386" chest="6383" legs="" hands="6384" feet="6385" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     
+     <equipment classId="DARK_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="34" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="DARK_FIGHTER" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
++    <equipment classId="DARK_FIGHTER" minLevel="40" maxLevel="51" rhand="4708" lhand="2497" head="2414" chest="356" legs="" hands="2462" feet="2438" neck="919" lear="857" rear="857" lring="888" rring="888"/>
++    <equipment classId="DARK_FIGHTER" minLevel="52" maxLevel="60" rhand="4717" lhand="110" head="2417" chest="2381" legs="" hands="5722" feet="5738" neck="926" lear="864" rear="864" lring="895" rring="895"/>
++    <equipment classId="DARK_FIGHTER" minLevel="61" maxLevel="75" rhand="5648" lhand="2498" head="2418" chest="374" legs="" hands="5771" feet="5783" neck="924" lear="862" rear="862" lring="893" rring="893"/>
++    <equipment classId="DARK_FIGHTER" minLevel="76" maxLevel="80" rhand="6582" lhand="6377" head="6378" chest="6373" legs="6374" hands="6375" feet="6376" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     <equipment classId="PALUS_KNIGHT" minLevel="20" maxLevel="39" rhand="129" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="PALUS_KNIGHT" minLevel="40" maxLevel="51" rhand="4708" lhand="2497" head="2414" chest="356" legs="" hands="2462" feet="2438" neck="919" lear="857" rear="857" lring="888" rring="888"/>
+     <equipment classId="PALUS_KNIGHT" minLevel="52" maxLevel="60" rhand="4717" lhand="110" head="2417" chest="2381" legs="" hands="5722" feet="5738" neck="926" lear="864" rear="864" lring="895" rring="895"/>
+@@ -68,6 +93,11 @@
+     <equipment classId="ASSASSIN" minLevel="76" maxLevel="80" rhand="7577" lhand="" head="6382" chest="6379" legs="" hands="6380" feet="6381" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     
+     <equipment classId="DARK_MYSTIC" minLevel="1" maxLevel="19" rhand="177" lhand="" head="44" chest="1101" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="DARK_MYSTIC" minLevel="20" maxLevel="39" rhand="90" lhand="" head="47" chest="436" legs="469" hands="2447" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
++    <equipment classId="DARK_MYSTIC" minLevel="40" maxLevel="51" rhand="6313" lhand="" head="2414" chest="439" legs="471" hands="2459" feet="2430" neck="919" lear="857" rear="857" lring="888" rring="888"/>
++    <equipment classId="DARK_MYSTIC" minLevel="52" maxLevel="60" rhand="8117" lhand="673" head="2415" chest="2406" legs="" hands="5715" feet="5732" neck="926" lear="864" rear="864" lring="895" rring="895"/>
++    <equipment classId="DARK_MYSTIC" minLevel="61" maxLevel="75" rhand="5643" lhand="2498" head="512" chest="2407" legs="" hands="5767" feet="5779" neck="924" lear="862" rear="862" lring="893" rring="893"/>
++    <equipment classId="DARK_MYSTIC" minLevel="76" maxLevel="80" rhand="6608" lhand="" head="6386" chest="6383" legs="" hands="6384" feet="6385" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     <equipment classId="DARK_WIZARD" minLevel="20" maxLevel="39" rhand="90" lhand="" head="47" chest="436" legs="469" hands="2447" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="DARK_WIZARD" minLevel="40" maxLevel="51" rhand="6313" lhand="" head="2414" chest="439" legs="471" hands="2459" feet="2430" neck="919" lear="857" rear="857" lring="888" rring="888"/>
+     <equipment classId="DARK_WIZARD" minLevel="52" maxLevel="60" rhand="8117" lhand="673" head="2415" chest="2406" legs="" hands="5715" feet="5732" neck="926" lear="864" rear="864" lring="895" rring="895"/>
+@@ -80,6 +110,11 @@
+     <equipment classId="SHILLIEN_ORACLE" minLevel="76" maxLevel="80" rhand="6608" lhand="" head="6386" chest="6383" legs="" hands="6384" feet="6385" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     
+     <equipment classId="ORC_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="34" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="ORC_FIGHTER" minLevel="20" maxLevel="39" rhand="70" lhand="" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
++    <equipment classId="ORC_FIGHTER" minLevel="40" maxLevel="51" rhand="6347" lhand="" head="2414" chest="356" legs="" hands="2462" feet="2438" neck="919" lear="857" rear="857" lring="888" rring="888"/>
++    <equipment classId="ORC_FIGHTER" minLevel="52" maxLevel="60" rhand="4724" lhand="" head="2417" chest="2381" legs="" hands="5722" feet="5738" neck="926" lear="864" rear="864" lring="895" rring="895"/>
++    <equipment classId="ORC_FIGHTER" minLevel="61" maxLevel="75" rhand="5644" lhand="" head="547" chest="2382" legs="" hands="5768" feet="5780" neck="924" lear="862" rear="862" lring="893" rring="893"/>
++    <equipment classId="ORC_FIGHTER" minLevel="76" maxLevel="80" rhand="6607" lhand="" head="6378" chest="6373" legs="6374" hands="6375" feet="6376" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     <equipment classId="ORC_RAIDER" minLevel="20" maxLevel="39" rhand="70" lhand="" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ORC_RAIDER" minLevel="40" maxLevel="51" rhand="6347" lhand="" head="2414" chest="356" legs="" hands="2462" feet="2438" neck="919" lear="857" rear="857" lring="888" rring="888"/>
+     <equipment classId="ORC_RAIDER" minLevel="52" maxLevel="60" rhand="4724" lhand="" head="2417" chest="2381" legs="" hands="5722" feet="5738" neck="926" lear="864" rear="864" lring="895" rring="895"/>
+@@ -92,6 +127,11 @@
+     <equipment classId="MONK" minLevel="76" maxLevel="80" rhand="6602" lhand="" head="6382" chest="6379" legs="" hands="6380" feet="6381" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     
+     <equipment classId="ORC_MYSTIC" minLevel="1" maxLevel="19" rhand="177" lhand="" head="44" chest="1101" legs="1104" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="ORC_MYSTIC" minLevel="20" maxLevel="39" rhand="90" lhand="" head="47" chest="436" legs="469" hands="2447" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
++    <equipment classId="ORC_MYSTIC" minLevel="40" maxLevel="51" rhand="6313" lhand="" head="2414" chest="439" legs="471" hands="2459" feet="2430" neck="919" lear="857" rear="857" lring="888" rring="888"/>
++    <equipment classId="ORC_MYSTIC" minLevel="52" maxLevel="60" rhand="8117" lhand="673" head="2415" chest="2406" legs="" hands="5715" feet="5732" neck="926" lear="864" rear="864" lring="895" rring="895"/>
++    <equipment classId="ORC_MYSTIC" minLevel="61" maxLevel="75" rhand="5643" lhand="2498" head="512" chest="2407" legs="" hands="5767" feet="5779" neck="924" lear="862" rear="862" lring="893" rring="893"/>
++    <equipment classId="ORC_MYSTIC" minLevel="76" maxLevel="80" rhand="6608" lhand="" head="6386" chest="6383" legs="" hands="6384" feet="6385" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     <equipment classId="ORC_SHAMAN" minLevel="20" maxLevel="39" rhand="90" lhand="" head="47" chest="436" legs="469" hands="2447" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ORC_SHAMAN" minLevel="40" maxLevel="51" rhand="6313" lhand="" head="2414" chest="439" legs="471" hands="2459" feet="2430" neck="919" lear="857" rear="857" lring="888" rring="888"/>
+     <equipment classId="ORC_SHAMAN" minLevel="52" maxLevel="60" rhand="8117" lhand="673" head="2415" chest="2406" legs="" hands="5715" feet="5732" neck="926" lear="864" rear="864" lring="895" rring="895"/>
+@@ -99,6 +139,11 @@
+     <equipment classId="ORC_SHAMAN" minLevel="76" maxLevel="80" rhand="6608" lhand="" head="6386" chest="6383" legs="" hands="6384" feet="6385" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     
+     <equipment classId="DWARVEN_FIGHTER" minLevel="1" maxLevel="19" rhand="3" lhand="625" head="44" chest="26" legs="34" hands="51" feet="39" neck="909" lear="846" rear="846" lring="878" rring="878"/>
++    <equipment classId="DWARVEN_FIGHTER" minLevel="20" maxLevel="39" rhand="158" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
++    <equipment classId="DWARVEN_FIGHTER" minLevel="40" maxLevel="51" rhand="4745" lhand="2497" head="2414" chest="356" legs="" hands="2462" feet="2438" neck="919" lear="857" rear="857" lring="888" rring="888"/>
++    <equipment classId="DWARVEN_FIGHTER" minLevel="52" maxLevel="60" rhand="4753" lhand="110" head="2417" chest="2381" legs="" hands="5722" feet="5738" neck="926" lear="864" rear="864" lring="895" rring="895"/>
++    <equipment classId="DWARVEN_FIGHTER" minLevel="61" maxLevel="75" rhand="5644" lhand="" head="547" chest="2382" legs="" hands="5768" feet="5780" neck="924" lear="862" rear="862" lring="893" rring="893"/>
++    <equipment classId="DWARVEN_FIGHTER" minLevel="76" maxLevel="80" rhand="6585" lhand="6377" head="6378" chest="6373" legs="6374" hands="6375" feet="6376" neck="920" lear="858" rear="858" lring="889" rring="889"/>
+     <equipment classId="ARTISAN" minLevel="20" maxLevel="39" rhand="158" lhand="629" head="47" chest="352" legs="2378" hands="606" feet="1124" neck="913" lear="850" rear="850" lring="881" rring="881"/>
+     <equipment classId="ARTISAN" minLevel="40" maxLevel="51" rhand="8120" lhand="" head="2414" chest="356" legs="" hands="2462" feet="2438" neck="919" lear="857" rear="857" lring="888" rring="888"/>
+     <equipment classId="ARTISAN" minLevel="52" maxLevel="60" rhand="8129" lhand="" head="2417" chest="2381" legs="" hands="5722" feet="5738" neck="926" lear="864" rear="864" lring="895" rring="895"/>
