@@ -1,0 +1,58 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 0cdc413..e343526 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -36,11 +36,21 @@ import kotlin.math.hypot
+ 
+ /** A monster that targets us, or a flagged or PK player who does: both are worth fighting back. */
+ internal fun Player.isUnderAttack(): Boolean =
+-        getKnownTypeInRadius(Monster::class.java, ATTACKER_RADIUS).any { !it.isDead && it.target === this } ||
++        getKnownTypeInRadius(Monster::class.java, ATTACKER_RADIUS).any { !it.isDead && it.target === this && canReach(it) } ||
+         getKnownTypeInRadius(Player::class.java, ATTACKER_RADIUS).any { !it.isDead && it.target === this && (it.pvpFlag > 0 || it.karma > 0) }
+ 
+ private const val ATTACKER_RADIUS = 1000
+ 
++/**
++ * A monster that has the bot as its target but neither sees it nor can walk to it (a skeleton on the cave floor below
++ * a ledge path) is no attack: counting it froze quest walks above the Cave of Trials for the whole session.
++ */
++private fun Player.canReach(monster: Monster): Boolean {
++    if (kotlin.math.abs(monster.z - z) < 200) return true
++    val geo = net.sf.l2j.gameserver.geoengine.GeoEngine.getInstance()
++    return geo.canSeeTarget(monster, this) || geo.canMoveToTarget(monster.x, monster.y, monster.z, x, y, z)
++}
++
+ /**
+  * What a population bot does during one play session, segment by segment ([SessionPlan]): hunts at a spot that fits
+  * its level and gear, trades in a private store in town, takes an AFK break, and walks back to town before logging
+@@ -52,6 +62,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private val fitness = Fitness(bot)
+     private val party = PartyBehavior(bot)
+     internal val quests = QuestRunner(bot)
++    private var underAttackSince = 0L
++    private var underAttackLoggedAt = 0L
+     // A party member's own trip to town: the party goes on hunting meanwhile.
+     private var partyErrand = false
+ 
+@@ -162,9 +174,21 @@ internal class LifeBehavior(private val bot: Autobot) {
+         if (bot.isInParty) bot.questTargets=null
+         if (AutobotData.settings.groupsEnabled && bot.isInParty && updateInParty()) return
+         if (bot.isDead || bot.isUnderAttack()) {
++            val now = System.currentTimeMillis()
++            if (!bot.isDead) {
++                if (underAttackSince == 0L) underAttackSince = now
++                if (now - underAttackSince > 60_000L && now - underAttackLoggedAt > 60_000L) {
++                    underAttackLoggedAt = now
++                    val attackers = bot.getKnownTypeInRadius(Monster::class.java, 1000).filter { !it.isDead && it.target === bot }
++                            .joinToString { "${it.npcId}@${it.x},${it.y},${it.z}" }
++                    println("Autobots life: ${bot.name} under attack for ${(now - underAttackSince) / 1000}s at ${bot.x},${bot.y},${bot.z}" +
++                            " by [$attackers] target=${bot.target?.name} hp=${bot.currentHp.toInt()}")
++                }
++            }
+             bot.combatBehavior.onUpdate()
+             return
+         }
++        underAttackSince = 0L
+ 
+         if (!bot.isInsideZone(ZoneId.TOWN)) tripDoneInTown = false
+ 
