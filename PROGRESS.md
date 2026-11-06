@@ -1,3 +1,14 @@
+## 2026-11-06 — 2-я профессия, партия 6: маги и тёмные рыцари
+
+- `l2autobots-second-class-mages.patch`: Q214 Trial of the Scholar (с 36: Мириен на полпути хочет 36), Q228 Test of
+  Magus (39; четыре духа: сначала все амулеты, потом охота, потом тона) и Q229 Test of Witchcraft (39; Зеруэля,
+  которого вызывают Орим и Эверт, бот вызывает снова, если не успел; убивать его надо с Sword of Binding).
+- Классы: Human Wizard → Sorcerer / Necromancer, Elven Wizard → Spellsinger, Dark Wizard → Spellhowler,
+  Knight → Dark Avenger, Palus Knight → Shillien Knight. Мастера магов людей и эльфов из `SecondClassChange`.
+- Не сделаны: Q230 Summoner (Warlock, Elemental Summoner, Phantom Summoner — дуэли с призывателями), жрецы
+  (Q215 Pilgrim, Q227 Reformer), орки-шаманы (Q232 Lord, Q233 War Spirit), гномы (Q216 Guildsman, Q221 Prosperity,
+  Q231 Maestro).
+
 ## 2026-11-06 — онлайн-режим жизни `.autolife`
 
 - Владелец: персонаж, запущенный через клиент, должен жить так же, как в офлайне; после этого — вайп.
