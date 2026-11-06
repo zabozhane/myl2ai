@@ -1,0 +1,37 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 3d557e6..4215266 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -515,14 +515,17 @@ internal class QuestRunner(private val bot: Player) {
+     }
+ 
+     /**
+-     * The hop that reaches the NPC, else, across the map (no gatekeeper goes all the way, e.g. Gludio to Giran), a hop
+-     * to the town closest to it: from there the next hop completes the trip. Every such hop brings the bot at least
+-     * [MIN_LONG_HOP_GAIN] closer, so it never circles between towns.
++     * The hop that reaches the NPC, else, on a long trip (no gatekeeper goes all the way, e.g. Gludio to Giran, or Dion
++     * to the caves north of Gludio, which is too far to walk), a hop to the town closest to it: from there the next
++     * hop completes the trip or the walk is short. Only towns, so the bot never flies to a field and gets sent back to
++     * town; every such hop brings it at least [MIN_LONG_HOP_GAIN] closer, so it never circles between towns.
+      */
+     private fun routeExitFrom(origin: Location,destination: Location,npc: Npc?): dev.l2j.autobots.population.economy.GatekeeperTravel.Offer? =
+-            completeExitFrom(origin,destination,npc) ?: if(distance(origin,destination)<=LONG_TRIP) null else
++            completeExitFrom(origin,destination,npc) ?: if(distance(origin,destination)<=LONG_HOP_FROM) null else
+                 dev.l2j.autobots.population.economy.GatekeeperTravel.offersFrom(bot,origin)
+-                        .filter { distance(origin,destination)-distance(it.exit,destination)>MIN_LONG_HOP_GAIN }
++                        .filter { distance(origin,destination)-distance(it.exit,destination)>MIN_LONG_HOP_GAIN &&
++                                net.sf.l2j.gameserver.data.manager.ZoneManager.getInstance().getZone(it.exit.x,it.exit.y,it.exit.z,
++                                        net.sf.l2j.gameserver.model.zone.type.TownZone::class.java)!=null }
+                         .minByOrNull { distance(it.exit,destination)+it.price/10.0 }
+ 
+     /** A partial cheap hop is not proof that the quest NPC can actually be reached. */
+@@ -637,7 +640,8 @@ internal class QuestRunner(private val bot: Player) {
+         private const val PAUSE_MS = 3 * 60 * 60 * 1000L
+         private const val MAX_TRAVEL_FAILURES = 8
+         private const val LONG_TRIP = 100000
+-        private const val MIN_LONG_HOP_GAIN = 30000
++        private const val LONG_HOP_FROM = 30000
++        private const val MIN_LONG_HOP_GAIN = 15000
+         private const val TRAVEL_GRACE_MS = 5 * 60 * 1000L
+         private const val TRAVEL_PAUSE_MS = 20 * 60 * 1000L
+         private const val WALK_ONLY_MS = 10 * 60 * 1000L
