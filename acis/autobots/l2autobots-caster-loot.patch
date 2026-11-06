@@ -1,0 +1,25 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt
+index 4bce4ba..add6cf4 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt
+@@ -43,8 +43,10 @@ internal class LootPicker(private val player: Player) {
+     }
+ 
+     // Herbs first: they vanish in seconds, other loot waits on the ground.
+-    private fun findClosestLootableItem(herbsOnly: Boolean = false): ItemInstance? = player.getKnownTypeInRadius(ItemInstance::class.java, LOOT_RADIUS)
+-            .filter { isLootable(it) && (!herbsOnly || isHerb(it)) }
++    // A caster kills from up to ~900 away, so its own drops lie far from it: those are fetched from further off.
++    private fun findClosestLootableItem(herbsOnly: Boolean = false): ItemInstance? = player.getKnownTypeInRadius(ItemInstance::class.java, OWN_DROP_RADIUS)
++            .filter { (it.ownerId == player.objectId || distance(player.x, player.y, player.z, it.x, it.y, it.z) <= LOOT_RADIUS) &&
++                    isLootable(it) && (!herbsOnly || isHerb(it)) }
+             .minWithOrNull(compareBy<ItemInstance>({ if (isHerb(it)) 0 else 1 }, { distance(player.x, player.y, player.z, it.x, it.y, it.z) }))
+ 
+     private fun isHerb(item: ItemInstance) = item.itemType == net.sf.l2j.gameserver.enums.items.EtcItemType.HERB
+@@ -58,6 +60,7 @@ internal class LootPicker(private val player: Player) {
+ 
+     companion object {
+         private const val LOOT_RADIUS = 400
++        private const val OWN_DROP_RADIUS = 1100
+         private const val MIN_HEALTH_PERCENT_TO_LOOT = 40.0
+         private const val MAX_PICK_UP_ATTEMPTS = 3
+     }
