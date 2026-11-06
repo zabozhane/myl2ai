@@ -633,3 +633,7 @@ No Grade бонуса атаки; его заменяет проверка D Gra
 - `AutoLifeVerify` — `.autolife` для подключённого Zenthen: жизнь берёт персонажа, ручной ход возвращает
   управление (жизнь, поездка и охота сняты, персонаж в мире), повторное включение, выход с включённым
   режимом сохраняет ту же поездку и охоту офлайн. `AUTO LIFE ALL PASSED`.
+- `ProfessionGoalVerify` — `.autolife class destroyer|monk|titan|none` для Orc Fighter: ветка 1-й профессии
+  следует цели владельца, цель хранится в БД, третья профессия не принимается. `PROFESSION GOAL ALL PASSED`.
+- `HerbLootVerify` — раненый охотник (30% HP) подбирает Herb of Life до отдыха; прежняя сборка садится
+  отдыхать первой. `HERB LOOT ALL PASSED`.
