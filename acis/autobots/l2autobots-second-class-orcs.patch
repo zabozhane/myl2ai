@@ -1,0 +1,101 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index d318356..a901c0e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -24,9 +24,11 @@ internal object SecondClassQuests {
+     const val MARK_OF_FATE = 3172
+     const val MARK_OF_DUTY = 2633
+     const val MARK_OF_HEALER = 2820
++    const val MARK_OF_GLORY = 3203
+ 
+     /** Human and elven fighter guild masters of SecondClassChange. */
+     private val HUMAN_ELF_FIGHTER_MASTERS = listOf(30109, 30187, 30689, 30849, 30900, 31965, 32094)
++    private val ORC_MASTERS = listOf(30513, 30681, 30704, 30865, 30913, 31288, 31326, 31977)
+     private val DARK_ELF_MASTERS = listOf(31328, 30195, 30699, 30474, 31324, 30862, 30910, 31285, 31331, 31334, 31974, 32096)
+ 
+     val classes: List<SecondClass> = listOf(
+@@ -35,7 +37,9 @@ internal object SecondClassQuests {
+             SecondClass(ELVEN_KNIGHT, SWORD_SINGER, "SS", listOf(MARK_OF_CHALLENGER, MARK_OF_LIFE, MARK_OF_DUELIST), HUMAN_ELF_FIGHTER_MASTERS),
+             SecondClass(KNIGHT, PALADIN, "PL", listOf(MARK_OF_DUTY, MARK_OF_TRUST, MARK_OF_HEALER), HUMAN_ELF_FIGHTER_MASTERS),
+             SecondClass(ELVEN_KNIGHT, TEMPLE_KNIGHT, "TK", listOf(MARK_OF_DUTY, MARK_OF_LIFE, MARK_OF_HEALER), HUMAN_ELF_FIGHTER_MASTERS),
+-            SecondClass(PALUS_KNIGHT, BLADEDANCER, "BD", listOf(MARK_OF_CHALLENGER, MARK_OF_FATE, MARK_OF_DUELIST), DARK_ELF_MASTERS))
++            SecondClass(PALUS_KNIGHT, BLADEDANCER, "BD", listOf(MARK_OF_CHALLENGER, MARK_OF_FATE, MARK_OF_DUELIST), DARK_ELF_MASTERS),
++            SecondClass(ORC_RAIDER, DESTROYER, "DE", listOf(MARK_OF_CHALLENGER, MARK_OF_GLORY, MARK_OF_CHAMPION), ORC_MASTERS),
++            SecondClass(MONK, TYRANT, "TY", listOf(MARK_OF_CHALLENGER, MARK_OF_GLORY, MARK_OF_DUELIST), ORC_MASTERS))
+ 
+     private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
+             path(questName, HUMAN_FIGHTER, HUMAN_FIGHTER, mark, "") { level(minLevel); body() }
+@@ -228,6 +232,46 @@ internal object SecondClassQuests {
+                 cond(22, talk(30327))
+                 cond(23, talk(30473))
+             },
++            // Orcs only.
++            mark("Q220_TestimonyOfGlory", MARK_OF_GLORY, 37) {
++                start(30514, "30514-05.htm")
++                gather({ it.cond == 1 }, Drop(3206, 10, intArrayOf(20192)), Drop(3207, 10, intArrayOf(20550)),
++                        Drop(3205, 10, intArrayOf(20563)))
++                cond(2, talk(30514))
++                cond(3, talk(30642, "30642-03.htm"))
++                // Five scepters. The letters first, so Kasman in Gludin and Manakia in Giran are visited once each.
++                fun errand(it: QuestView, scepter: Int, vararg underWay: Int) = it.cond == 4 && !it.has(scepter) && underWay.none { i -> it.has(i) }
++                rule({ errand(it, SCEPTER_OF_VUKU, KASMAN_LETTER_1, DRIKO_CONTRACT) }, talk(30501, "30501-02.htm"))
++                rule({ errand(it, SCEPTER_OF_TUREK, KASMAN_LETTER_2, GLOVE_OF_BURAI, MAKUM_BUGBEAR_HEAD) }, talk(30501, "30501-05.htm"))
++                rule({ errand(it, SCEPTER_OF_TUNATH, KASMAN_LETTER_3) }, talk(30501, "30501-08.htm"))
++                rule({ errand(it, SCEPTER_OF_BREKA, MANAKIA_LETTER_1, GLOVE_OF_VOLTAR, PASHIKA_HEAD, VULTUS_HEAD) }, talk(30515, "30515-02.htm"))
++                rule({ errand(it, SCEPTER_OF_ENKU, MANAKIA_LETTER_2, GLOVE_OF_KEPRA, ENKU_OVERLORD_HEAD) }, talk(30515, "30515-05.htm"))
++                rule({ it.cond == 4 && it.has(KASMAN_LETTER_3) }, talk(30618, "30618-03.htm"))
++                // Driko: 30 husks from the drones.
++                rule({ it.cond == 4 && it.has(KASMAN_LETTER_1) }, talk(30619, "30619-03.htm"))
++                rule({ it.cond == 4 && it.has(DRIKO_CONTRACT) && it.count(STAKATO_DRONE_HUSK) < 30 }, hunt(20234))
++                rule({ it.cond == 4 && it.has(DRIKO_CONTRACT) }, talk(30619))
++                // Burai, Voltar and Kepra call up the monsters next to themselves for 200 seconds; talking again calls
++                // them back.
++                rule({ it.cond == 4 && it.has(KASMAN_LETTER_2) }, talk(30617, "30617-04.htm"))
++                rule({ it.cond == 4 && it.has(GLOVE_OF_BURAI) }, hunt(27083, orElse = talk(30617)))
++                rule({ it.cond == 4 && it.has(MAKUM_BUGBEAR_HEAD) }, talk(30617))
++                rule({ it.cond == 4 && it.has(MANAKIA_LETTER_1) }, talk(30615, "30615-04.htm"))
++                rule({ it.cond == 4 && it.has(GLOVE_OF_VOLTAR) }, hunt(27080, 27081, orElse = talk(30615)))
++                rule({ it.cond == 4 && it.has(PASHIKA_HEAD) }, talk(30615))
++                rule({ it.cond == 4 && it.has(MANAKIA_LETTER_2) }, talk(30616, "30616-05.htm"))
++                rule({ it.cond == 4 && it.has(GLOVE_OF_KEPRA) }, hunt(27082, orElse = talk(30616)))
++                rule({ it.cond == 4 && it.has(ENKU_OVERLORD_HEAD) }, talk(30616))
++                cond(5, talk(30642, "30642-07.htm"))
++                // Timak Overlords (45) are left alone: the heads drop from the lesser Timak orcs too.
++                collect(6, 20, 3219 to intArrayOf(20583, 20584, 20585, 20586, 20587), 3218 to intArrayOf(20601, 20602))
++                cond(7, talk(30642))
++                cond(8, talk(30571, "30571-03.htm"))
++                // A slain Ragna orc calls up the Revenant of Tantos Chief, who carries the scepter.
++                cond(9, hunt(27086, orElse = hunt(20778, 20779)))
++                cond(10, talk(30571))
++                cond(11, talk(30565))
++            },
+     ).associateBy { it.mark }
+ 
+     /** Second professions of [first] whose three mark quests the bots can play. */
+@@ -239,6 +283,26 @@ internal object SecondClassQuests {
+     private const val BASILIK_PLASMA = 2752
+     private const val HONEY_DEW = 2753
+     private const val STAKATO_ICHOR = 2754
++    // Q220 items checked by the rules.
++    private const val SCEPTER_OF_BREKA = 3211
++    private const val SCEPTER_OF_ENKU = 3212
++    private const val SCEPTER_OF_VUKU = 3213
++    private const val SCEPTER_OF_TUREK = 3214
++    private const val SCEPTER_OF_TUNATH = 3215
++    private const val PASHIKA_HEAD = 3221
++    private const val VULTUS_HEAD = 3222
++    private const val GLOVE_OF_VOLTAR = 3223
++    private const val ENKU_OVERLORD_HEAD = 3224
++    private const val GLOVE_OF_KEPRA = 3225
++    private const val MAKUM_BUGBEAR_HEAD = 3226
++    private const val GLOVE_OF_BURAI = 3227
++    private const val MANAKIA_LETTER_1 = 3228
++    private const val MANAKIA_LETTER_2 = 3229
++    private const val KASMAN_LETTER_1 = 3230
++    private const val KASMAN_LETTER_2 = 3231
++    private const val KASMAN_LETTER_3 = 3232
++    private const val DRIKO_CONTRACT = 3233
++    private const val STAKATO_DRONE_HUSK = 3234
+     // Q219 items checked by the rules.
+     private const val PIXY_GARNET = 3193
+     private const val RED_FAIRY_DUST = 3198
