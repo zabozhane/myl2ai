@@ -1,0 +1,101 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 473932b..02bd734 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -40,12 +40,16 @@ internal fun Player.isUnderAttack(): Boolean =
+         getKnownTypeInRadius(Player::class.java, ATTACKER_RADIUS).any { !it.isDead && it.target === this && (it.pvpFlag > 0 || it.karma > 0) }
+ 
+ private const val ATTACKER_RADIUS = 1000
++private const val GREY_ATTACKER_LEVELS = 15
+ 
+ /**
+  * A monster that has the bot as its target but neither sees it nor can walk to it (a skeleton on the cave floor below
+  * a ledge path) is no attack: counting it froze quest walks above the Cave of Trials for the whole session.
+  */
+ private fun Player.canReach(monster: Monster): Boolean {
++    // Far weaker monsters are no attack either: the bot's own targeting skips them as grey, and a Crypt Horror
++    // (15) behind a hump held a level 39 shaman for nine minutes without a scratch. A player walks on.
++    if (monster.level + GREY_ATTACKER_LEVELS <= level) return false
+     if (kotlin.math.abs(monster.z - z) < 200) return true
+     val geo = net.sf.l2j.gameserver.geoengine.GeoEngine.getInstance()
+     return geo.canSeeTarget(monster, this) || geo.canMoveToTarget(monster.x, monster.y, monster.z, x, y, z)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+index ec2f2ad..86d0636 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/GatekeeperTravel.kt
+@@ -16,6 +16,23 @@ import java.util.Calendar
+ 
+ /** A world teleport entry is not a service offered by the player's gatekeeper. */
+ internal object GatekeeperTravel {
++    /**
++     * Bots on a profession quest trip: the reserve kept back from shopping is travel money, and a quest that leads
++     * across the map needs it (orc village to Gludin is 53000 in two hops, and the last 2000 to the Forgotten Temple
++     * must not fail on the reserve). A little is still kept for a scroll home.
++     */
++    private val questTrips = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
++    private const val QUEST_TRIP_KEEP = 1000
++
++    suspend fun <T> forQuest(player: Player, block: suspend () -> T): T {
++        val added = questTrips.add(player.objectId)
++        try { return block() } finally { if (added) questTrips.remove(player.objectId) }
++    }
++
++    /** What [player] may pay for one fare now. */
++    fun fareSpendable(player: Player): Int = if (player.objectId in questTrips)
++        maxOf(Errands.travelSpendable(player), player.adena - QUEST_TRIP_KEEP).coerceAtLeast(0) else Errands.travelSpendable(player)
++
+     data class Offer(val gatekeeper: Npc,val id: Int,val exit: TeleportLocation,val price: Int)
+ 
+     fun menuIds(npc: Npc): Set<Int> {
+@@ -48,7 +65,7 @@ internal object GatekeeperTravel {
+     }
+ 
+     private fun fareBudgetAt(player: Player,origin: Location): Int {
+-        val normal=Errands.travelSpendable(player)
++        val normal=fareSpendable(player)
+         val topUp=noviceTopUpAt(player,origin) ?: return normal
+         return maxOf(normal,(player.adena.toLong()-topUp.cost).coerceIn(0L,Int.MAX_VALUE.toLong()).toInt())
+     }
+@@ -86,7 +103,7 @@ internal object GatekeeperTravel {
+         if(!active() || player.isDead) return false
+         if(!npc.isVisible || offer.id !in menuIds(npc) || offer.exit.isNoble ||
+                 price(offer.exit)>fareBudgetAt(player,player.location())) return false
+-        if(price(offer.exit)>Errands.travelSpendable(player)) {
++        if(price(offer.exit)>fareSpendable(player)) {
+             val topUp=noviceTopUpAt(player,player.location()) ?: return false
+             if(!NpcTravel.reach(player,topUp.shop.merchant,8000) || player.isDead || !active()) return false
+             val needed=(10-Healing.count(player)).coerceAtLeast(0)
+@@ -100,7 +117,7 @@ internal object GatekeeperTravel {
+         if(!NpcTravel.reach(player,npc,8000) || player.isDead ||
+                 player !is Autobot && !OfflineFarmManager.isActive(player)) return false
+         // Balance, fare and menu can change during the walk. No manual charge or direct teleport.
+-        if(offer.id !in menuIds(npc) || price(offer.exit)>Errands.travelSpendable(player)) return false
++        if(offer.id !in menuIds(npc) || price(offer.exit)>fareSpendable(player)) return false
+         val before=player.adena
+         player.target=npc
+         try {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 310704b..ee2f6f2 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -509,7 +509,10 @@ internal class QuestRunner(private val bot: Player) {
+ 
+     private suspend fun travelTo(destination: Location,radius: Int) = travelTo(destination,radius,null)
+ 
+-    private suspend fun travelTo(destination: Location,radius: Int,npc: Npc?) {
++    private suspend fun travelTo(destination: Location,radius: Int,npc: Npc?) =
++            dev.l2j.autobots.population.economy.GatekeeperTravel.forQuest(bot) { questTravel(destination,radius,npc) }
++
++    private suspend fun questTravel(destination: Location,radius: Int,npc: Npc?) {
+         if (bot.isSitting) {
+             bot.standUp()
+             return
+@@ -523,7 +526,7 @@ internal class QuestRunner(private val bot: Player) {
+             val home=net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getLocationToTeleport(bot,
+                     net.sf.l2j.gameserver.data.xml.MapRegionData.TeleportType.TOWN)
+             routeExitFrom(home,destination,npc)?.takeIf {
+-                it.price<=dev.l2j.autobots.population.economy.Errands.spendable(bot)
++                it.price<=dev.l2j.autobots.population.economy.GatekeeperTravel.fareSpendable(bot)
+             }
+         } else null
+         if(npc!=null && exit==null && homeExit==null && distance(bot.location(),destination)>LONG_TRIP) {
