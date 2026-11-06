@@ -1,0 +1,167 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index 1b4d4bc..4191b0c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -55,6 +55,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         dev.l2j.autobots.population.economy.Gear.useStockedBow(player)
+         handleShots()
+         stopIdleToggles()
++        // A herb heals and vanishes in seconds: grab one before sitting down to rest.
++        if(AutofarmManager.allowsLoot(player) && lootPicker.onUpdateHerbs()) return
+         if(AutofarmManager.allowsRest(player) && rester.onUpdate()) return
+         if(AutofarmManager.allowsLoot(player) && lootPicker.onUpdate()) return
+         targetAppropriateTarget()
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt
+index e6679fb..4bce4ba 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/LootPicker.kt
+@@ -31,9 +31,23 @@ internal class LootPicker(private val player: Player) {
+         return true
+     }
+ 
+-    private fun findClosestLootableItem(): ItemInstance? = player.getKnownTypeInRadius(ItemInstance::class.java, LOOT_RADIUS)
+-            .filter { isLootable(it) }
+-            .minByOrNull { distance(player.x, player.y, player.z, it.x, it.y, it.z) }
++    /** Herbs only, at any health: they heal and buff, and disappear long before a rest is over. */
++    fun onUpdateHerbs(): Boolean {
++        if (player.isDead || player.isSitting) return false
++        if (player.ai.desire.intention == IntentionType.PICK_UP) return true
++        val herb = findClosestLootableItem(herbsOnly = true) ?: return false
++        if (player.isAttackingNow || player.isCastingNow) return false
++        attemptsByItemId.merge(herb.objectId, 1, Int::plus)
++        player.ai.setIntention(IntentionType.PICK_UP, herb)
++        return true
++    }
++
++    // Herbs first: they vanish in seconds, other loot waits on the ground.
++    private fun findClosestLootableItem(herbsOnly: Boolean = false): ItemInstance? = player.getKnownTypeInRadius(ItemInstance::class.java, LOOT_RADIUS)
++            .filter { isLootable(it) && (!herbsOnly || isHerb(it)) }
++            .minWithOrNull(compareBy<ItemInstance>({ if (isHerb(it)) 0 else 1 }, { distance(player.x, player.y, player.z, it.x, it.y, it.z) }))
++
++    private fun isHerb(item: ItemInstance) = item.itemType == net.sf.l2j.gameserver.enums.items.EtcItemType.HERB
+ 
+     private fun isLootable(item: ItemInstance): Boolean = item.isVisible &&
+             attemptsByItemId.getOrDefault(item.objectId, 0) < MAX_PICK_UP_ATTEMPTS &&
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/AutoLifeCommandHandler.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/AutoLifeCommandHandler.kt
+index 394e20b..0f4050c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/AutoLifeCommandHandler.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/AutoLifeCommandHandler.kt
+@@ -16,15 +16,35 @@ internal object AutoLifeCommandHandler {
+         val command = text.trim().lowercase()
+         if (command != COMMAND && !command.startsWith("$COMMAND ")) return false
+         val on = OfflineFarmManager.isOnlineLife(player)
+-        when (command.removePrefix(COMMAND).trim()) {
++        val rest = command.removePrefix(COMMAND).trim()
++        if (rest == "class" || rest.startsWith("class ")) { profession(player, rest.removePrefix("class").trim()); return true }
++        when (rest) {
+             "" -> if (on) stop(player) else start(player)
+             "on" -> if (on) player.sendMessage("Auto life: already ON.") else start(player)
+             "off" -> if (on) stop(player) else player.sendMessage("Auto life: already OFF.")
+-            else -> player.sendMessage("Auto life: $COMMAND toggles, $COMMAND on|off.")
++            else -> player.sendMessage("Auto life: $COMMAND toggles, $COMMAND on|off, $COMMAND class <profession>|none.")
+         }
+         return true
+     }
+ 
++    /** `.autolife class <name>|none`: the branch the life takes at the next class change, kept across logins. */
++    private fun profession(player: Player, name: String) {
++        val choices = ProfessionGoal.choices(player).joinToString(", ") { it.toString() }
++        when {
++            name.isEmpty() -> player.sendMessage("Auto life: profession goal ${ProfessionGoal.of(player)?.toString() ?: "not set (random branch)"}." +
++                    (if (choices.isNotEmpty()) " Choices: $choices." else ""))
++            name == "none" -> { ProfessionGoal.set(player, null); player.sendMessage("Auto life: profession goal cleared; the branch is picked at random.") }
++            else -> {
++                val goal = ProfessionGoal.parse(player, name)
++                if (goal == null) player.sendMessage("Auto life: no such next profession for ${player.classId}." + (if (choices.isNotEmpty()) " Choices: $choices." else ""))
++                else {
++                    ProfessionGoal.set(player, goal)
++                    player.sendMessage("Auto life: profession goal $goal — the offline life and $COMMAND follow this branch.")
++                }
++            }
++        }
++    }
++
+     private fun start(player: Player) {
+         val refused = OfflineFarmManager.startOnlineLife(player)
+         if (refused == null)
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/ProfessionGoal.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/ProfessionGoal.kt
+new file mode 100644
+index 0000000..8e5e383
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/ProfessionGoal.kt
+@@ -0,0 +1,44 @@
++package dev.l2j.autobots.offlinelife
++
++import dev.l2j.autobots.Autobot
++import net.sf.l2j.gameserver.enums.actors.ClassId
++import net.sf.l2j.gameserver.model.actor.Player
++
++/**
++ * The profession an owner wants the character to reach (first or second), kept in the character's memo so the
++ * offline life and `.autolife` follow that branch instead of a random one. Residents have no goal.
++ */
++internal object ProfessionGoal {
++
++    private const val MEMO = "autolife_class"
++
++    fun of(player: Player): ClassId? {
++        if (player is Autobot) return null
++        val name = player.memos.getString(MEMO, null) ?: return null
++        return ClassId.VALUES.firstOrNull { it.name == name }
++    }
++
++    /** The class to aim for among [options] (the next step's targets): the goal itself or its parent on the way. */
++    fun pick(player: Player, options: Collection<ClassId>): ClassId? {
++        val goal = of(player) ?: return null
++        return options.firstOrNull { goal == it || goal.childOf(it) }
++    }
++
++    /** A class of the first or second profession that grows out of the current class; null when none matches. */
++    fun parse(player: Player, text: String): ClassId? {
++        val wanted = text.lowercase().filter { it.isLetter() }
++        return ClassId.VALUES.firstOrNull { c ->
++            (c.level() == 1 || c.level() == 2) && c.childOf(player.classId) &&
++                    (c.name.lowercase().filter { it.isLetter() } == wanted || c.toString().lowercase().filter { it.isLetter() } == wanted)
++        }
++    }
++
++    fun set(player: Player, goal: ClassId?) {
++        if (goal == null) player.memos.remove(MEMO) else player.memos.set(MEMO, goal.name)
++        player.memos.storeMe()
++    }
++
++    /** Next steps from the current class, for the help text. */
++    fun choices(player: Player): List<ClassId> =
++            ClassId.VALUES.filter { (it.level() == 1 || it.level() == 2) && it.childOf(player.classId) }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 6808568..d886a9a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -300,8 +300,11 @@ internal class QuestRunner(private val bot: Player) {
+ 
+     /** The profession whose marks the bot already gathers, else one picked by the population's branch weights. */
+     private fun currentSecond(): SecondClass? {
+-        val targets = SecondClassQuests.forFirstClass(bot.classId).filter { it.to in getSupportedClasses }
++        val owned = dev.l2j.autobots.offlinelife.ProfessionGoal.of(bot)
++        val targets = SecondClassQuests.forFirstClass(bot.classId).filter { it.to in getSupportedClasses || it.to == owned }
+         if (targets.isEmpty()) return null
++        // The owner's goal wins over marks gathered for another branch.
++        dev.l2j.autobots.offlinelife.ProfessionGoal.pick(bot, targets.map { it.to })?.let { t -> return targets.first { it.to == t }.also { chosenSecond = it } }
+         chosenSecond?.takeIf { it in targets }?.let { return it }
+         val view = QuestView(bot, null)
+         val progress = targets.associateWith { t -> t.marks.count { view.has(it) ||
+@@ -314,9 +317,12 @@ internal class QuestRunner(private val bot: Player) {
+ 
+     /** The Path quest under way, else the one for the branch the bot wants (weighted like the free change was). */
+     private fun currentPath(): PathQuest? {
+-        val paths = PathQuests.forBaseClass(bot.classId).filter { it.to in getSupportedClasses }
++        // The owner's chosen branch counts even when no resident plays that class.
++        val owned = dev.l2j.autobots.offlinelife.ProfessionGoal.of(bot)
++        val paths = PathQuests.forBaseClass(bot.classId).filter { it.to in getSupportedClasses || (owned != null && (owned == it.to || owned.childOf(it.to))) }
+         if (paths.isEmpty()) return null
+         paths.firstOrNull { bot.getQuestState(it.questName)?.isStarted == true || QuestView(bot, null).has(it.mark) }?.let { return it }
++        dev.l2j.autobots.offlinelife.ProfessionGoal.pick(bot, paths.map { it.to })?.let { t -> return paths.first { it.to == t }.also { chosen = it } }
+         chosen?.takeIf { it in paths }?.let { return it }
+         // Dwarves split into crafters and spoilers the way the craft economy expects.
+         val target = (if (bot is Autobot && bot.classId == ClassId.DWARVEN_FIGHTER) bot.dwarfBranch().takeIf { b -> paths.any { it.to == b } } else null)
