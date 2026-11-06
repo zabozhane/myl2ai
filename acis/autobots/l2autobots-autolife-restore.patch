@@ -1,0 +1,21 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index 9c1da7c..d524cbd 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -399,6 +399,8 @@ object OfflineFarmManager {
+         farming[id] = player
+         OfflineTravelStore.clear(id)
+         lastTownTripAt[id] = System.currentTimeMillis()
++        // Marked like an offline farmer: a crash or restart brings the character back into the same life.
++        markFarming(id)
+         openJournal(player)
+         LOGGER.info("Offline farm: ${player.name} id=$id starts auto life while connected at=${player.x},${player.y},${player.z}.")
+         beginFarm(player)
+@@ -415,6 +417,7 @@ object OfflineFarmManager {
+             journal.remove(id)
+         } finally {
+             farming.remove(id)
++            unmarkFarming(id)
+         }
+         LOGGER.info("Offline farm: ${player.name} id=$id auto life stopped reason=$reason at=${player.x},${player.y},${player.z}.")
+         return true
