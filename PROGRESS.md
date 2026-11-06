@@ -1,3 +1,15 @@
+## 2026-11-06 — Q227 Reformer: Prophet и Shillien Elder
+
+- `l2autobots-second-class-reformer.patch`: Cleric → Prophet (Pilgrim, Trust, Reformer) и Shillien Oracle →
+  Shillien Elder (Pilgrim, Fate, Reformer) у мастеров своих рас.
+- Q227 по шагам скрипта: 7 дневников с Nameless Revenant (одна точка спавна, респаун 10 минут), каждого сначала
+  бьёт Disrupt Undead, иначе убийство не считается; Aruraune; письма Sla, Katari (инспектор, паломник, беглец-
+  предатель), Kakan (Crimson Werewolf), Nyakuri (Krudel Lizardman), Ramus (5 костей нежити на Говорящем острове).
+- Новое у квестовой охоты: `opener` — скилл, пока скрипт не отметил монстра; `spells` — бой только списком
+  заклинаний (Ice Bolt, Wind Strike, Vampiric Touch), без удара оружием: оборотень от любого другого удара
+  исчезает. Под атакой бой ведёт `QuestRunner.fight`, а не обычное поведение класса.
+- Собрано локально (кроме известной ошибки derby из-за ядра). Стенд не гонялся.
+
 ## 2026-11-06 — новички после вайпа: простои в деревне и повторные смерти
 
 - Основной сервер (4f96808), 2 часа после вайпа: у 160 жителей 1363 раза «no non-excluded hunting spot», у орочьей
