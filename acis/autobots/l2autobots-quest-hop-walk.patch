@@ -1,0 +1,30 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 4215266..6d37733 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -531,12 +531,12 @@ internal class QuestRunner(private val bot: Player) {
+     /** A partial cheap hop is not proof that the quest NPC can actually be reached. */
+     private fun completeExitFrom(origin: Location,destination: Location,npc: Npc?): dev.l2j.autobots.population.economy.GatekeeperTravel.Offer? =
+             dev.l2j.autobots.population.economy.GatekeeperTravel.offersFrom(bot,origin)
+-                    .filter { distance(it.exit,destination)<=12000 &&
++                    .filter { distance(it.exit,destination)<=HOP_WALK &&
+                             distance(origin,destination)-distance(it.exit,destination)>MIN_WALK_SAVED_BY_TELEPORT }
+                     .sortedBy { distance(it.exit,destination)+it.price/10.0 }
+                     .firstOrNull { offer ->
+-                        if(npc!=null) dev.l2j.autobots.population.economy.NpcTravel.plan(bot,npc,offer.exit,12000)!=null
+-                        else dev.l2j.autobots.population.economy.NpcTravel.toPoint(bot,offer.exit,destination,12000)!=null
++                        if(npc!=null) dev.l2j.autobots.population.economy.NpcTravel.plan(bot,npc,offer.exit,HOP_WALK)!=null
++                        else dev.l2j.autobots.population.economy.NpcTravel.toPoint(bot,offer.exit,destination,HOP_WALK)!=null
+                     }
+ 
+     private fun gatekeeperExitFor(destination: Location): TeleportLocation? =
+@@ -641,6 +641,9 @@ internal class QuestRunner(private val bot: Player) {
+         private const val MAX_TRAVEL_FAILURES = 8
+         private const val LONG_TRIP = 100000
+         private const val LONG_HOP_FROM = 30000
++        // A hop is complete when the walk from its exit to the target can be planned; from the field exits that serve
++        // quest areas (Neutral Zone, Plains of Dion) that walk is often 20-30k.
++        private const val HOP_WALK = 30000
+         private const val MIN_LONG_HOP_GAIN = 15000
+         private const val TRAVEL_GRACE_MS = 5 * 60 * 1000L
+         private const val TRAVEL_PAUSE_MS = 20 * 60 * 1000L
