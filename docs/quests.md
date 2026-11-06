@@ -6,7 +6,8 @@
 (`SecondClassChange`), сценарии Q211 Challenger, Q217 Trust, Q222 Duelist и Q223 Champion. Этого хватает для
 Warrior → Gladiator/Warlord. Партиями добавлены Q218 Life, Q219 Fate, Q212 Duty, Q226 Healer и Q220 Glory
 (орки: Destroyer и Tyrant), Q213 Seeker, Q224 Sagittarius и Q225 Searcher (Rogue, Elven Scout, Assassin — шесть
-профессий). Остальные марки добавляются партиями в `SecondClassQuests.kt`.
+профессий). Q214 Scholar, Q228 Magus и Q229 Witchcraft (Sorcerer, Necromancer, Spellsinger, Spellhowler,
+Dark Avenger, Shillien Knight). Q230 Summoner (дуэли призывателей) пока не сделан. Остальные марки добавляются партиями в `SecondClassQuests.kt`.
 
 ## Что есть сейчас
 

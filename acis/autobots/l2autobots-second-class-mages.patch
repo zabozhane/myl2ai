@@ -1,0 +1,182 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index cd23f8f..977d1bc 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -28,9 +28,13 @@ internal object SecondClassQuests {
+     const val MARK_OF_SEEKER = 2673
+     const val MARK_OF_SEARCHER = 2809
+     const val MARK_OF_SAGITTARIUS = 3293
++    const val MARK_OF_SCHOLAR = 2674
++    const val MARK_OF_MAGUS = 2840
++    const val MARK_OF_WITCHCRAFT = 3307
+ 
+     /** Human and elven fighter guild masters of SecondClassChange. */
+     private val HUMAN_ELF_FIGHTER_MASTERS = listOf(30109, 30187, 30689, 30849, 30900, 31965, 32094)
++    private val HUMAN_ELF_MAGE_MASTERS = listOf(30115, 30174, 30176, 30694, 30854, 31996)
+     private val ORC_MASTERS = listOf(30513, 30681, 30704, 30865, 30913, 31288, 31326, 31977)
+     private val DARK_ELF_MASTERS = listOf(31328, 30195, 30699, 30474, 31324, 30862, 30910, 31285, 31331, 31334, 31974, 32096)
+ 
+@@ -48,7 +52,13 @@ internal object SecondClassQuests {
+             SecondClass(ELVEN_SCOUT, PLAINS_WALKER, "PW", listOf(MARK_OF_SEEKER, MARK_OF_LIFE, MARK_OF_SEARCHER), HUMAN_ELF_FIGHTER_MASTERS),
+             SecondClass(ELVEN_SCOUT, SILVER_RANGER, "SR", listOf(MARK_OF_SEEKER, MARK_OF_LIFE, MARK_OF_SAGITTARIUS), HUMAN_ELF_FIGHTER_MASTERS),
+             SecondClass(ASSASSIN, ABYSS_WALKER, "AW", listOf(MARK_OF_SEEKER, MARK_OF_FATE, MARK_OF_SEARCHER), DARK_ELF_MASTERS),
+-            SecondClass(ASSASSIN, PHANTOM_RANGER, "PR", listOf(MARK_OF_SEEKER, MARK_OF_FATE, MARK_OF_SAGITTARIUS), DARK_ELF_MASTERS))
++            SecondClass(ASSASSIN, PHANTOM_RANGER, "PR", listOf(MARK_OF_SEEKER, MARK_OF_FATE, MARK_OF_SAGITTARIUS), DARK_ELF_MASTERS),
++            SecondClass(HUMAN_WIZARD, SORCERER, "HS", listOf(MARK_OF_SCHOLAR, MARK_OF_TRUST, MARK_OF_MAGUS), HUMAN_ELF_MAGE_MASTERS),
++            SecondClass(HUMAN_WIZARD, NECROMANCER, "HN", listOf(MARK_OF_SCHOLAR, MARK_OF_TRUST, MARK_OF_WITCHCRAFT), HUMAN_ELF_MAGE_MASTERS),
++            SecondClass(ELVEN_WIZARD, SPELLSINGER, "EW", listOf(MARK_OF_SCHOLAR, MARK_OF_LIFE, MARK_OF_MAGUS), HUMAN_ELF_MAGE_MASTERS),
++            SecondClass(DARK_WIZARD, SPELLHOWLER, "SH", listOf(MARK_OF_SCHOLAR, MARK_OF_FATE, MARK_OF_MAGUS), DARK_ELF_MASTERS),
++            SecondClass(KNIGHT, DARK_AVENGER, "DA", listOf(MARK_OF_DUTY, MARK_OF_TRUST, MARK_OF_WITCHCRAFT), HUMAN_ELF_FIGHTER_MASTERS),
++            SecondClass(PALUS_KNIGHT, SHILLIEN_KNIGHT, "SK", listOf(MARK_OF_DUTY, MARK_OF_FATE, MARK_OF_WITCHCRAFT), DARK_ELF_MASTERS))
+ 
+     private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
+             path(questName, HUMAN_FIGHTER, HUMAN_FIGHTER, mark, "") { level(minLevel); body() }
+@@ -351,6 +361,110 @@ internal object SecondClassQuests {
+                 cond(18, talk(30291))
+                 cond(19, talk(30690))
+             },
++            // Wizards of three races. Taken from 36 although the script allows 35: Mirien halfway through wants 36.
++            mark("Q214_TrialOfTheScholar", MARK_OF_SCHOLAR, 36) {
++                start(30461, "30461-04.htm")
++                cond(1, talk(30070, "30070-02.htm"))
++                cond(2, talk(30608, "30608-02.htm"))
++                cond(3, talk(30071))
++                cond(4, talk(30608))
++                cond(5, talk(30609, "30609-05.htm"))
++                cond(6, talk(30608, "30608-08.htm"))
++                cond(7, talk(30609, "30609-09.htm"))
++                cond(8, talk(30608))
++                cond(9, talk(30071, "30071-04.htm"))
++                cond(10, talk(30608))
++                cond(11, hunt(20580))
++                cond(12, talk(30608, "30608-14.htm"))
++                cond(13, talk(30070))
++                cond(14, talk(30461))
++                cond(15, talk(30115, "30115-03.htm"))
++                gather({ it.cond == 16 }, Drop(2697, 2, intArrayOf(20235, 20279)), Drop(2695, 5, intArrayOf(20068)),
++                        Drop(2696, 5, intArrayOf(20269)))
++                cond(17, talk(30115))
++                // Below 36 Mirien hands an instruction to come back later; with it the next talk moves on.
++                rule({ it.cond == 18 && it.has(MIRIEN_INSTRUCTION) }, talk(30461))
++                cond(18, talk(30461, "30461-09.htm"))
++                cond(19, talk(30610, "30610-10.htm"))
++                cond(20, talk(30111, "30111-05.htm"))
++                cond(21, talk(30609, "30609-14.htm"))
++                cond(22, talk(30111, "30111-09.htm"))
++                cond(23, talk(30230, "30230-02.htm"))
++                cond(24, talk(30316, "30316-02.htm"))
++                cond(25, talk(30611, "30611-04.htm"))
++                // Four scripture chapters: Raut's is in hand; Valkon's goes through Maria's crystal, Grandis drop the
++                // third, Casian's list the fourth.
++                rule({ it.cond in 26..27 && !it.has(SCRIPTURE_CHAPTER_2) && !it.has(VALKON_REQUEST) && !it.has(CRYSTAL_OF_PURITY_2) },
++                        talk(30103, "30103-04.htm"))
++                rule({ it.cond in 26..27 && !it.has(SCRIPTURE_CHAPTER_2) && it.has(VALKON_REQUEST) }, talk(30608))
++                rule({ it.cond in 26..27 && !it.has(SCRIPTURE_CHAPTER_2) }, talk(30103))
++                rule({ it.cond in 26..27 && !it.has(SCRIPTURE_CHAPTER_3) }, hunt(20554))
++                rule({ it.cond in 26..27 && !it.has(POITAN_NOTES) }, talk(30458))
++                rule({ it.cond in 26..27 }, talk(30612, "30612-04.htm"))
++                gather({ it.cond == 28 }, Drop(2717, 12, intArrayOf(20158)), Drop(2716, 10, intArrayOf(20201)),
++                        Drop(2718, 5, intArrayOf(20552)), Drop(2719, 5, intArrayOf(20567)))
++                cond(29, talk(30612, "30612-07.htm"))
++                cond(30, talk(30610, "30610-14.htm"))
++                cond(31, talk(30461))
++            },
++            // Wizards of three races.
++            mark("Q228_TestOfMagus", MARK_OF_MAGUS, 39) {
++                start(30629, "30629-04.htm")
++                cond(1, talk(30391, "30391-02.htm"))
++                cond(2, talk(30612, "30612-02.htm"))
++                gather({ it.cond == 3 }, Drop(2844, 1, intArrayOf(27095)), Drop(2845, 1, intArrayOf(27096)),
++                        Drop(2846, 1, intArrayOf(27097)))
++                cond(4, talk(30629, "30629-10.htm"))
++                // Four elements: every spirit's charm first, then the hunts, then the tones.
++                rule({ it.cond == 5 && !it.has(TONE_OF_WATER) && !it.has(UNDINE_CHARM) }, talk(30413))
++                rule({ it.cond == 5 && !it.has(TONE_OF_FIRE) && !it.has(SALAMANDER_CHARM) }, talk(30411))
++                rule({ it.cond == 5 && !it.has(TONE_OF_WIND) && !it.has(SYLPH_CHARM) }, talk(30412, "30412-02.htm"))
++                rule({ it.cond == 5 && !it.has(TONE_OF_EARTH) && !it.has(SERPENT_CHARM) }, talk(30409, "30409-03.htm"))
++                gather({ it.cond == 5 && it.has(UNDINE_CHARM) }, Drop(2848, 20, intArrayOf(20231, 20157, 20230, 20232, 20234)))
++                gather({ it.cond == 5 && it.has(SALAMANDER_CHARM) }, Drop(2849, 5, intArrayOf(27098)))
++                gather({ it.cond == 5 && it.has(SYLPH_CHARM) }, Drop(2850, 20, intArrayOf(20145)),
++                        Drop(2851, 10, intArrayOf(20176)), Drop(2852, 10, intArrayOf(20553)))
++                gather({ it.cond == 5 && it.has(SERPENT_CHARM) }, Drop(2853, 10, intArrayOf(20564)),
++                        Drop(2854, 10, intArrayOf(20565)), Drop(2855, 10, intArrayOf(20566)))
++                rule({ it.cond == 5 && it.has(UNDINE_CHARM) }, talk(30413))
++                rule({ it.cond == 5 && it.has(SALAMANDER_CHARM) }, talk(30411))
++                rule({ it.cond == 5 && it.has(SYLPH_CHARM) }, talk(30412))
++                rule({ it.cond == 5 && it.has(SERPENT_CHARM) }, talk(30409))
++                cond(6, talk(30629))
++            },
++            // Human wizards, knights and palus knights.
++            mark("Q229_TestOfWitchcraft", MARK_OF_WITCHCRAFT, 39) {
++                start(30630, "30630-08.htm")
++                cond(1, talk(30098, "30098-03.htm"))
++                // Six Aklantoth gems.
++                rule({ it.cond == 2 && !it.has(AKLANTOTH_GEM_1) && !it.has(IKER_LIST) }, talk(30110, "30110-03.htm"))
++                gather({ it.cond == 2 && it.has(IKER_LIST) }, Drop(3311, 20, intArrayOf(20557)), Drop(3313, 20, intArrayOf(20565)),
++                        Drop(3312, 20, intArrayOf(20577, 20578, 20579, 20580, 20581, 20582)))
++                rule({ it.cond == 2 && it.has(IKER_LIST) }, talk(30110))
++                rule({ it.cond == 2 && !it.has(AKLANTOTH_GEM_2) }, talk(30476, "30476-02.htm"))
++                rule({ it.cond == 2 && !it.has(AKLANTOTH_GEM_3) && !it.has(LARA_MEMO) }, talk(30063, "30063-02.htm"))
++                rule({ it.cond == 2 && !it.has(AKLANTOTH_GEM_3) }, hunt(27099))
++                rule({ it.cond == 2 && !it.has(AKLANTOTH_GEM_6) && !it.has(NESTLE_MEMO) && !it.has(LEOPOLD_JOURNAL) },
++                        talk(30314, "30314-02.htm"))
++                rule({ it.cond == 2 && it.has(NESTLE_MEMO) }, talk(30435, "30435-02.htm"))
++                rule({ it.cond == 2 && it.has(LEOPOLD_JOURNAL) }, hunt(27100))
++                // Orim calls up Zeruel for 2 minutes; the first blow moves the quest on.
++                cond(3, talk(30630, "30630-14.htm"))
++                cond(4, hunt(27101, orElse = talk(30630, "30630-14.htm")))
++                cond(5, talk(30630, "30630-16.htm"))
++                rule({ it.cond == 6 && !it.has(SOULTRAP_CRYSTAL) }, talk(30110, "30110-08.htm"))
++                rule({ it.cond == 6 && !it.has(SWORD_OF_BINDING) && !it.has(SIR_VASPER_LETTER) && !it.has(VADIN_CRUCIFIX) &&
++                        !it.has(VADIN_SANCTIONS) }, talk(30417, "30417-03.htm"))
++                rule({ it.cond == 6 && it.has(SIR_VASPER_LETTER) }, talk(30188))
++                rule({ it.cond == 6 && it.has(VADIN_CRUCIFIX) && it.count(TAMLIN_ORC_AMULET) < 20 }, hunt(20601, 20602))
++                rule({ it.cond == 6 && it.has(VADIN_CRUCIFIX) }, talk(30188))
++                rule({ it.cond == 6 && it.has(VADIN_SANCTIONS) }, talk(30417))
++                cond(7, talk(30630))
++                cond(8, talk(30633, "30633-02.htm"))
++                // Evert calls up Zeruel for 5 minutes; he counts only when slain with the Sword of Binding in hand.
++                cond(9, hunt(27101, weapon = SWORD_OF_BINDING, orElse = talk(30633)))
++                cond(10, talk(30630, "30630-22.htm"))
++            },
+     ).associateBy { it.mark }
+ 
+     /** Second professions of [first] whose three mark quests the bots can play. */
+@@ -362,6 +476,37 @@ internal object SecondClassQuests {
+     private const val BASILIK_PLASMA = 2752
+     private const val HONEY_DEW = 2753
+     private const val STAKATO_ICHOR = 2754
++    // Q214 items checked by the rules.
++    private const val MIRIEN_INSTRUCTION = 2678
++    private const val SCRIPTURE_CHAPTER_2 = 2707
++    private const val SCRIPTURE_CHAPTER_3 = 2708
++    private const val VALKON_REQUEST = 2710
++    private const val POITAN_NOTES = 2711
++    private const val CRYSTAL_OF_PURITY_2 = 2714
++    // Q228 items checked by the rules.
++    private const val TONE_OF_WATER = 2856
++    private const val TONE_OF_FIRE = 2857
++    private const val TONE_OF_WIND = 2858
++    private const val TONE_OF_EARTH = 2859
++    private const val SALAMANDER_CHARM = 2860
++    private const val SYLPH_CHARM = 2861
++    private const val UNDINE_CHARM = 2862
++    private const val SERPENT_CHARM = 2863
++    // Q229 items checked by the rules.
++    private const val IKER_LIST = 3310
++    private const val LARA_MEMO = 3314
++    private const val NESTLE_MEMO = 3315
++    private const val LEOPOLD_JOURNAL = 3316
++    private const val AKLANTOTH_GEM_1 = 3317
++    private const val AKLANTOTH_GEM_2 = 3318
++    private const val AKLANTOTH_GEM_3 = 3319
++    private const val AKLANTOTH_GEM_6 = 3322
++    private const val SIR_VASPER_LETTER = 3327
++    private const val VADIN_CRUCIFIX = 3328
++    private const val TAMLIN_ORC_AMULET = 3329
++    private const val VADIN_SANCTIONS = 3330
++    private const val SOULTRAP_CRYSTAL = 3332
++    private const val SWORD_OF_BINDING = 3029
+     // Q213, Q224, Q225 items checked by the rules.
+     private const val TERRY_ORDER_3 = 2666
+     private const val TERRY_REPORT = 2672
