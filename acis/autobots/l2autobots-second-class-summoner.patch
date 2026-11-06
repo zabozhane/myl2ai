@@ -1,0 +1,271 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index 599a676..e635984 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -292,8 +292,10 @@ internal object Gear {
+ 
+     /** The crystals the bot's summon skill consumes (summoners, necromancers, dark avengers, warsmiths), if any. */
+     fun summonCrystal(bot: Player): Int? {
+-        val owner = bot.getCombatBehavior() as? PetOwner ?: return null
+-        val skill = bot.getSkill(owner.summonInfo.first.skillId) ?: return null
++        // A wizard needs a servitor (and its crystals) for the duels of the Test of the Summoner.
++        val skillId = (bot.getCombatBehavior() as? PetOwner)?.summonInfo?.first?.skillId
++                ?: dev.l2j.autobots.population.quests.SecondClassQuests.duelSummon(bot) ?: return null
++        val skill = bot.getSkill(skillId) ?: return null
+         return skill.itemConsumeId.takeIf { it > 0 }
+     }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index cb84969..6097c2e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -67,6 +67,8 @@ internal class QuestRunner(private val bot: Player) {
+     private var liveTarget: Location? = null
+     // The hunt in progress, for [fight] while the bot is under attack.
+     private var currentHunt: Hunt? = null
++    // The summoner's duel in progress: the bot keeps its hands off the opponent.
++    private var currentDuel: Duel? = null
+ 
+     // The bot's own weapon while it holds a quest weapon (or none).
+     private var ownWeaponObjectId = 0
+@@ -334,6 +336,8 @@ internal class QuestRunner(private val bot: Player) {
+     }
+ 
+     private suspend fun execute(path: PathQuest, action: QuestAction) {
++        if (action !is Hunt) currentHunt = null
++        if (action !is Duel) currentDuel = null
+         when (action) {
+             is Talk -> {
+                 holdWeapon(null)
+@@ -341,6 +345,11 @@ internal class QuestRunner(private val bot: Player) {
+                 talk(path, action)
+             }
+             is Hunt -> hunt(path, action)
++            is Duel -> {
++                holdWeapon(null)
++                setTargets(emptySet())
++                duel(path, action)
++            }
+             is Buy -> {
+                 holdWeapon(null)
+                 setTargets(null)
+@@ -453,6 +462,10 @@ internal class QuestRunner(private val bot: Player) {
+      * @return true when this took the tick.
+      */
+     fun fight(): Boolean {
++        currentDuel?.let { duel ->
++            // Another monster on the bot is fought as usual; the opponent never by the bot itself.
++            return bot.getKnownTypeInRadius(Monster::class.java, NEAR_RADIUS).any { !it.isDead && it.npcId == duel.monsterId } && standBy(duel)
++        }
+         val hunt = currentHunt ?: return false
+         if (hunt.opener.isEmpty() && hunt.spells == null) return false
+         val target = (bot.target as? Monster)?.takeIf { !it.isDead && it.npcId in hunt.monsterIds }
+@@ -477,6 +490,70 @@ internal class QuestRunner(private val bot: Player) {
+         return true
+     }
+ 
++    /**
++     * A summoner's duel: summons its servitor away from the fight, walks to the opponent's spawn and sends the
++     * servitor at it once the opponent is at full health. While they fight the bot only heals its servitor.
++     */
++    private suspend fun duel(path: PathQuest, duel: Duel) {
++        currentDuel = duel
++        if (bot.isCastingNow) return
++        if (!bot.hasServitor() || bot.summon.isDead) {
++            val skill = duel.summons.firstNotNullOfOrNull { bot.getSkill(it) } ?: return giveUp(path, "has no servitor to duel with")
++            if (skill.itemConsumeId > 0 && QuestView(bot, null).count(skill.itemConsumeId) < skill.itemConsume)
++                return giveUp(path, "short of crystals for ${skill.name}")
++            if (bot.isSkillDisabled(skill) || bot.currentMp < skill.mpConsume + skill.mpInitialConsume) return
++            if (bot.isSitting) bot.standUp()
++            bot.target = null
++            bot.useMagicSkill(skill)
++            return
++        }
++        val opponent = bot.getKnownTypeInRadius(Monster::class.java, NEAR_RADIUS)
++                .filter { !it.isDead && it.npcId == duel.monsterId }.minByOrNull { distance(bot, it) }
++        if (opponent == null) {
++            val spawn = QuestWorld.spawnPoints(bot, setOf(duel.monsterId)).firstOrNull()
++                    ?: return giveUp(path, "no ${duel.monsterId} to duel")
++            // The opponent is back in 3 minutes after a lost or won duel.
++            if (distance(bot.location(), spawn) > SPOT_RADIUS) travelTo(spawn, SPOT_RADIUS)
++            return
++        }
++        idleTicks = 0
++        val servitor = bot.summon
++        if (servitor.target === opponent && servitor.ai.desire.intention == IntentionType.ATTACK) {
++            standBy(duel)
++            return
++        }
++        // Only a fresh opponent starts a duel; one somebody else is beating up is left to heal first.
++        if (opponent.currentHp < opponent.maxHp && servitor.target !== opponent) return
++        if (distance(bot, opponent) > DUEL_SEND_RANGE) {
++            travelTo(opponent.location(), DUEL_SEND_RANGE / 2)
++            return
++        }
++        if (bot.ai.desire.intention == IntentionType.ATTACK) bot.ai.setIntention(IntentionType.IDLE)
++        servitor.target = opponent
++        servitor.ai.setIntention(IntentionType.ATTACK, opponent)
++    }
++
++    /**
++     * During a duel the bot never swings: it heals its servitor, else stands by. A duel without a live servitor is
++     * left to the usual fighting (a foul then ends it, which costs less than the bot's death).
++     * @return true when the tick was spent standing by.
++     */
++    private fun standBy(duel: Duel): Boolean {
++        if (!bot.hasServitor() || bot.summon.isDead) return false
++        if (bot.ai.desire.intention == IntentionType.ATTACK) bot.ai.setIntention(IntentionType.IDLE)
++        (bot.target as? Monster)?.takeIf { it.npcId == duel.monsterId }?.let { bot.target = null }
++        if (bot.isCastingNow) return true
++        val servitor = bot.summon
++        if (servitor.currentHp < servitor.maxHp * SERVITOR_HEAL_BELOW) {
++            val heal = bot.getSkill(SERVITOR_HEAL) ?: return true
++            if (!bot.isSkillDisabled(heal) && bot.currentMp >= heal.mpConsume) {
++                bot.target = servitor
++                bot.useMagicSkill(heal)
++            }
++        }
++        return true
++    }
++
+     private fun nextHuntSpot(hunt: Hunt): Location? {
+         huntSpot?.let { return it }
+         val now = System.currentTimeMillis()
+@@ -688,6 +765,7 @@ internal class QuestRunner(private val bot: Player) {
+ 
+     private fun relax() {
+         currentHunt = null
++        currentDuel = null
+         setTargets(null)
+         holdWeapon(null)
+         huntSpot = null
+@@ -749,6 +827,9 @@ internal class QuestRunner(private val bot: Player) {
+         private const val SPAWNED_NPC_RADIUS = 3000
+         private const val NEAR_RADIUS = 1200
+         private const val SPOT_RADIUS = 1200
++        private const val DUEL_SEND_RANGE = 900
++        private const val SERVITOR_HEAL = 1127
++        private const val SERVITOR_HEAL_BELOW = 0.6
+         private const val MIN_WALK_SAVED_BY_TELEPORT = 12000
+         private const val FAR_FROM_TOWN = 20000
+         // About 30 seconds at the default think interval.
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+index 281e9be..be979d1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+@@ -30,6 +30,12 @@ internal class Talk(val npcId: Int, val events: List<String>, val unlessAdvanced
+ internal class Hunt(val monsterIds: Set<Int>, val weapon: Int?, val orElse: QuestAction?, val spoil: Set<Int> = emptySet(),
+                     val opener: Map<Int, Int> = emptyMap(), val spells: List<Int>? = null) : QuestAction()
+ 
++/**
++ * A summoner's duel: the bot's servitor alone fights [monsterId] from full health, the bot never strikes it. [summons]
++ * are the servitor skills, the first one the bot owns is cast.
++ */
++internal class Duel(val monsterId: Int, val summons: List<Int>) : QuestAction()
++
+ /** Walk up to merchant [npcId] and buy what is short of [count] pieces of [itemId], when the quest asks for shop goods. */
+ internal class Buy(val npcId: Int, val itemId: Int, val count: Int) : QuestAction()
+ 
+@@ -45,6 +51,9 @@ internal class QuestView(val player: Player, val state: QuestState?) {
+     }
+ 
+     fun has(vararg itemIds: Int) = itemIds.all { count(it) > 0 }
++
++    /** A quest variable the script keeps besides cond (0 when unset). */
++    fun value(name: String): Int = state?.getInt(name) ?: 0
+ }
+ 
+ /** [need] of [item], dropped by [monsters]. */
+@@ -93,6 +102,11 @@ internal class PathQuestBuilder(private val questName: String, private val from:
+         rules += QuestRule(applies, action)
+     }
+ 
++    /** Like [rule], with the action picked when the rule applies (the closest of several NPCs, say). */
++    fun ruleFor(applies: (QuestView) -> Boolean, actionFor: (QuestView) -> QuestAction) {
++        rules += QuestRule(applies, actionFor)
++    }
++
+     fun talk(npcId: Int, vararg events: String) = Talk(npcId, events.toList())
+ 
+     /** Talk to an NPC the quest spawned near the bot; while it is not around, [orElse] brings it back. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index 2dafca5..0bceaae 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -35,6 +35,7 @@ internal object SecondClassQuests {
+     const val MARK_OF_WARSPIRIT = 2879
+     const val MARK_OF_LORD = 3390
+     const val MARK_OF_REFORMER = 2821
++    const val MARK_OF_SUMMONER = 3336
+ 
+     /** Human and elven fighter guild masters of SecondClassChange. */
+     private val HUMAN_ELF_FIGHTER_MASTERS = listOf(30109, 30187, 30689, 30849, 30900, 31965, 32094)
+@@ -69,7 +70,33 @@ internal object SecondClassQuests {
+             SecondClass(ORC_SHAMAN, WARCRYER, "WC", listOf(MARK_OF_PILGRIM, MARK_OF_GLORY, MARK_OF_WARSPIRIT), ORC_MASTERS),
+             SecondClass(ORC_SHAMAN, OVERLORD, "OL", listOf(MARK_OF_PILGRIM, MARK_OF_GLORY, MARK_OF_LORD), ORC_MASTERS),
+             SecondClass(CLERIC, PROPHET, "PH", listOf(MARK_OF_PILGRIM, MARK_OF_TRUST, MARK_OF_REFORMER), HUMAN_ELF_PRIEST_MASTERS),
+-            SecondClass(SHILLIEN_ORACLE, SHILLIEN_ELDER, "SE", listOf(MARK_OF_PILGRIM, MARK_OF_FATE, MARK_OF_REFORMER), DARK_ELF_MASTERS))
++            SecondClass(SHILLIEN_ORACLE, SHILLIEN_ELDER, "SE", listOf(MARK_OF_PILGRIM, MARK_OF_FATE, MARK_OF_REFORMER), DARK_ELF_MASTERS),
++            SecondClass(HUMAN_WIZARD, WARLOCK, "HW", listOf(MARK_OF_SCHOLAR, MARK_OF_TRUST, MARK_OF_SUMMONER), HUMAN_ELF_MAGE_MASTERS),
++            SecondClass(ELVEN_WIZARD, ELEMENTAL_SUMMONER, "ES", listOf(MARK_OF_SCHOLAR, MARK_OF_LIFE, MARK_OF_SUMMONER), HUMAN_ELF_MAGE_MASTERS),
++            SecondClass(DARK_WIZARD, PHANTOM_SUMMONER, "PS", listOf(MARK_OF_SCHOLAR, MARK_OF_FATE, MARK_OF_SUMMONER), DARK_ELF_MASTERS))
++
++    // Q230: the six summoners, the quest variable each keeps (1 not yet, 2 ready, 3 fighting, 4 lost, 5 foul, 6 won,
++    // 7 handed in) and the opponent spawned next to each.
++    private class Duelist(val npc: Int, val variable: String, val monster: Int)
++    private val DUELISTS = listOf(Duelist(30635, "Almors", 27102), Duelist(30636, "Camoniell", 27103),
++            Duelist(30637, "Belthus", 27104), Duelist(30638, "Basilla", 27105), Duelist(30639, "Celestiel", 27106),
++            Duelist(30640, "Brynthea", 27107))
++    private val DUEL_OPEN = setOf(1, 4, 5)
++    private const val BEGINNER_ARCANA = 3353
++    private val DUEL_SUMMONS = dev.l2j.autobots.behaviors.classes.SummonerBehavior.run { WARLOCK_SUMMONS + ELEMENTAL_SUMMONS + PHANTOM_SUMMONS }
++    private val LARA_LISTS = listOf(
++            arrayOf(Drop(3338, 30, intArrayOf(20555)), Drop(3337, 30, intArrayOf(20577, 20578, 20579, 20580, 20581, 20582))),
++            arrayOf(Drop(3339, 30, intArrayOf(20600)), Drop(3340, 30, intArrayOf(20563))),
++            arrayOf(Drop(3342, 30, intArrayOf(20552)), Drop(3341, 30, intArrayOf(20267, 20268, 20269, 20270, 20271))),
++            arrayOf(Drop(3345, 30, intArrayOf(20553)), Drop(3343, 30, intArrayOf(20192, 20193))),
++            arrayOf(Drop(3344, 30, intArrayOf(20089, 20090)), Drop(3346, 30, intArrayOf(20176))))
++
++    /** The servitor skill a wizard duels with in the Test of the Summoner, while it has no mark yet. */
++    fun duelSummon(bot: net.sf.l2j.gameserver.model.actor.Player): Int? {
++        if (bot.classId != HUMAN_WIZARD && bot.classId != ELVEN_WIZARD && bot.classId != DARK_WIZARD) return null
++        if (bot.level < 37 || QuestView(bot, null).has(MARK_OF_SUMMONER)) return null
++        return DUEL_SUMMONS.firstOrNull { bot.getSkill(it) != null }
++    }
+ 
+     private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
+             path(questName, HUMAN_FIGHTER, HUMAN_FIGHTER, mark, "") { level(minLevel); body() }
+@@ -589,6 +616,33 @@ internal object SecondClassQuests {
+                 cond(19, talk(30667))
+                 cond(20, talk(30666))
+             },
++            // Wizards. Lara hands out one of five hunting lists at random (30 + 30 items), each worth two beginner's
++            // arcana; an arcana buys one duel at one of six summoners, fought by the bot's servitor alone. A lost
++            // duel costs its arcana: the bot fetches another list.
++            mark("Q230_TestOfTheSummoner", MARK_OF_SUMMONER, 39) {
++                start(30634, "30634-08.htm")
++                cond(1, talk(30063, "30063-02.htm"))
++                // A duel under way is fought out first, then the arcana handed in.
++                ruleFor({ view -> DUELISTS.any { view.value(it.variable) in 2..3 } }, { view ->
++                    val d = DUELISTS.first { view.value(it.variable) in 2..3 }
++                    Duel(d.monster, DUEL_SUMMONS)
++                })
++                ruleFor({ view -> DUELISTS.any { view.value(it.variable) == 6 } }, { view ->
++                    talk(DUELISTS.first { view.value(it.variable) == 6 }.npc)
++                })
++                // With an arcana: the closest summoner still to beat (a lost or fouled duel is asked for again).
++                ruleFor({ view -> view.has(BEGINNER_ARCANA) && DUELISTS.any { view.value(it.variable) in DUEL_OPEN } }, { view ->
++                    val open = DUELISTS.filter { view.value(it.variable) in DUEL_OPEN }
++                    val npc = QuestWorld.closestNpc(view.player, open.map { it.npc })?.npcId ?: open.first().npc
++                    talk(npc, "$npc-02.htm", "$npc-04.htm")
++                })
++                for ((index, list) in LARA_LISTS.withIndex()) {
++                    gather({ it.cond in 2..3 && it.value("Lara") == index + 1 }, *list)
++                }
++                rule({ it.cond in 2..3 && it.value("Lara") != 0 }, talk(30063))
++                rule({ it.cond == 3 && it.value("Lara") == 0 && !it.has(BEGINNER_ARCANA) }, talk(30063, "30063-04.htm"))
++                cond(4, talk(30634))
++            },
+     ).associateBy { it.mark }
+ 
+     /** Shop goods a started mark quest still has to hand in: never sold off as surplus on a town trip. */

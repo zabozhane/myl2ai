@@ -11,7 +11,10 @@ Dark Avenger, Shillien Knight). Q215 Pilgrim (Bishop, Elven Elder), Q233 War Spi
 (Overlord; 1000 Bone Arrow покупаются в лавке деревни орков новым шагом `buy`). Q227 Reformer (Prophet, Shillien
 Elder): у охоты есть `opener` (скилл, которым монстра надо ударить до убийства, Disrupt Undead по ревенанту) и
 `spells` (бой только этими заклинаниями, оборотня Кракана нельзя бить ничем другим); под атакой это ведёт
-`QuestRunner.fight`, а не обычный бой. Q230 Summoner (дуэли призывателей) пока не сделан. Гномы ждут крафта: Q216 Guildsman просит скрафтить 7 Journeyman Ring, а Steel, Varnish и Crystal D для них
+`QuestRunner.fight`, а не обычный бой. Q230 Summoner (Warlock, Elemental Summoner, Phantom Summoner): списки Лары
+(случайный из пяти, 30 + 30 предметов, два аркана), дуэли у шести призывателей шагом `Duel` — дерётся только слуга,
+бот лечит его Servitor Heal и не бьёт сам; проигрыш стоит аркана, бот берёт новый список. Волшебники с 37 уровня
+без марки держат кристаллы D для призыва (покупают в лавках гномов, как призыватели). Гномы ждут крафта: Q216 Guildsman просит скрафтить 7 Journeyman Ring, а Steel, Varnish и Crystal D для них
 в магазинах ботов не продаются (только дроп, спойл и крафт). Остальные марки добавляются партиями в `SecondClassQuests.kt`.
 
 ## Что есть сейчас

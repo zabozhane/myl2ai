@@ -1,3 +1,17 @@
+## 2026-11-06 — Q230 Summoner: Warlock, Elemental Summoner, Phantom Summoner
+
+- `l2autobots-second-class-summoner.patch`: Human/Elven/Dark Wizard → Warlock, Elemental Summoner, Phantom Summoner
+  (Scholar + Trust/Life/Fate + Summoner).
+- Q230: у Лары случайный список из пяти (30 + 30 предметов с монстров), за него 2 Beginner's Arcana. Аркан — одна
+  дуэль у одного из шести призывателей (Almors, Camoniell, Belthus, Basilla, Celestiel, Brynthea); бот берёт
+  ближайшего ещё не побеждённого.
+- Новый шаг `Duel`: бот призывает слугу (кот, единорог, тень — что есть), ждёт противника с полным HP у его спавна,
+  посылает слугу, сам только лечит его (Servitor Heal) и цель не бьёт — удар хозяина по скрипту фол. Если слуга
+  умер, бот защищается как обычно (фол дешевле смерти). Проигрыш или фол — новый список у Лары.
+- Призыв тратит кристаллы D; волшебники с 37 уровня без марки теперь хотят их, как призыватели (лавки гномов).
+  Без кристаллов квест откладывается с причиной `short of crystals`.
+- Собрано локально. Стенд не гонялся; сила слуги 35–39 против противников 38–40 уровня под вопросом.
+
 ## 2026-11-06 — Q227 Reformer: Prophet и Shillien Elder
 
 - `l2autobots-second-class-reformer.patch`: Cleric → Prophet (Pilgrim, Trust, Reformer) и Shillien Oracle →
