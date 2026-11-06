@@ -1,0 +1,52 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index bd5e40d..3d557e6 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -478,17 +478,17 @@ internal class QuestRunner(private val bot: Player) {
+         }
+         val far = distance(bot.location(), destination) > MIN_WALK_SAVED_BY_TELEPORT && System.currentTimeMillis() >= walkOnlyUntil
+         val inTown = bot.isInsideZone(ZoneId.TOWN)
+-        val exit = if (far && inTown) completeExitFrom(bot.location(),destination,npc)?.exit else null
++        val exit = if (far && inTown) routeExitFrom(bot.location(),destination,npc)?.exit else null
+         // There is usually no gatekeeper within reach in the field. Quote the actual
+         // town's service first; a current-position lookup would force a map-wide walk.
+         val homeExit=if(far && !inTown) {
+             val home=net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getLocationToTeleport(bot,
+                     net.sf.l2j.gameserver.data.xml.MapRegionData.TeleportType.TOWN)
+-            completeExitFrom(home,destination,npc)?.takeIf {
++            routeExitFrom(home,destination,npc)?.takeIf {
+                 it.price<=dev.l2j.autobots.population.economy.Errands.spendable(bot)
+             }
+         } else null
+-        if(npc!=null && exit==null && homeExit==null && distance(bot.location(),destination)>100000) {
++        if(npc!=null && exit==null && homeExit==null && distance(bot.location(),destination)>LONG_TRIP) {
+             failed("no affordable complete route to ${npc.name}",walk=false)
+             return
+         }
+@@ -514,6 +514,17 @@ internal class QuestRunner(private val bot: Player) {
+         if (walk) walkOnlyUntil = System.currentTimeMillis() + WALK_ONLY_MS
+     }
+ 
++    /**
++     * The hop that reaches the NPC, else, across the map (no gatekeeper goes all the way, e.g. Gludio to Giran), a hop
++     * to the town closest to it: from there the next hop completes the trip. Every such hop brings the bot at least
++     * [MIN_LONG_HOP_GAIN] closer, so it never circles between towns.
++     */
++    private fun routeExitFrom(origin: Location,destination: Location,npc: Npc?): dev.l2j.autobots.population.economy.GatekeeperTravel.Offer? =
++            completeExitFrom(origin,destination,npc) ?: if(distance(origin,destination)<=LONG_TRIP) null else
++                dev.l2j.autobots.population.economy.GatekeeperTravel.offersFrom(bot,origin)
++                        .filter { distance(origin,destination)-distance(it.exit,destination)>MIN_LONG_HOP_GAIN }
++                        .minByOrNull { distance(it.exit,destination)+it.price/10.0 }
++
+     /** A partial cheap hop is not proof that the quest NPC can actually be reached. */
+     private fun completeExitFrom(origin: Location,destination: Location,npc: Npc?): dev.l2j.autobots.population.economy.GatekeeperTravel.Offer? =
+             dev.l2j.autobots.population.economy.GatekeeperTravel.offersFrom(bot,origin)
+@@ -625,6 +636,8 @@ internal class QuestRunner(private val bot: Player) {
+         private const val STUCK_MS = 60 * 60 * 1000L
+         private const val PAUSE_MS = 3 * 60 * 60 * 1000L
+         private const val MAX_TRAVEL_FAILURES = 8
++        private const val LONG_TRIP = 100000
++        private const val MIN_LONG_HOP_GAIN = 30000
+         private const val TRAVEL_GRACE_MS = 5 * 60 * 1000L
+         private const val TRAVEL_PAUSE_MS = 20 * 60 * 1000L
+         private const val WALK_ONLY_MS = 10 * 60 * 1000L
