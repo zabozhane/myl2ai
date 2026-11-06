@@ -1,0 +1,103 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt b/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
+index cd33ce0..d8ad9b7 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/GuideZones.kt
+@@ -24,7 +24,7 @@ internal object GuideZones {
+     private val ALL = setOf(Role.FIGHTER, Role.MAGE, Role.SCOUT)
+     private val SOLO = setOf(Role.FIGHTER, Role.MAGE)
+ 
+-    /** Levels 10–20; below 10 the guides keep everyone at their own newbie village, which distance already does. */
++    /** Levels 10–80; below 10 the guides keep everyone at their own newbie village, which distance already does. */
+     private val zones = listOf(
+             Zone(464, 10..13, ALL),                     // Dark Forest
+             Zone(468, 11..15, ALL),                     // Elven Forest
+@@ -39,6 +39,50 @@ internal object GuideZones {
+             Zone(93, 11..14, ALL),                      // Immortal Plateau, Northern Region
+             Zone(96, 13..16, ALL),                      // Frozen Waterfall
+             Zone(94, 15..18, ALL),                      // Immortal Plateau, Southern Region
++            // 20-80: the solo columns of the guide route (docs/leveling-guides.md 3.1), levels from the server spawns.
++            Zone(90, 20..27, setOf(Role.FIGHTER)),                    // Abandoned Camp
++            Zone(92, 20..27, setOf(Role.SCOUT)),                      // Langk Lizardman Dwelling
++            Zone(1043, 20..26, setOf(Role.FIGHTER)),                  // Ruins of Despair
++            Zone(91, 20..27, setOf(Role.MAGE)),                       // Fellmere Harvesting Grounds
++            Zone(1053, 22..29, setOf(Role.MAGE)),                     // Plains of Dion
++            Zone(88, 23..33, setOf(Role.FIGHTER)),                    // Windawood Manor
++            Zone(1044, 24..32, setOf(Role.FIGHTER)),                  // Orc Barracks
++            Zone(9011, 24..36, setOf(Role.SCOUT)),                    // Wasteland
++            Zone(9091, 24..30, setOf(Role.MAGE)),                     // Crypts of Disgrace
++            Zone(87, 29..40, setOf(Role.SCOUT)),                      // Bee Hive
++            Zone(1052, 29..36, setOf(Role.FIGHTER)),                  // Cruma Tower
++            Zone(1062, 29..35, setOf(Role.FIGHTER)),                  // Breka's Stronghold
++            Zone(9081, 29..38, setOf(Role.MAGE)),                     // Floran Agricultural Area
++            Zone(9010, 30..36, setOf(Role.FIGHTER)),                  // Forgotten Temple
++            Zone(97, 34..43, setOf(Role.SCOUT)),                      // Plains of the Lizardmen
++            Zone(66, 35..41, setOf(Role.MAGE)),                       // Field of Silence
++            Zone(67, 35..43, setOf(Role.MAGE)),                       // Field of Whispers
++            Zone(98, 39..45, setOf(Role.FIGHTER)),                    // Sea of Spores
++            Zone(1116, 39..48, setOf(Role.SCOUT)),                    // Den of Evil
++            Zone(9083, 39..45, setOf(Role.MAGE)),                     // Cruma Tower, 1st Floor
++            Zone(9028, 40..48, setOf(Role.FIGHTER)),                  // Hunters Valley
++            Zone(9122, 40..48, setOf(Role.SCOUT)),                    // Alligator Island
++            Zone(9111, 41..48, setOf(Role.FIGHTER)),                  // Timak Outpost
++            Zone(9021, 44..50, setOf(Role.MAGE)),                     // Plains of Glory
++            Zone(9084, 45..52, setOf(Role.MAGE)),                     // Cruma Tower, 2nd Floor
++            Zone(9110, 45..51, setOf(Role.FIGHTER)),                  // Forest of Evil
++            Zone(1120, 46..51, setOf(Role.SCOUT)),                    // Pavel Ruins
++            Zone(9031, 47..57, setOf(Role.FIGHTER)),                  // Enchanted Valley
++            Zone(1077, 49..56, setOf(Role.FIGHTER)),                  // Outlaw Forest
++            Zone(9030, 50..58, setOf(Role.MAGE)),                     // Forest of Mirrors
++            Zone(84, 53..61, setOf(Role.SCOUT)),                      // Forsaken Plains
++            Zone(1076, 53..57, setOf(Role.MAGE)),                     // Skyshadow Meadow
++            Zone(1104, 59..65, setOf(Role.FIGHTER)),                  // Valley of Saints
++            Zone(9051, 60..68, setOf(Role.FIGHTER)),                  // Valley of Saints
++            Zone(124, 62..71, setOf(Role.MAGE)),                      // Forest of the Dead
++            Zone(1103, 62..71, setOf(Role.FIGHTER)),                  // Wild Beast Pastures
++            Zone(9052, 62..76, setOf(Role.MAGE)),                     // Cursed Village
++            Zone(81, 66..75, setOf(Role.SCOUT)),                      // Blazing Swamp
++            Zone(9050, 68..76, setOf(Role.MAGE)),                     // Forest of the Dead
++            Zone(9063, 68..73, setOf(Role.SCOUT)),                    // Garden of Beasts
++            Zone(1095, 72..78, setOf(Role.MAGE)),                     // Hot Springs
++            Zone(109, 76..80, setOf(Role.FIGHTER, Role.SCOUT)),       // Varka Silenos Stronghold
++            Zone(9071, 79..80, setOf(Role.MAGE)),                     // Forge of the Gods, lower level
+     )
+ 
+     private class Located(val zone: Zone, val at: Location, val aggroLevel: Int)
+@@ -70,23 +114,30 @@ internal object GuideZones {
+     /** True when [location] lies in a zone the guide gives [player] at [level]. */
+     fun recommends(player: Player, level: Int, location: Location): Boolean {
+         val role = role(player)
+-        return located.any { z ->
+-            level in z.zone.levels && role in z.zone.roles && (z.aggroLevel == 0 || z.aggroLevel <= level - SAFE_AGGRO_BELOW) &&
+-                    inside(z.at, location.x, location.y, location.z)
+-        }
++        // Where the guide has no safe zone for the role at this level, any role's zone will do.
++        val anyRole = located.none { active(it, level) && role in it.zone.roles }
++        return located.any { z -> active(z, level) && (anyRole || role in z.zone.roles) && inside(z.at, location.x, location.y, location.z) }
+     }
+ 
++    private fun active(z: Located, level: Int) =
++            level in z.zone.levels && (z.aggroLevel == 0 || z.aggroLevel <= level - safeAggroBelow(level))
++
+     /**
+      * The guides assume a geared player; a resident in starter gear is killed by aggressive monsters of its own
+      * level there (live: Kaboo orcs 10-12 killed elves 11-15 at Elven Forest). Only a spot whose aggressive
+-     * monsters stay [SAFE_AGGRO_BELOW] levels under the hunter, and that is not an aggressive nest, is promoted.
++     * monsters stay [safeAggroBelow] levels under the hunter, and that is not an aggressive nest, is promoted.
+      */
+     fun bonus(player: Player, level: Int, spot: HuntingSpot): Double =
+             if (safeFor(level, spot) && recommends(player, level, spot.location)) BONUS else 1.0
+ 
+-    private const val SAFE_AGGRO_BELOW = 3
+-    private const val SAFE_AGGRO_CROWD = 2
++    /**
++     * Below 20 a resident hunts in starter gear, so aggressive monsters must stay 3 levels under it. From 20 it wears
++     * its grade kit and has a profession, and the guide zones are full of aggressive monsters of their own level:
++     * one level under the hunter and no aggressive nest is enough there.
++     */
++    private fun safeAggroBelow(level: Int) = if (level < 20) 3 else 1
++    private fun safeAggroCrowd(level: Int) = if (level < 20) 2 else 5
+ 
+     fun safeFor(level: Int, spot: HuntingSpot): Boolean =
+-            (spot.dangerLevel == 0 || spot.dangerLevel <= level - SAFE_AGGRO_BELOW) && spot.aggressiveCrowd <= SAFE_AGGRO_CROWD
++            (spot.dangerLevel == 0 || spot.dangerLevel <= level - safeAggroBelow(level)) && spot.aggressiveCrowd <= safeAggroCrowd(level)
+ }
