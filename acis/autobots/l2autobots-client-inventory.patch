@@ -1,0 +1,40 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+index 409999e..293f79c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+@@ -116,6 +116,7 @@ internal object Market {
+ 
+         if (product.hasLimitedStock() && !product.decreaseCount(count)) return false
+         bot.inventory.addItem("Buy", product.itemId, count, bot, shop.merchant)
++        refreshClientInventory(bot)
+         shop.merchant.castle?.let { it.addToTreasury((total * it.taxRate).toInt()) }
+         EconomyLog.log(bot, Deal.NpcBuy, "bought ${count}x ${product.item.name} for $total from NPC ${shop.merchant.name}")
+         return true
+@@ -136,9 +137,19 @@ internal object Market {
+         val earned = total.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+         if (earned > 0) bot.addAdena("Sell", earned, shop.merchant, false)
+         if (sold.isNotEmpty()) EconomyLog.log(bot, Deal.NpcSell, "sold to NPC for $earned: ${sold.joinToString()}")
++        if (sold.isNotEmpty()) refreshClientInventory(bot)
+         return earned
+     }
+ 
++    /**
++     * The trades go straight to the inventory, as a bot needs. A character played by `.autolife` has a real client
++     * watching: send it the whole inventory again, or it keeps sold items and misses bought ones (a second adena stack).
++     */
++    fun refreshClientInventory(player: Player) {
++        if (player is dev.l2j.autobots.Autobot || player.client == null || player.client is dev.l2j.autobots.offlinelife.DetachedClient) return
++        player.sendPacket(net.sf.l2j.gameserver.network.serverpackets.ItemList(player, false))
++    }
++
+     /** A bounded sale for a specific expense; the actor must really reach the merchant. */
+     fun sellPartToNpc(bot: Player,shop: Shop,item: ItemInstance,count: Int): Int {
+         if(count<=0 || count>item.count || !item.isSellable || item.isEquipped || item.ownerId!=bot.objectId ||
+@@ -148,6 +159,7 @@ internal object Market {
+         if(earned<=0 || earned>Int.MAX_VALUE-bot.adena.toLong()) return 0
+         if(bot.inventory.destroyItem("Sell",item.objectId,count,bot,shop.merchant)==null) return 0
+         bot.addAdena("Sell",earned.toInt(),shop.merchant,false)
++        refreshClientInventory(bot)
+         EconomyLog.log(bot,Deal.NpcSell,"sold $count x ${item.itemName} to NPC for $earned to fund hunting travel")
+         return earned.toInt()
+     }
