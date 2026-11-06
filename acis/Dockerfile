@@ -30,6 +30,7 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git apply /patches/acis-382-town-landing.patch \
  && git apply /patches/acis-382-offline-death-context.patch \
  && git apply /patches/acis-382-owner-action.patch \
+ && git apply /patches/acis-382-derby-off.patch \
  && git -C /autobots apply /patches/l2autobots-fixes.patch \
  && git -C /autobots apply /patches/l2autobots-autofarm.patch \
  && git -C /autobots apply /patches/l2autobots-craft.patch \

@@ -1,0 +1,66 @@
+diff --git a/aCis_gameserver/config/server.properties b/aCis_gameserver/config/server.properties
+index 5248ec0..5f6978a 100644
+--- a/aCis_gameserver/config/server.properties
++++ b/aCis_gameserver/config/server.properties
+@@ -81,6 +81,9 @@ AutoLootRaid = False
+ # If False, herbs will drop on ground even if AutoLoot is enabled. False by default.
+ AutoLootHerbs = False
+ 
++# Monster race track (Derby): races, bets and their announcements. False closes the track.
++AllowDerbyTrack = True
++
+ # =================================================================
+ #                          Items Management
+ # =================================================================
+diff --git a/aCis_gameserver/java/net/sf/l2j/Config.java b/aCis_gameserver/java/net/sf/l2j/Config.java
+index f4d2224..50b9c30 100644
+--- a/aCis_gameserver/java/net/sf/l2j/Config.java
++++ b/aCis_gameserver/java/net/sf/l2j/Config.java
+@@ -495,6 +495,7 @@ public final class Config
+ 	public static boolean AUTO_LOOT;
+ 	public static boolean AUTO_LOOT_ADENA;
+ 	public static boolean AUTO_LOOT_HERBS;
++	public static boolean ALLOW_DERBY_TRACK;
+ 	public static boolean AUTO_LOOT_RAID;
+ 	
+ 	/** Items Management */
+@@ -1140,6 +1141,7 @@ public final class Config
+ 		AUTO_LOOT = server.getProperty("AutoLoot", false);
+ 		AUTO_LOOT_ADENA = server.getProperty("AutoLootAdena", false);
+ 		AUTO_LOOT_HERBS = server.getProperty("AutoLootHerbs", false);
++		ALLOW_DERBY_TRACK = server.getProperty("AllowDerbyTrack", true);
+ 		AUTO_LOOT_RAID = server.getProperty("AutoLootRaid", false);
+ 		
+ 		ALLOW_DISCARDITEM = server.getProperty("AllowDiscardItem", true);
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java b/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java
+index 605d6e3..c121c2a 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/GameServer.java
+@@ -261,7 +261,9 @@ public class GameServer
+ 		}
+ 		
+ 		StringUtil.printSection("Events");
+-		DerbyTrackManager.getInstance();
++		// The monster race track can be closed in server.properties (AllowDerbyTrack).
++		if (Config.ALLOW_DERBY_TRACK)
++			DerbyTrackManager.getInstance();
+ 		LotteryManager.getInstance();
+ 		
+ 		if (Config.ALLOW_WEDDING)
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/DerbyTrackManagerNpc.java b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/DerbyTrackManagerNpc.java
+index a5da099..b05496e 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/DerbyTrackManagerNpc.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/DerbyTrackManagerNpc.java
+@@ -41,6 +41,12 @@ public class DerbyTrackManagerNpc extends Folk
+ 	@Override
+ 	public void onBypassFeedback(Player player, String command)
+ 	{
++		if (!net.sf.l2j.Config.ALLOW_DERBY_TRACK)
++		{
++			player.sendMessage("The race track is closed.");
++			return;
++		}
++		
+ 		if (command.startsWith("BuyTicket"))
+ 		{
+ 			if (DerbyTrackManager.getInstance().getCurrentRaceState() != RaceState.ACCEPTING_BETS)
