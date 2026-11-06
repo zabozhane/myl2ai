@@ -1,0 +1,112 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+index eda5106..44fd0ff 100644
+--- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
++++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+@@ -107,14 +107,38 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+         }
+     }    
+     
++    private var sequenceSince = 0L
++    private var sequenceSeen: Any? = null
++    private var sequenceLoggedAt = 0L
++    @Volatile private var thinkingSince = 0L
++
+     internal suspend fun onUpdate() {
+         updateLocation()
+         devDebug()
+         if(controller != null) return
+         
+-        if(activeSequence != null) return
++        if(activeSequence != null) {
++            // A quest bot held by one sequence for minutes says which, so a hung walk shows on the stand.
++            val now = System.currentTimeMillis()
++            if (sequenceSince == 0L || sequenceSeen !== activeSequence) { sequenceSince = now; sequenceSeen = activeSequence }
++            if (life?.quests?.isActive == true && now - sequenceSince > 120_000L && now - sequenceLoggedAt > 60_000L) {
++                sequenceLoggedAt = now
++                println("Autobots life: $name held by ${activeSequence?.javaClass?.simpleName} for ${(now - sequenceSince) / 1000}s" +
++                        " at $x,$y,$z moving=$isMoving sitting=$isSitting")
++            }
++            return
++        }
++        sequenceSince = 0L
+         
+-        if(!isBusyThinking.compareAndSet(false,true)) return
++        if(!isBusyThinking.compareAndSet(false,true)) {
++            val now = System.currentTimeMillis()
++            if (thinkingSince > 0 && now - thinkingSince > 120_000L && now - sequenceLoggedAt > 60_000L) {
++                sequenceLoggedAt = now
++                println("Autobots life: $name still thinking for ${(now - thinkingSince) / 1000}s at $x,$y,$z")
++            }
++            return
++        }
++        thinkingSince = System.currentTimeMillis()
+ 
+         try {
+             handleScheduledLogout()
+@@ -130,6 +154,7 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+             try {
+                 updateLocation()
+             } finally {
++                thinkingSince = 0L
+                 isBusyThinking.set(false)
+             }
+         }
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+index 249427e..d1dc864 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/WalkToSequence.kt
+@@ -86,9 +86,14 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+         var index = 0
+         var lastMoveAt = 0L
+         var replans=0
++        var lastReportAt=started
+         try {
+             while (true) {
+-                if (bot.isDead || bot.isUnderAttack()) return
++                if (bot.isDead || bot.isUnderAttack()) {
++                    if (recoveryRoute != null) println("Autobots movement: ${bot.name} id=${bot.objectId} paused reason=" +
++                            (if (bot.isDead) "dead" else "under_attack") + " at=${bot.x},${bot.y},${bot.z} waypoint=$index/${route.points.size}")
++                    return
++                }
+                 if (!currentGoal()) return
+                 if (arrived()) {
+                     println("Autobots movement: ${bot.name} id=${bot.objectId} arrived to=${destination.x},${destination.y},${destination.z}" +
+@@ -103,6 +108,13 @@ internal class WalkToSequence(override val bot: Player, private val destination:
+                     lastMoveAt = 0L
+                 }
+                 val now = System.currentTimeMillis()
++                // A long one-way route reports where it is twice a minute, so a silent stop shows on the stand.
++                if (recoveryRoute != null && now - lastReportAt >= 30_000L) {
++                    lastReportAt = now
++                    println("Autobots movement: ${bot.name} id=${bot.objectId} progress waypoint=$index/${route.points.size}" +
++                            " next=${point.x},${point.y},${point.z} left=${distance(bot.location(),point).toInt()}" +
++                            " at=${bot.x},${bot.y},${bot.z} moving=${bot.isMoving}")
++                }
+                 watch.observe(index,distance(bot.location(),point),now)?.let { return failed(it) }
+                 if (now-lastMoveAt >= 3000 || !bot.isMoving) {
+                     if (!RouteSafety.safeSegment(bot,bot.location(),point) ||
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index e343526..473932b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -63,6 +63,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private val party = PartyBehavior(bot)
+     internal val quests = QuestRunner(bot)
+     private var underAttackSince = 0L
++    private var questBeatAt = 0L
+     private var underAttackLoggedAt = 0L
+     // A party member's own trip to town: the party goes on hunting meanwhile.
+     private var partyErrand = false
+@@ -570,6 +571,12 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+         // A quest leads the bot its own way; a party keeps hunting together instead.
+         if (!bot.isInParty && quests.onUpdate()) {
++            val now = System.currentTimeMillis()
++            if (now - questBeatAt >= 60_000L) {
++                questBeatAt = now
++                println("Autobots life: ${bot.name} quest tick at ${bot.x},${bot.y},${bot.z} moving=${bot.isMoving}" +
++                        " sitting=${bot.isSitting} target=${bot.target?.name}")
++            }
+             dropSpot()
+             return
+         }

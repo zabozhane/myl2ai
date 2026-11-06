@@ -1,0 +1,48 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 84f8fce..310704b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -494,10 +494,17 @@ internal class QuestRunner(private val bot: Player) {
+ 
+     /** Walks (or takes a gatekeeper) to an NPC until it can talk. @return true once in talking range. */
+     private suspend fun reach(npc: Npc): Boolean {
+-        if (distance(bot,npc)>12000) {
++        // A quest NPC behind a probed one-way route is walked to along it however close the bot already is: the
++        // NPC walk below wants a way back and never finds this one.
++        val viaRoute = distance(bot,npc)>LONG_NPC_WALK && QuestWorld.via(bot,npc.npcId)!=null
++        if (distance(bot,npc)>12000 || viaRoute) {
+             travelTo(npc.location(),800,npc)
+         }
+-        return dev.l2j.autobots.population.economy.NpcTravel.reach(bot,npc)
++        val reached = dev.l2j.autobots.population.economy.NpcTravel.reach(bot,npc)
++        // Counted like any failed trip, so the quest is put aside instead of the bot standing there for good.
++        if (!reached && !bot.isDead && distance(bot,npc)>Npc.INTERACTION_DISTANCE*2)
++            failed("can't reach ${npc.name} from ${bot.x},${bot.y},${bot.z}", walk = false)
++        return reached
+     }
+ 
+     private suspend fun travelTo(destination: Location,radius: Int) = travelTo(destination,radius,null)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
+index 4fb3823..efd2bf5 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
+@@ -31,8 +31,17 @@ internal object QuestWorld {
+             Location(20025, -107532, -3040), Location(20089, -107532, -3040), Location(21049, -107596, -3040))
+     private val viaPoints = mapOf(30649 to MARTANKUS_VALLEY, 30643 to MARTANKUS_VALLEY)
+ 
+-    /** The probed waypoints to [npcId] when the bot stands near where they start (the landing), else null. */
+-    fun via(bot: Player, npcId: Int): List<Location>? = viaPoints[npcId]?.takeIf { distance(bot.location(), it.first()) <= 5000 }
++    /** The probed waypoints to [npcId] from the landing, or the rest of them from where the bot is on the way, else null. */
++    fun via(bot: Player, npcId: Int): List<Location>? {
++        val points = viaPoints[npcId] ?: return null
++        if (distance(bot.location(), points.first()) <= 5000) {
++            // Already on the way (a walk paused by a fight): go on from the closest waypoint, never back over the drop.
++            val (index, nearest) = points.withIndex().minByOrNull { distance(bot.location(), it.value) }!!
++            return if (index > 0 && distance(bot.location(), nearest) <= 1500) points.drop(index) else points
++        }
++        val (index, nearest) = points.withIndex().minByOrNull { distance(bot.location(), it.value) }!!
++        return if (distance(bot.location(), nearest) <= 1500) points.drop(index) else null
++    }
+ 
+     // The spawn is kept rather than its NPC: the NPC object is replaced when it respawns.
+     private class SpawnPoint(val location: Location, val spawn: L2Spawn)

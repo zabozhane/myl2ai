@@ -30,6 +30,7 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git apply /patches/acis-382-town-landing.patch \
  && git apply /patches/acis-382-offline-death-context.patch \
  && git apply /patches/acis-382-owner-action.patch \
+ && git apply /patches/acis-382-derby-off.patch \
  && git -C /autobots apply /patches/l2autobots-fixes.patch \
  && git -C /autobots apply /patches/l2autobots-autofarm.patch \
  && git -C /autobots apply /patches/l2autobots-craft.patch \
@@ -171,6 +172,11 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git -C /autobots apply /patches/l2autobots-quest-oneway-walk.patch \
  && git -C /autobots apply /patches/l2autobots-quest-closeup-walk.patch \
  && git -C /autobots apply /patches/l2autobots-quest-martankus-valley.patch \
+ && git -C /autobots apply /patches/l2autobots-unreachable-attackers.patch \
+ && git -C /autobots apply /patches/l2autobots-walk-stall-log.patch \
+ && git -C /autobots apply /patches/l2autobots-quest-resume-route.patch \
+ && git -C /autobots apply /patches/l2autobots-quest-fares-grey-attackers.patch \
+ && git -C /autobots apply /patches/l2autobots-derby.patch \
  && git -C /autobots apply /patches/l2autobots-novice-crowd-prey-memory.patch
 
 # The Kotlin module is compiled against the aCis Java sources and dropped into aCis_gameserver/lib,
