@@ -1,3 +1,14 @@
+## 2026-11-06 — 2-я профессия, партия 7: Bishop и Elven Elder
+
+- Стенд 5 (main 8afbbb2), 5 мин: Rogue, Elven Scout и Assassin взяли Q213 и дошли до Терри; три волшебника взяли
+  Q214 и прошли до cond 5. Смертей и брошенных квестов нет.
+- `l2autobots-second-class-priests.patch`: Q215 Trial of the Pilgrim (с 36: Анделлия на полпути хочет 36; книга
+  Геральда за 100 000 пропускается, Дорф пускает и без неё). Классы: Cleric → Bishop (Pilgrim, Trust, Healer), Elven
+  Oracle → Elven Elder (Pilgrim, Life, Healer).
+- Отложены как требующие отдельной механики: Q227 Reformer (Prophet, Shillien Elder: нежить и оборотня надо бить
+  определёнными скиллами), Q232 Lord и Q233 War Spirit (орки-шаманы: Lord просит 1000 Bone Arrow), Q230 Summoner
+  (Warlock, Elemental Summoner, Phantom Summoner: дуэли), гномы (Q216, Q221, Q231).
+
 ## 2026-11-06 — 2-я профессия, партия 6: маги и тёмные рыцари
 
 - `l2autobots-second-class-mages.patch`: Q214 Trial of the Scholar (с 36: Мириен на полпути хочет 36), Q228 Test of

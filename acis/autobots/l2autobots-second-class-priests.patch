@@ -1,0 +1,57 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index 977d1bc..bb69f4a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -31,10 +31,12 @@ internal object SecondClassQuests {
+     const val MARK_OF_SCHOLAR = 2674
+     const val MARK_OF_MAGUS = 2840
+     const val MARK_OF_WITCHCRAFT = 3307
++    const val MARK_OF_PILGRIM = 2721
+ 
+     /** Human and elven fighter guild masters of SecondClassChange. */
+     private val HUMAN_ELF_FIGHTER_MASTERS = listOf(30109, 30187, 30689, 30849, 30900, 31965, 32094)
+     private val HUMAN_ELF_MAGE_MASTERS = listOf(30115, 30174, 30176, 30694, 30854, 31996)
++    private val HUMAN_ELF_PRIEST_MASTERS = listOf(30120, 30191, 30857, 30905, 31276, 31321, 31279, 31755, 31968, 32095, 31336)
+     private val ORC_MASTERS = listOf(30513, 30681, 30704, 30865, 30913, 31288, 31326, 31977)
+     private val DARK_ELF_MASTERS = listOf(31328, 30195, 30699, 30474, 31324, 30862, 30910, 31285, 31331, 31334, 31974, 32096)
+ 
+@@ -58,7 +60,9 @@ internal object SecondClassQuests {
+             SecondClass(ELVEN_WIZARD, SPELLSINGER, "EW", listOf(MARK_OF_SCHOLAR, MARK_OF_LIFE, MARK_OF_MAGUS), HUMAN_ELF_MAGE_MASTERS),
+             SecondClass(DARK_WIZARD, SPELLHOWLER, "SH", listOf(MARK_OF_SCHOLAR, MARK_OF_FATE, MARK_OF_MAGUS), DARK_ELF_MASTERS),
+             SecondClass(KNIGHT, DARK_AVENGER, "DA", listOf(MARK_OF_DUTY, MARK_OF_TRUST, MARK_OF_WITCHCRAFT), HUMAN_ELF_FIGHTER_MASTERS),
+-            SecondClass(PALUS_KNIGHT, SHILLIEN_KNIGHT, "SK", listOf(MARK_OF_DUTY, MARK_OF_FATE, MARK_OF_WITCHCRAFT), DARK_ELF_MASTERS))
++            SecondClass(PALUS_KNIGHT, SHILLIEN_KNIGHT, "SK", listOf(MARK_OF_DUTY, MARK_OF_FATE, MARK_OF_WITCHCRAFT), DARK_ELF_MASTERS),
++            SecondClass(CLERIC, BISHOP, "BI", listOf(MARK_OF_PILGRIM, MARK_OF_TRUST, MARK_OF_HEALER), HUMAN_ELF_PRIEST_MASTERS),
++            SecondClass(ELVEN_ORACLE, ELVEN_ELDER, "EE", listOf(MARK_OF_PILGRIM, MARK_OF_LIFE, MARK_OF_HEALER), HUMAN_ELF_PRIEST_MASTERS))
+ 
+     private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
+             path(questName, HUMAN_FIGHTER, HUMAN_FIGHTER, mark, "") { level(minLevel); body() }
+@@ -465,6 +469,28 @@ internal object SecondClassQuests {
+                 cond(9, hunt(27101, weapon = SWORD_OF_BINDING, orElse = talk(30633)))
+                 cond(10, talk(30630, "30630-22.htm"))
+             },
++            // Clerics, oracles and orc shamans. Taken from 36 although the script allows 35: Andellia halfway through
++            // wants 36. Gerald's book (100 000 adena, given back) is skipped: Dorf lets the bot on without it.
++            mark("Q215_TrialOfThePilgrim", MARK_OF_PILGRIM, 36) {
++                start(30648, "30648-04.htm")
++                cond(1, talk(30571))
++                cond(2, talk(30649))
++                cond(3, hunt(27116))
++                cond(4, talk(30649, "30649-04.htm"))
++                cond(5, talk(30571))
++                cond(6, talk(30550))
++                cond(7, talk(30651))
++                cond(8, talk(30117))
++                cond(9, talk(30036))
++                cond(10, hunt(27117))
++                cond(11, talk(30036))
++                cond(12, talk(30362))
++                cond(13, hunt(27118))
++                cond(14, talk(30652, "30652-02.htm"))
++                cond(15, talk(30362, "30362-04.htm"))
++                cond(16, talk(30612))
++                cond(17, talk(30648))
++            },
+     ).associateBy { it.mark }
+ 
+     /** Second professions of [first] whose three mark quests the bots can play. */
