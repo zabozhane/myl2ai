@@ -1,0 +1,33 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index b36c56f..b4fcbd7 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -535,9 +535,17 @@ internal class QuestRunner(private val bot: Player) {
+                                 " to=${destination.x},${destination.y},${destination.z}")
+                 GoToTownSequence(bot,purpose="quest_route") { failed("couldn't get back to town", walk = true) }.execute()
+             }
+-            else -> WalkToSequence(bot, destination, radius) {
+-                failed("stuck walking to ${destination.x},${destination.y} from ${bot.x},${bot.y}", walk = false)
+-            }.execute()
++            else -> {
++                val walk = WalkToSequence(bot, destination, radius) {
++                    failed("stuck walking to ${destination.x},${destination.y} from ${bot.x},${bot.y}", walk = false)
++                }
++                // The walk's own planner keeps to a circle of the straight distance with a small node budget, which
++                // a winding valley defeats (Cave of Trials landing to Martankus, 13k). A quest NPC gets the wider
++                // search the gatekeeper quotes use.
++                val route = if (npc != null && distance(bot.location(), destination) > LONG_NPC_WALK)
++                    dev.l2j.autobots.population.economy.NpcTravel.plan(bot, npc, bot.location(), HOP_WALK) else null
++                (if (route != null) walk.withNpcRoute(route) else walk).execute()
++            }
+         }
+     }
+ 
+@@ -664,6 +672,7 @@ internal class QuestRunner(private val bot: Player) {
+         private const val CLASS_CHANGE_LEVEL = 20
+         private const val CLASS_CHANGE_SCRIPT = "FirstClassChange"
+         private const val SECOND_CLASS_SCRIPT = "SecondClassChange"
++        private const val LONG_NPC_WALK = 6000
+         // The mark quests take players from 35 at the earliest.
+         private const val MARK_START_LEVEL = 35
+         private const val SECOND_CLASS_LEVEL = 40
