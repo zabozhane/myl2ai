@@ -1,0 +1,32 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index ba612ad..b36c56f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -554,13 +554,20 @@ internal class QuestRunner(private val bot: Player) {
+      * hop completes the trip or the walk is short. Only towns, so the bot never flies to a field and gets sent back to
+      * town; every such hop brings it at least [MIN_LONG_HOP_GAIN] closer, so it never circles between towns.
+      */
+-    private fun routeExitFrom(origin: Location,destination: Location,npc: Npc?): dev.l2j.autobots.population.economy.GatekeeperTravel.Offer? =
+-            completeExitFrom(origin,destination,npc) ?: if(distance(origin,destination)<=LONG_HOP_FROM) null else
+-                dev.l2j.autobots.population.economy.GatekeeperTravel.offersFrom(bot,origin)
+-                        .filter { distance(origin,destination)-distance(it.exit,destination)>MIN_LONG_HOP_GAIN &&
+-                                net.sf.l2j.gameserver.data.manager.ZoneManager.getInstance().getZone(it.exit.x,it.exit.y,it.exit.z,
+-                                        net.sf.l2j.gameserver.model.zone.type.TownZone::class.java)!=null }
+-                        .minByOrNull { distance(it.exit,destination)+it.price/10.0 }
++    private fun routeExitFrom(origin: Location,destination: Location,npc: Npc?): dev.l2j.autobots.population.economy.GatekeeperTravel.Offer? {
++        completeExitFrom(origin,destination,npc)?.let { return it }
++        if(distance(origin,destination)<=LONG_HOP_FROM) return null
++        val offers=dev.l2j.autobots.population.economy.GatekeeperTravel.offersFrom(bot,origin)
++                .filter { distance(origin,destination)-distance(it.exit,destination)>MIN_LONG_HOP_GAIN }
++        val zones=net.sf.l2j.gameserver.data.manager.ZoneManager.getInstance()
++        val inTown={ it: dev.l2j.autobots.population.economy.GatekeeperTravel.Offer ->
++            zones.getZone(it.exit.x,it.exit.y,it.exit.z,net.sf.l2j.gameserver.model.zone.type.TownZone::class.java)!=null }
++        return offers.filter(inTown).minByOrNull { distance(it.exit,destination)+it.price/10.0 }
++                // No town on the way either: the field landing next to the goal, as a player would take it (the
++                // Cave of Trials for Martankus from the orc village). The walk from there is planned on arrival,
++                // where the pathfinder starts from the real spot instead of the gatekeeper's quote.
++                ?: offers.filter { distance(it.exit,destination)<=HOP_WALK }.minByOrNull { distance(it.exit,destination)+it.price/10.0 }
++    }
+ 
+     /** A partial cheap hop is not proof that the quest NPC can actually be reached. */
+     private fun completeExitFrom(origin: Location,destination: Location,npc: Npc?): dev.l2j.autobots.population.economy.GatekeeperTravel.Offer? =
