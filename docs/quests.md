@@ -5,7 +5,8 @@
 2-я профессия начата в `acis/autobots/l2autobots-second-class.patch`: механизм трёх марок и смены класса у мастера
 (`SecondClassChange`), сценарии Q211 Challenger, Q217 Trust, Q222 Duelist и Q223 Champion. Этого хватает для
 Warrior → Gladiator/Warlord. Партиями добавлены Q218 Life, Q219 Fate, Q212 Duty, Q226 Healer и Q220 Glory
-(орки: Destroyer и Tyrant). Остальные марки добавляются партиями в `SecondClassQuests.kt`.
+(орки: Destroyer и Tyrant), Q213 Seeker, Q224 Sagittarius и Q225 Searcher (Rogue, Elven Scout, Assassin — шесть
+профессий). Остальные марки добавляются партиями в `SecondClassQuests.kt`.
 
 ## Что есть сейчас
 

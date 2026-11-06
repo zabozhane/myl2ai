@@ -1,0 +1,119 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index a901c0e..cd23f8f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -25,6 +25,9 @@ internal object SecondClassQuests {
+     const val MARK_OF_DUTY = 2633
+     const val MARK_OF_HEALER = 2820
+     const val MARK_OF_GLORY = 3203
++    const val MARK_OF_SEEKER = 2673
++    const val MARK_OF_SEARCHER = 2809
++    const val MARK_OF_SAGITTARIUS = 3293
+ 
+     /** Human and elven fighter guild masters of SecondClassChange. */
+     private val HUMAN_ELF_FIGHTER_MASTERS = listOf(30109, 30187, 30689, 30849, 30900, 31965, 32094)
+@@ -39,7 +42,13 @@ internal object SecondClassQuests {
+             SecondClass(ELVEN_KNIGHT, TEMPLE_KNIGHT, "TK", listOf(MARK_OF_DUTY, MARK_OF_LIFE, MARK_OF_HEALER), HUMAN_ELF_FIGHTER_MASTERS),
+             SecondClass(PALUS_KNIGHT, BLADEDANCER, "BD", listOf(MARK_OF_CHALLENGER, MARK_OF_FATE, MARK_OF_DUELIST), DARK_ELF_MASTERS),
+             SecondClass(ORC_RAIDER, DESTROYER, "DE", listOf(MARK_OF_CHALLENGER, MARK_OF_GLORY, MARK_OF_CHAMPION), ORC_MASTERS),
+-            SecondClass(MONK, TYRANT, "TY", listOf(MARK_OF_CHALLENGER, MARK_OF_GLORY, MARK_OF_DUELIST), ORC_MASTERS))
++            SecondClass(MONK, TYRANT, "TY", listOf(MARK_OF_CHALLENGER, MARK_OF_GLORY, MARK_OF_DUELIST), ORC_MASTERS),
++            SecondClass(ROGUE, TREASURE_HUNTER, "TH", listOf(MARK_OF_SEEKER, MARK_OF_TRUST, MARK_OF_SEARCHER), HUMAN_ELF_FIGHTER_MASTERS),
++            SecondClass(ROGUE, HAWKEYE, "HE", listOf(MARK_OF_SEEKER, MARK_OF_TRUST, MARK_OF_SAGITTARIUS), HUMAN_ELF_FIGHTER_MASTERS),
++            SecondClass(ELVEN_SCOUT, PLAINS_WALKER, "PW", listOf(MARK_OF_SEEKER, MARK_OF_LIFE, MARK_OF_SEARCHER), HUMAN_ELF_FIGHTER_MASTERS),
++            SecondClass(ELVEN_SCOUT, SILVER_RANGER, "SR", listOf(MARK_OF_SEEKER, MARK_OF_LIFE, MARK_OF_SAGITTARIUS), HUMAN_ELF_FIGHTER_MASTERS),
++            SecondClass(ASSASSIN, ABYSS_WALKER, "AW", listOf(MARK_OF_SEEKER, MARK_OF_FATE, MARK_OF_SEARCHER), DARK_ELF_MASTERS),
++            SecondClass(ASSASSIN, PHANTOM_RANGER, "PR", listOf(MARK_OF_SEEKER, MARK_OF_FATE, MARK_OF_SAGITTARIUS), DARK_ELF_MASTERS))
+ 
+     private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
+             path(questName, HUMAN_FIGHTER, HUMAN_FIGHTER, mark, "") { level(minLevel); body() }
+@@ -272,6 +281,76 @@ internal object SecondClassQuests {
+                 cond(10, talk(30571))
+                 cond(11, talk(30565))
+             },
++            // Rogues, scouts and assassins. Taken from 36 although the script allows 35: Terry halfway through wants 36.
++            mark("Q213_TrialOfTheSeeker", MARK_OF_SEEKER, 36) {
++                start(30106, "30106-05.htm")
++                cond(1, talk(30064, "30064-03.htm"))
++                cond(2, hunt(20198))
++                cond(3, talk(30064, "30064-06.htm"))
++                gather({ it.cond == 4 }, Drop(2656, 1, intArrayOf(20080)), Drop(2654, 1, intArrayOf(20211)),
++                        Drop(2657, 1, intArrayOf(20249)), Drop(2655, 1, intArrayOf(20495)))
++                cond(5, talk(30064, "30064-10.htm"))
++                cond(6, talk(30684, "30684-05.htm"))
++                cond(7, talk(30064))
++                cond(8, talk(30684, "30684-11.htm"))
++                cond(9, hunt(20158))
++                cond(10, talk(30684, "30684-15.htm"))
++                cond(11, talk(30715, "30715-02.htm"))
++                cond(12, talk(30526))
++                cond(13, talk(30715, "30715-05.htm"))
++                // Below 36 Terry hands an order to come back later; with it the next talk moves on.
++                rule({ it.cond == 14 && it.has(TERRY_ORDER_3) }, talk(30064))
++                cond(14, talk(30064, "30064-18.htm"))
++                gather({ it.cond == 15 || it.cond == 16 }, Drop(2668, 1, intArrayOf(20234)), Drop(2669, 1, intArrayOf(20270)),
++                        Drop(2670, 1, intArrayOf(20088)), Drop(2671, 1, intArrayOf(20580)))
++                rule({ it.cond == 17 && it.has(TERRY_REPORT) }, talk(30106))
++                cond(17, talk(30064))
++            },
++            // Rogues, scouts and assassins.
++            mark("Q224_TestOfSagittarius", MARK_OF_SAGITTARIUS, 39) {
++                start(30702, "30702-04.htm")
++                cond(1, talk(30626, "30626-03.htm"))
++                cond(2, talk(30653, "30653-02.htm"))
++                cond(3, hunt(20079, 20080, 20081, 20082, 20084, 20086, 20089, 20090))
++                cond(4, talk(30626, "30626-07.htm"))
++                cond(5, talk(30514, "30514-02.htm"))
++                cond(6, hunt(20269, 20270))
++                cond(7, talk(30514))
++                cond(8, talk(30626))
++                cond(9, talk(30717))
++                gather({ it.cond == 10 }, Drop(3303, 1, intArrayOf(20230, 20232, 20234)), Drop(3304, 1, intArrayOf(20233)),
++                        Drop(3302, 1, intArrayOf(20551)), Drop(3305, 1, intArrayOf(20563)))
++                cond(11, talk(30717))
++                cond(12, talk(30626))
++                // Leto lizardmen call up Kadesh, who counts only when slain with the Crescent Moon Bow in hand.
++                cond(13, hunt(27090, weapon = CRESCENT_MOON_BOW, orElse = hunt(20577, 20578, 20579, 20580, 20581, 20582)))
++                cond(14, talk(30626))
++            },
++            // Rogues, scouts, assassins and scavengers.
++            mark("Q225_TestOfTheSearcher", MARK_OF_SEARCHER, 39) {
++                start(30690, "30690-05.htm")
++                cond(1, talk(30291))
++                cond(2, talk(30728))
++                cond(3, hunt(20781, 27092))
++                cond(4, talk(30728))
++                cond(5, hunt(27093))
++                cond(6, talk(30728))
++                cond(7, talk(30291, "30291-07.htm"))
++                cond(8, talk(30729))
++                cond(9, talk(30420, "30420-01a.htm"))
++                cond(10, hunt(20555))
++                cond(11, talk(30420))
++                cond(12, talk(30729))
++                cond(13, talk(30730, "30730-01d.htm"))
++                rule({ it.cond == 14 && !it.has(SOLT_MAP) }, hunt(20551))
++                rule({ it.cond == 14 && !it.has(MAKEL_MAP) }, hunt(20144))
++                cond(15, talk(30730))
++                // The tree calls up the chest for 5 minutes; the key opens it.
++                cond(16, talk(30627, "30627-01a.htm"))
++                cond(17, talkOr(30628, "30628-01a.htm", orElse = talk(30627, "30627-01a.htm")))
++                cond(18, talk(30291))
++                cond(19, talk(30690))
++            },
+     ).associateBy { it.mark }
+ 
+     /** Second professions of [first] whose three mark quests the bots can play. */
+@@ -283,6 +362,12 @@ internal object SecondClassQuests {
+     private const val BASILIK_PLASMA = 2752
+     private const val HONEY_DEW = 2753
+     private const val STAKATO_ICHOR = 2754
++    // Q213, Q224, Q225 items checked by the rules.
++    private const val TERRY_ORDER_3 = 2666
++    private const val TERRY_REPORT = 2672
++    private const val CRESCENT_MOON_BOW = 3028
++    private const val SOLT_MAP = 2803
++    private const val MAKEL_MAP = 2804
+     // Q220 items checked by the rules.
+     private const val SCEPTER_OF_BREKA = 3211
+     private const val SCEPTER_OF_ENKU = 3212
