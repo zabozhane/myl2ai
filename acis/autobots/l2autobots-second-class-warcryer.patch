@@ -1,0 +1,73 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index bb69f4a..1d2d630 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -32,6 +32,7 @@ internal object SecondClassQuests {
+     const val MARK_OF_MAGUS = 2840
+     const val MARK_OF_WITCHCRAFT = 3307
+     const val MARK_OF_PILGRIM = 2721
++    const val MARK_OF_WARSPIRIT = 2879
+ 
+     /** Human and elven fighter guild masters of SecondClassChange. */
+     private val HUMAN_ELF_FIGHTER_MASTERS = listOf(30109, 30187, 30689, 30849, 30900, 31965, 32094)
+@@ -62,7 +63,8 @@ internal object SecondClassQuests {
+             SecondClass(KNIGHT, DARK_AVENGER, "DA", listOf(MARK_OF_DUTY, MARK_OF_TRUST, MARK_OF_WITCHCRAFT), HUMAN_ELF_FIGHTER_MASTERS),
+             SecondClass(PALUS_KNIGHT, SHILLIEN_KNIGHT, "SK", listOf(MARK_OF_DUTY, MARK_OF_FATE, MARK_OF_WITCHCRAFT), DARK_ELF_MASTERS),
+             SecondClass(CLERIC, BISHOP, "BI", listOf(MARK_OF_PILGRIM, MARK_OF_TRUST, MARK_OF_HEALER), HUMAN_ELF_PRIEST_MASTERS),
+-            SecondClass(ELVEN_ORACLE, ELVEN_ELDER, "EE", listOf(MARK_OF_PILGRIM, MARK_OF_LIFE, MARK_OF_HEALER), HUMAN_ELF_PRIEST_MASTERS))
++            SecondClass(ELVEN_ORACLE, ELVEN_ELDER, "EE", listOf(MARK_OF_PILGRIM, MARK_OF_LIFE, MARK_OF_HEALER), HUMAN_ELF_PRIEST_MASTERS),
++            SecondClass(ORC_SHAMAN, WARCRYER, "WC", listOf(MARK_OF_PILGRIM, MARK_OF_GLORY, MARK_OF_WARSPIRIT), ORC_MASTERS))
+ 
+     private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
+             path(questName, HUMAN_FIGHTER, HUMAN_FIGHTER, mark, "") { level(minLevel); body() }
+@@ -491,6 +493,32 @@ internal object SecondClassQuests {
+                 cond(16, talk(30612))
+                 cond(17, talk(30648))
+             },
++            // Orc shamans. Four ancestors' remains, each from its own keeper: totems first, then the hunts, then the
++            // hand-ins.
++            mark("Q233_TestOfTheWarSpirit", MARK_OF_WARSPIRIT, 39) {
++                start(30510, "30510-05.htm")
++                rule({ it.cond == 1 && !it.has(BRAKI_REMAINS_1) && !it.has(ORIM_CONTRACT) }, talk(30630, "30630-04.htm"))
++                rule({ it.cond == 1 && !it.has(KIRUNA_REMAINS_1) && !it.has(RACOY_TOTEM) }, talk(30507, "30507-02.htm"))
++                rule({ it.cond == 1 && !it.has(TONAR_REMAINS_1) && !it.has(PEKIRON_TOTEM) }, talk(30682, "30682-02.htm"))
++                rule({ it.cond == 1 && !it.has(HERMODT_REMAINS_1) && !it.has(MANAKIA_TOTEM) }, talk(30515, "30515-02.htm"))
++                rule({ it.cond == 1 && it.has(RACOY_TOTEM) && !it.has(VIVYAN_LETTER) && !it.has(INSECT_DIAGRAM_BOOK) },
++                        talk(30030, "30030-04.htm"))
++                rule({ it.cond == 1 && it.has(VIVYAN_LETTER) }, talk(30436))
++                gather({ it.cond == 1 && it.has(ORIM_CONTRACT) }, Drop(2884, 10, intArrayOf(20213)), Drop(2885, 10, intArrayOf(20214)),
++                        Drop(2886, 10, intArrayOf(20215)))
++                gather({ it.cond == 1 && it.has(INSECT_DIAGRAM_BOOK) }, *(2905..2909).map { Drop(it, 1, intArrayOf(20089, 20090)) }.toTypedArray())
++                gather({ it.cond == 1 && it.has(PEKIRON_TOTEM) }, *(2889..2893).map { Drop(it, 1, intArrayOf(20581, 20582)) }.toTypedArray())
++                gather({ it.cond == 1 && it.has(MANAKIA_TOTEM) }, Drop(2896, 1, intArrayOf(27108)),
++                        *(2897..2900).map { Drop(it, 1, intArrayOf(20158)) }.toTypedArray())
++                rule({ it.cond == 1 && it.has(ORIM_CONTRACT) }, talk(30630))
++                rule({ it.cond == 1 && it.has(INSECT_DIAGRAM_BOOK) }, talk(30507))
++                rule({ it.cond == 1 && it.has(PEKIRON_TOTEM) }, talk(30682))
++                rule({ it.cond == 1 && it.has(MANAKIA_TOTEM) }, talk(30515))
++                cond(2, talk(30510))
++                cond(3, hunt(20601, 20602))
++                cond(4, talk(30510))
++                cond(5, talk(30649, "30649-03.htm"))
++            },
+     ).associateBy { it.mark }
+ 
+     /** Second professions of [first] whose three mark quests the bots can play. */
+@@ -502,6 +530,17 @@ internal object SecondClassQuests {
+     private const val BASILIK_PLASMA = 2752
+     private const val HONEY_DEW = 2753
+     private const val STAKATO_ICHOR = 2754
++    // Q233 items checked by the rules.
++    private const val ORIM_CONTRACT = 2883
++    private const val BRAKI_REMAINS_1 = 2887
++    private const val PEKIRON_TOTEM = 2888
++    private const val TONAR_REMAINS_1 = 2894
++    private const val MANAKIA_TOTEM = 2895
++    private const val HERMODT_REMAINS_1 = 2901
++    private const val RACOY_TOTEM = 2902
++    private const val VIVYAN_LETTER = 2903
++    private const val INSECT_DIAGRAM_BOOK = 2904
++    private const val KIRUNA_REMAINS_1 = 2910
+     // Q214 items checked by the rules.
+     private const val MIRIEN_INSTRUCTION = 2678
+     private const val SCRIPTURE_CHAPTER_2 = 2707
