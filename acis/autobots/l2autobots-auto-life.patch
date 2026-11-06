@@ -1,0 +1,216 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 1681797..d24fc99 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -94,9 +94,15 @@ object AutobotsManager {
+         return runCatching { OfflineFarmManager.onPlayerReentry(player) }.getOrDefault(false)
+     }
+ 
++    /** Core hook (move, action, attack and skill packets): the connected owner acted by hand. Never breaks the packet. */
++    fun onOwnerAction(player: Player, action: String) {
++        runCatching { OfflineFarmManager.onOwnerAction(player, action) }
++    }
++
+     fun onChat(type: Int, chatter: Player, target: String?, text: String, handler : IChatHandler) : Boolean{
+         if(AutofarmCommandHandler.onChat(chatter, text)) return true
+         if(OfflineFarmCommandHandler.onChat(chatter, text)) return true
++        if(dev.l2j.autobots.offlinelife.AutoLifeCommandHandler.onChat(chatter, text)) return true
+         
+         if(chatter.isGM) {
+             if(chatter.isControllingBot()) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/AutoLifeCommandHandler.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/AutoLifeCommandHandler.kt
+new file mode 100644
+index 0000000..394e20b
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/AutoLifeCommandHandler.kt
+@@ -0,0 +1,41 @@
++package dev.l2j.autobots.offlinelife
++
++import net.sf.l2j.gameserver.model.actor.Player
++
++/**
++ * Chat command `.autolife`: the connected owner hands the character to the same life it lives after a logout
++ * (hunting spots, town errands, gear, lessons, profession) and watches it in the client. Any move, click,
++ * attack or skill by hand gives control back; logging out keeps the life going offline.
++ */
++internal object AutoLifeCommandHandler {
++
++    const val COMMAND = ".autolife"
++
++    /** Chat commands; true when the line was a command and must not reach the chat. */
++    fun onChat(player: Player, text: String): Boolean {
++        val command = text.trim().lowercase()
++        if (command != COMMAND && !command.startsWith("$COMMAND ")) return false
++        val on = OfflineFarmManager.isOnlineLife(player)
++        when (command.removePrefix(COMMAND).trim()) {
++            "" -> if (on) stop(player) else start(player)
++            "on" -> if (on) player.sendMessage("Auto life: already ON.") else start(player)
++            "off" -> if (on) stop(player) else player.sendMessage("Auto life: already OFF.")
++            else -> player.sendMessage("Auto life: $COMMAND toggles, $COMMAND on|off.")
++        }
++        return true
++    }
++
++    private fun start(player: Player) {
++        val refused = OfflineFarmManager.startOnlineLife(player)
++        if (refused == null)
++            player.sendMessage("Auto life: ON — the character plays on its own: hunting spots, town errands, gear, " +
++                    "skills and profession. Move, click or attack yourself to take control back; log out and it goes on offline.")
++        else
++            player.sendMessage("Auto life: can't start ($refused).")
++    }
++
++    private fun stop(player: Player) {
++        OfflineFarmManager.stopOnlineLife(player, "owner_command")
++        player.sendMessage("Auto life: OFF — the character is yours.")
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index bf13ffe..9c1da7c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -76,6 +76,8 @@ object OfflineFarmManager {
+ 
+     /** objectIds being stored and removed right now because the owner logs in (deleteMe re-entrancy guard). */
+     private val reaping = ConcurrentHashMap.newKeySet<Int>()
++    /** Characters whose owner is connected and turned on `.autolife`: the same life, watched in the client. */
++    private val onlineLife = ConcurrentHashMap.newKeySet<Int>()
+ 
+     private enum class Trip { TO_SPOT, TO_TRAINER, BACK_TO_SPOT, TO_TOWN }
+ 
+@@ -304,6 +306,13 @@ object OfflineFarmManager {
+         // deletion call deleteMe on objects that were never online.
+         if (!player.isOnline) return false
+         if (World.getInstance().getPlayer(id) !== player) return false
++        // Auto life was on while connected: the same life just goes on without the client, plans intact.
++        if (onlineLife.remove(id) && farming[id] === player) {
++            player.client = DetachedClient(player)
++            markFarming(id)
++            LOGGER.info("Offline farm: ${player.name} id=$id logs out during auto life; the same life continues offline.")
++            return true
++        }
+         // Offline life is mandatory after a logout (owner's rule): an old offlineEnabled=false or
+         // `.autofarm off` before leaving no longer turns it off. The game's own refusals stay.
+         refusedLogout(player)?.let { reason ->
+@@ -373,40 +382,92 @@ object OfflineFarmManager {
+         return true
+     }
+ 
++    fun isOnlineLife(player: Player): Boolean = onlineLife.contains(player.objectId) && farming[player.objectId] === player
++
++    /**
++     * `.autolife on`: the connected owner hands the character to the offline life (spots, town errands, gear,
++     * lessons, profession) and watches it play. Null when it started, else why not.
++     */
++    fun startOnlineLife(player: Player): String? = synchronized(this) {
++        if (player is Autobot) return "bots live on their own"
++        val id = player.objectId
++        if (serverShuttingDown) return "the server is shutting down"
++        if (farming.containsKey(id)) return if (onlineLife.contains(id)) "already on" else "the character is in offline life"
++        if (player.isDead) return "the character is dead"
++        refusedLogout(player)?.let { return it.replace('_', ' ') }
++        onlineLife.add(id)
++        farming[id] = player
++        OfflineTravelStore.clear(id)
++        lastTownTripAt[id] = System.currentTimeMillis()
++        openJournal(player)
++        LOGGER.info("Offline farm: ${player.name} id=$id starts auto life while connected at=${player.x},${player.y},${player.z}.")
++        beginFarm(player)
++        return null
++    }
++
++    /** `.autolife off`, or the owner acted by hand: the life lets go of the character, which stays where it is. */
++    fun stopOnlineLife(player: Player, reason: String): Boolean = synchronized(this) {
++        val id = player.objectId
++        if (!onlineLife.remove(id) || farming[id] !== player) return false
++        try {
++            forget(player, reason)
++            flushJournal(player, close = true, reason = reason)
++            journal.remove(id)
++        } finally {
++            farming.remove(id)
++        }
++        LOGGER.info("Offline farm: ${player.name} id=$id auto life stopped reason=$reason at=${player.x},${player.y},${player.z}.")
++        return true
++    }
++
++    /** Core hook: the connected owner moved, clicked, attacked or cast by hand; auto life gives control back. */
++    fun onOwnerAction(player: Player, action: String) {
++        if (!onlineLife.contains(player.objectId)) return
++        if (stopOnlineLife(player, "owner_$action"))
++            player.sendMessage("Auto life: OFF — you took control. Type .autolife to hand the character back.")
++    }
++
++    /** Every per-character plan and timer of the life; the farm itself is stopped. The object stays in the world. */
++    private fun forget(player: Player, reason: String) {
++        val id = player.objectId
++        OfflineLife.stop(player)
++        AutofarmManager.quiesce(player)
++        townJobs.remove(id)?.let { kotlinx.coroutines.runBlocking { it.cancel();it.join() } }
++        equipmentCheckedAt.remove(id)
++        OfflineWeaponTrip.forget(id)
++        townCheckedAt.remove(id)
++        townRetryAfter.remove(id)
++        supplyDefense.remove(id)
++        roadDefense.remove(id)
++        lastTownTripAt.remove(id)
++        diedAt.remove(id)
++        questsLoaded.remove(id)
++        huntProgress.remove(id)
++        productiveSince.remove(id)
++        huntedSpot.remove(id)
++        emptySpots.remove(id)
++        pendingHunt.remove(id)
++        retryAfter.remove(id)
++        failedRoundAt.remove(id)
++        huntJourneys.remove(id)
++        recoveredAt.remove(id)
++        clearTravel(id)
++        unreachableSpots.remove(id)
++        trainerFailures.remove(id)
++        lessonCheckedAt.remove(id)
++        statusLoggedAt.remove(id)
++        idleSince.remove(id)
++        lastTargets.remove(id)
++        AutofarmManager.stopFarm(player, reason)
++    }
++
+     @Synchronized
+     private fun reap(player: Player) {
+         val id = player.objectId
+         if (!reaping.add(id)) return
+         try {
+-            OfflineLife.stop(player)
+-            AutofarmManager.quiesce(player)
+-            townJobs.remove(id)?.let { kotlinx.coroutines.runBlocking { it.cancel();it.join() } }
+-            equipmentCheckedAt.remove(id)
+-            OfflineWeaponTrip.forget(id)
+-            townCheckedAt.remove(id)
+-            townRetryAfter.remove(id)
+-            supplyDefense.remove(id)
+-            roadDefense.remove(id)
+-            lastTownTripAt.remove(id)
+-            diedAt.remove(id)
+-            questsLoaded.remove(id)
+-            huntProgress.remove(id)
+-            productiveSince.remove(id)
+-            huntedSpot.remove(id)
+-            emptySpots.remove(id)
+-            pendingHunt.remove(id)
+-            retryAfter.remove(id)
+-            failedRoundAt.remove(id)
+-            huntJourneys.remove(id)
+-            recoveredAt.remove(id)
+-            clearTravel(id)
+-            unreachableSpots.remove(id)
+-            trainerFailures.remove(id)
+-            lessonCheckedAt.remove(id)
+-            statusLoggedAt.remove(id)
+-            idleSince.remove(id)
+-            lastTargets.remove(id)
+-            AutofarmManager.stopFarm(player, "you are back")
++            onlineLife.remove(id)
++            forget(player, "you are back")
+             // The journal period closes before the object leaves: the snapshot is still complete here.
+             flushJournal(player, close = true, reason = "login")
+             journal.remove(id)
