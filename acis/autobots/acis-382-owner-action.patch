@@ -1,0 +1,56 @@
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/Action.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/Action.java
+index b0333a8..3fae633 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/Action.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/Action.java
+@@ -32,6 +32,9 @@ public final class Action extends L2GameClientPacket
+ 		if (player == null)
+ 			return;
+ 		
++		// Auto life gives control back as soon as the connected owner acts by hand.
++		dev.l2j.autobots.AutobotsManager.INSTANCE.onOwnerAction(player, "action");
++		
+ 		if (player.isInObserverMode())
+ 		{
+ 			player.sendPacket(SystemMessageId.OBSERVERS_CANNOT_PARTICIPATE);
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/AttackRequest.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/AttackRequest.java
+index a113caa..247d65a 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/AttackRequest.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/AttackRequest.java
+@@ -33,6 +33,9 @@ public final class AttackRequest extends L2GameClientPacket
+ 		if (activeChar == null)
+ 			return;
+ 		
++		// Auto life gives control back as soon as the connected owner acts by hand.
++		dev.l2j.autobots.AutobotsManager.INSTANCE.onOwnerAction(activeChar, "attack");
++		
+ 		if (activeChar.isInObserverMode())
+ 		{
+ 			activeChar.sendPacket(SystemMessageId.OBSERVERS_CANNOT_PARTICIPATE);
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/MoveBackwardToLocation.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/MoveBackwardToLocation.java
+index 9319f69..bc14e7d 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/MoveBackwardToLocation.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/MoveBackwardToLocation.java
+@@ -56,6 +56,9 @@ public class MoveBackwardToLocation extends L2GameClientPacket
+ 		if (activeChar == null)
+ 			return;
+ 		
++		// Auto life gives control back as soon as the connected owner acts by hand.
++		dev.l2j.autobots.AutobotsManager.INSTANCE.onOwnerAction(activeChar, "move");
++		
+ 		if (activeChar.isOutOfControl())
+ 		{
+ 			activeChar.sendPacket(ActionFailed.STATIC_PACKET);
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestMagicSkillUse.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestMagicSkillUse.java
+index c16df41..2859f57 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestMagicSkillUse.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestMagicSkillUse.java
+@@ -32,6 +32,9 @@ public final class RequestMagicSkillUse extends L2GameClientPacket
+ 		if (player == null)
+ 			return;
+ 		
++		// Auto life gives control back as soon as the connected owner acts by hand.
++		dev.l2j.autobots.AutobotsManager.INSTANCE.onOwnerAction(player, "skill");
++		
+ 		if(AutobotsManager.INSTANCE.onUseMagic(player, _skillId, _ctrlPressed)) {
+             return;
+         }
