@@ -441,3 +441,17 @@ For an existing database, apply addon SQL from the new image before starting the
 Empty-anchor recovery uses owned money and the current gatekeeper's real menu. When no ride is
 affordable, a validated ground route can reach a surface hunting spot. A detour validates every
 actual link rather than requiring an unrelated straight line to the destination to be safe.
+
+- `l2autobots-derby.patch` — Monster Derby Track visits (`population/DerbyVisit.kt`, session activity `Derby`):
+  - Rare session segment for population bots from level 10 with 10k+ adena, outside a party, without a quest,
+    not at night and not right after login, at most once per session. A third of the bots are gamblers (by object id)
+    and pick it more often; grinders hardly ever. `derbyEnabled` / `derbyChancePercent` / `derbyMaxBet` / `derbyLog`.
+  - Free RaceTrack ride from a town gatekeeper (Richlin, Bella, Trisha, Clarissa ...); from a village without it,
+    a paid hop to such a town when it costs at most 1/20 of the spare adena. Real NPC dialogs only: `BuyTicket`
+    pages at the Race Manager, `CalculateWin` for the payout, the manager's ride back to the same gatekeeper.
+  - A bet is 0.3-1% of the spare adena, a 100/500/1000 ticket (cap `derbyMaxBet`). Lane: a favourite for some bots,
+    random for others. The bot sits in the stands until the race ends, cashes the ticket and rides back; one in four
+    stays for a second race. Old tickets are cashed on the next visit. A bot found at the track outside a visit
+    rides back with the manager or, without the ride (inside the track a Scroll of Escape lands at the track), walks
+    out by the Race Track Gatekeeper; 5 failed tries a minute apart and it stays.
+  - Skipped while `AllowDerbyTrack` (server.properties) is off or the Race Managers are not in the world. `Autobots derby summary` every 10 minutes.

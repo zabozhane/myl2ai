@@ -1,0 +1,586 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 6f854e7..09df084 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -69,6 +69,16 @@
+   <raidsEnabled>true</raidsEnabled>
+   <raidChancePercent>100</raidChancePercent>
+   <raidLog>true</raidLog>
++  <!-- Monster Derby Track: now and then a population bot from level 10 with spare adena takes the free gatekeeper ride
++       to the race track, bets on a lane, watches the race, cashes the ticket and rides back. A bet is 0.3-1% of the
++       spare adena: a ticket of 100, 500 or 1000 adena, never above derbyMaxBet. derbyChancePercent scales how often
++       (100 = as designed: a third of the bots like a flutter and go once in several sessions, the rest rarely; never at
++       night, in a party or with a quest; 0 = never). derbyLog prints every bet and payout and a summary every 10 minutes.
++       Needs the race track itself running on the server. -->
++  <derbyEnabled>true</derbyEnabled>
++  <derbyChancePercent>100</derbyChancePercent>
++  <derbyMaxBet>1000</derbyMaxBet>
++  <derbyLog>true</derbyLog>
+   <!-- Social trading (needs economyEnabled): bots swap and sell items to each other and to players through the trade
+        window, lend adena and spare gear to people they trust and get it back. scammerPercent of bots scam (keep loans,
+        sell lookalikes), opportunistPercent keep a valuable loan from someone they barely trust. A loan overdue by
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index be2f5a3..1f9f63a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -58,6 +58,10 @@ internal data class AutobotSettings(
+         @JsonProperty("raidsEnabled") var raidsEnabled: Boolean = true,
+         @JsonProperty("raidChancePercent") var raidChancePercent: Int = 100,
+         @JsonProperty("raidLog") var raidLog: Boolean = true,
++        @JsonProperty("derbyEnabled") var derbyEnabled: Boolean = true,
++        @JsonProperty("derbyChancePercent") var derbyChancePercent: Int = 100,
++        @JsonProperty("derbyMaxBet") var derbyMaxBet: Int = 1000,
++        @JsonProperty("derbyLog") var derbyLog: Boolean = true,
+         @JsonProperty("socialTradeEnabled") var socialTradeEnabled: Boolean = true,
+         @JsonProperty("scammerPercent") var scammerPercent: Int = 5,
+         @JsonProperty("opportunistPercent") var opportunistPercent: Int = 10,
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/DerbyVisit.kt b/src/main/kotlin/dev/l2j/autobots/population/DerbyVisit.kt
+new file mode 100644
+index 0000000..cc03587
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/DerbyVisit.kt
+@@ -0,0 +1,354 @@
++package dev.l2j.autobots.population
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.population.economy.GatekeeperTravel
++import dev.l2j.autobots.population.economy.NpcTravel
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.Config
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.manager.DerbyTrackManager
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Npc
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.DerbyTrackManagerNpc
++import net.sf.l2j.gameserver.model.location.Location
++import java.util.Random
++import java.util.concurrent.atomic.AtomicInteger
++import java.util.concurrent.atomic.AtomicLong
++
++/**
++ * A visit to the Monster Derby Track, like a player who takes a break from hunting to gamble a little: the free ride
++ * from a town gatekeeper (the RaceTrack teleport), one modest bet on a lane at the Race Manager, the race watched from
++ * the stands, the ticket cashed, and the free ride back to the same gatekeeper. Everything goes through the real NPC
++ * dialogs, so adena, tickets and the lane odds (mdt_bets) change exactly as for a player.
++ *
++ * A ticket that could not be cashed (the session ended, the bot was logged out) stays in the bag and is cashed on the
++ * next visit, like a player who finds an old ticket.
++ */
++internal class DerbyVisit(private val bot: Autobot) {
++
++    private enum class Stage { ToTrack, AtTrack, Leave }
++
++    private var stage = Stage.ToTrack
++    private var startedAt = 0L
++    private var betsPlaced = 0
++    private var maxBets = 1
++    private var waitLogged = false
++    private var hopped = false
++
++    /** Starts a new visit; called when the session picks the derby segment. */
++    fun begin() {
++        stage = Stage.ToTrack
++        startedAt = System.currentTimeMillis()
++        betsPlaced = 0
++        // Most players bet once and go; some stay for another race.
++        maxBets = if (Rnd.get(100) < SECOND_BET_PERCENT) 2 else 1
++        waitLogged = false
++        hopped = false
++    }
++
++    /**
++     * One step of the visit. [goToTown] walks or reads a scroll to the nearest town, false when that failed.
++     * @return true when the visit is over (done, or impossible from here) and the next segment should start.
++     */
++    suspend fun update(goToTown: suspend () -> Boolean): Boolean {
++        if (bot.isDead) return false
++        if (bot.isMoving) return false
++        val now = System.currentTimeMillis()
++        if (stage != Stage.Leave && now - startedAt > MAX_VISIT_MS) {
++            note("visit took too long, leaves")
++            stage = Stage.Leave
++        }
++        when (stage) {
++            Stage.ToTrack -> {
++                if (atTrack(bot)) {
++                    stage = Stage.AtTrack
++                    return false
++                }
++                if (!serverRunsDerby()) {
++                    note("the race track is closed on this server")
++                    return true
++                }
++                val gatekeeper = rideGatekeeper(bot)
++                if (gatekeeper == null) {
++                    if (!Errands.atTown(bot)) {
++                        if (goToTown()) return false
++                        note("can't get to town for the race track ride")
++                        return true
++                    }
++                    if (hopped) {
++                        note("no race track ride after the hop")
++                        return true
++                    }
++                    // A village without the ride (the starting ones): a paid hop to a town that has it, if cheap enough.
++                    hopped = true
++                    val offer = GatekeeperTravel.offers(bot)
++                            .filter { offer -> RIDE_TOWNS.any { distance(it, offer.exit) <= RIDE_TOWN_RADIUS } &&
++                                    offer.price <= Errands.spendable(bot) / MAX_HOP_SHARE }
++                            .minByOrNull { it.price }
++                    if (offer == null) {
++                        note("no race track ride from this town")
++                        return true
++                    }
++                    val ok = GatekeeperTravel.travel(bot, offer)
++                    note("hop to a town with the race track ride: ${if (ok) "arrived" else "failed"} paid=${offer.price}")
++                    return !ok
++                }
++                if (bot.isSitting) bot.standUp()
++                if (!NpcTravel.reach(bot, gatekeeper, RIDE_SEARCH_RADIUS) || bot.isDead) {
++                    note("can't reach ${gatekeeper.name} for the race track ride")
++                    return true
++                }
++                talk(gatekeeper, "Quest RaceTrack")
++                if (!atTrack(bot)) {
++                    note("ride from ${gatekeeper.name} failed")
++                    return true
++                }
++                note("rode from ${gatekeeper.name} to the race track")
++                stage = Stage.AtTrack
++                return false
++            }
++            Stage.AtTrack -> {
++                if (!atTrack(bot)) return true
++                if (cashTickets()) return false
++                val derby = DerbyTrackManager.getInstance()
++                val holding = ticketsOf(bot).any { it.enchantLevel >= derby.raceNumber }
++                if (holding) {
++                    watch()
++                    return false
++                }
++                if (betsPlaced >= maxBets) {
++                    stage = Stage.Leave
++                    return false
++                }
++                if (derby.currentRaceState == DerbyTrackManager.RaceState.ACCEPTING_BETS) {
++                    if (!bet()) stage = Stage.Leave
++                    return false
++                }
++                // Ticket sales closed: wait in the stands for the next race, unless that would take the whole visit.
++                if (now - startedAt > MAX_VISIT_MS - NEXT_RACE_WAIT_MS) stage = Stage.Leave else watch()
++                return false
++            }
++            Stage.Leave -> {
++                if (!atTrack(bot)) return true
++                if (bot.isSitting) {
++                    bot.standUp()
++                    return false
++                }
++                // Not left yet: the life loop takes it from here (see LifeBehavior), with its own retry pause.
++                leave()
++                return true
++            }
++        }
++    }
++
++    /**
++     * Back from the track: the Race Manager's free ride to the gatekeeper the bot came from. Without it (a login at the
++     * track after a crash, the ride already used) the bot walks out through the entrance, by the Race Track Gatekeeper,
++     * where a scroll or the road to town works again (inside the track a Scroll of Escape lands back at the track);
++     * the usual life takes it to town from there. @return true when the bot is off the track.
++     */
++    suspend fun leave(): Boolean {
++        if (bot.isSitting) bot.standUp()
++        val manager = nearestManager(bot)
++        val rideBack = bot.getQuestState(RIDE_QUEST)?.isStarted == true
++        if (manager != null && rideBack && NpcTravel.reach(bot, manager, TRACK_RADIUS.toInt()) && !bot.isDead) {
++            talk(manager, "Quest RaceTrack")
++            if (!atTrack(bot)) {
++                note("rode back from the race track")
++                return true
++            }
++        }
++        val entrance = bot.getKnownTypeInRadius(Npc::class.java, TRACK_RADIUS.toInt() * 2)
++                .firstOrNull { it.npcId == TRACK_GATEKEEPER && it.isVisible }
++        if (entrance == null || !NpcTravel.reach(bot, entrance, TRACK_RADIUS.toInt() * 2) || bot.isDead) {
++            note("can't walk out of the race track")
++            return false
++        }
++        note("walked out of the race track")
++        return !atTrack(bot)
++    }
++
++    /** Cashes one ticket of a finished race. @return true when a ticket was handled this tick. */
++    private suspend fun cashTickets(): Boolean {
++        val derby = DerbyTrackManager.getInstance()
++        val ticket = ticketsOf(bot).firstOrNull { it.enchantLevel < derby.raceNumber } ?: return false
++        val manager = nearestManager(bot) ?: return false
++        if (!NpcTravel.reach(bot, manager, TRACK_RADIUS.toInt())) return false
++        val race = ticket.enchantLevel
++        val lane = ticket.customType1
++        val bet = ticket.customType2 * 100L
++        val before = bot.adena.toLong()
++        talk(manager, "CalculateWin ${ticket.objectId}")
++        if (bot.inventory.getItemByObjectId(ticket.objectId) != null) {
++            // No history for that race (an old server wipe): a player would throw such a ticket away.
++            bot.destroyItem("MonsterTrack", ticket, manager, false)
++            note("threw away an old ticket race=$race")
++            return true
++        }
++        val paid = bot.adena.toLong() - before
++        payouts.addAndGet(paid)
++        if (paid >= bet) wins.incrementAndGet()
++        note("cashed ticket race=$race lane=$lane bet=$bet paid=$paid${if (paid >= bet) " WIN" else ""}")
++        return true
++    }
++
++    /** Buys one ticket for the current race. @return false when nothing can be bet. */
++    private suspend fun bet(): Boolean {
++        val tier = betTier(bot)
++        if (tier < 0) {
++            note("too little spare adena to bet")
++            return false
++        }
++        val manager = nearestManager(bot) ?: return false
++        if (!NpcTravel.reach(bot, manager, TRACK_RADIUS.toInt()) || bot.isDead) return false
++        val lane = lane()
++        val price = TICKET_PRICES[tier]
++        val before = bot.adena
++        // The same pages a player clicks through: lane, price, confirmation, purchase.
++        talk(manager, "BuyTicket $lane")
++        talk(manager, "BuyTicket ${11 + tier}")
++        talk(manager, "BuyTicket 20")
++        talk(manager, "BuyTicket 21")
++        val paid = before - bot.adena
++        if (paid <= 0) {
++            note("ticket purchase refused lane=$lane price=$price")
++            return false
++        }
++        betsPlaced++
++        bets.incrementAndGet()
++        staked.addAndGet(paid.toLong())
++        waitLogged = false
++        note("bet race=${DerbyTrackManager.getInstance().raceNumber} lane=$lane paid=$paid adenaLeft=${bot.adena}")
++        return true
++    }
++
++    /** In the stands: stays out of the way and sits, like a player waiting for the start. */
++    private fun watch() {
++        if (!waitLogged) {
++            waitLogged = true
++            val derby = DerbyTrackManager.getInstance()
++            note("watches race=${derby.raceNumber} state=${derby.currentRaceState}")
++        }
++        if (!bot.isSitting) bot.sitDown()
++    }
++
++    // A favourite lane for some, a random pick for others: players have their superstitions.
++    private fun lane(): Int {
++        val random = Random(bot.objectId * LANE_SEED)
++        val favourite = random.nextInt(LANES) + 1
++        return if (random.nextInt(100) < FAVOURITE_LANE_PERCENT) favourite else Rnd.get(1, LANES)
++    }
++
++    private fun talk(npc: Npc, command: String) {
++        bot.target = npc
++        try {
++            npc.onBypassFeedback(bot, command)
++            if (bot.isTeleporting) bot.onTeleported()
++        } finally {
++            if (bot.target === npc) bot.target = null
++        }
++    }
++
++    private fun note(message: String) {
++        if (AutobotData.settings.derbyLog) println("Autobots derby: ${bot.name} id=${bot.objectId} lv ${bot.level}: $message")
++    }
++
++    companion object {
++        /** Monster Race Ticket - Single. */
++        const val TICKET = 4443
++        private const val RIDE_QUEST = "RaceTrack"
++        // Race Track Gatekeeper at the entrance, outside the track zone.
++        private const val TRACK_GATEKEEPER = 31210
++        // Town gatekeepers with the free RaceTrack ride (scripts/teleports/RaceTrack.java).
++        private val RIDE_GATEKEEPERS = setOf(30320, 30256, 30059, 30080, 30899, 30177, 30848, 30233, 31320, 31275, 31964)
++        // Where those gatekeepers stand (the ride back lands there too).
++        private val RIDE_TOWNS = listOf(Location(-80826, 149775, -3043), Location(-12672, 122776, -3116),
++                Location(15670, 142983, -2705), Location(83400, 147943, -3404), Location(111409, 219364, -3545),
++                Location(82956, 53162, -1495), Location(146331, 25762, -2018), Location(116819, 76994, -2714),
++                Location(43835, -47749, -792), Location(147930, -55281, -2728), Location(87386, -143246, -1293))
++        private const val RIDE_TOWN_RADIUS = 3000.0
++        // A hop may cost at most this part of the spare adena: the bet is the point, not the trip.
++        private const val MAX_HOP_SHARE = 20
++        private val TICKET_PRICES = intArrayOf(100, 500, 1000, 5000, 10000, 20000, 50000, 100000)
++        private val TRACK_LANDING = Location(12661, 181687, -3560)
++        private const val LANDING_RADIUS = 300.0
++        private const val TRACK_RADIUS = 2500.0
++        private const val RIDE_SEARCH_RADIUS = 8000
++        private const val LANES = 8
++        private const val LANE_SEED = 1_000_211L
++        private const val FAVOURITE_LANE_PERCENT = 40
++        private const val SECOND_BET_PERCENT = 25
++        // A race takes 20 minutes, bets close at 15: the visit covers one race and the wait for it.
++        private const val MAX_VISIT_MS = 40 * 60_000L
++        private const val NEXT_RACE_WAIT_MS = 25 * 60_000L
++        private const val GAMBLER_SEED = 1_000_117L
++        private const val GAMBLER_PERCENT = 35
++        const val MIN_LEVEL = 10
++        private const val MIN_ADENA = 10_000
++        // A bet is 0.3-1% of the spare adena: pocket money, not savings.
++        private const val MIN_STAKE_PERMILLE = 3
++        private const val MAX_STAKE_PERMILLE = 10
++
++        private val bets = AtomicInteger()
++        private val wins = AtomicInteger()
++        private val staked = AtomicLong()
++        private val payouts = AtomicLong()
++        @Volatile private var managersSeenAt = 0L
++        @Volatile private var managersSeen = false
++
++        val enabled get() = AutobotData.settings.derbyEnabled && AutobotData.settings.derbyChancePercent > 0
++
++        /** Some players like a flutter, most rarely go: a stable trait by the object id. */
++        fun isGambler(bot: Player): Boolean = Random(bot.objectId * GAMBLER_SEED + 3L).nextInt(100) < GAMBLER_PERCENT
++
++        /** The track is open (AllowDerbyTrack in server.properties) and its Race Managers stand in the world. */
++        fun serverRunsDerby(): Boolean {
++            if (!Config.ALLOW_DERBY_TRACK) return false
++            val now = System.currentTimeMillis()
++            if (now - managersSeenAt > 60_000L) {
++                managersSeen = World.getInstance().objects.any { it is DerbyTrackManagerNpc && it.isVisible }
++                managersSeenAt = now
++            }
++            return managersSeen
++        }
++
++        /** Whether the session may offer a derby visit to this bot now. */
++        fun canVisit(bot: Autobot): Boolean = enabled && !bot.isInParty && bot.level >= MIN_LEVEL &&
++                bot.adena >= MIN_ADENA && betTier(bot, MAX_STAKE_PERMILLE) >= 0 && serverRunsDerby()
++
++        fun atTrack(bot: Player): Boolean = bot.isInsideZone(ZoneId.MONSTER_TRACK) || atTrack(bot.location())
++
++        // The zone flag can lag a teleport by a tick: the landing point counts too.
++        fun atTrack(at: Location): Boolean =
++                distance(at, TRACK_LANDING) <= LANDING_RADIUS && kotlin.math.abs(at.z - TRACK_LANDING.z) < 300
++
++        /** The highest ticket within 0.3-1% of the spare adena and the configured cap; -1 when even 100 is too much. */
++        fun betTier(bot: Player, permille: Int = Rnd.get(MIN_STAKE_PERMILLE, MAX_STAKE_PERMILLE)): Int {
++            val spare = Errands.spendable(bot).toLong()
++            val budget = minOf(spare * permille / 1000, AutobotData.settings.derbyMaxBet.toLong())
++            return TICKET_PRICES.indices.lastOrNull { TICKET_PRICES[it] <= budget } ?: -1
++        }
++
++        fun ticketsOf(bot: Player) = bot.inventory.getAllItemsByItemId(TICKET).toList()
++
++        private fun rideGatekeeper(bot: Player): Npc? = bot.getKnownTypeInRadius(Npc::class.java, RIDE_SEARCH_RADIUS)
++                .filter { it.npcId in RIDE_GATEKEEPERS && it.isVisible }
++                .minByOrNull { distance(bot, it) }
++
++        private fun nearestManager(bot: Player): Npc? = bot.getKnownTypeInRadius(DerbyTrackManagerNpc::class.java, TRACK_RADIUS.toInt())
++                .filter { it.isVisible }
++                .minByOrNull { distance(bot, it) }
++
++        /** One line every 10 minutes: how the population gambles. */
++        fun summary(online: Collection<Autobot>) {
++            if (!enabled || !AutobotData.settings.derbyLog) return
++            println("Autobots derby summary: atTrack=${online.count { atTrack(it) }} bets=${bets.getAndSet(0)} " +
++                    "wins=${wins.getAndSet(0)} staked=${staked.getAndSet(0)} paid=${payouts.getAndSet(0)}")
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 473932b..4ebee5b 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -62,6 +62,9 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private val fitness = Fitness(bot)
+     private val party = PartyBehavior(bot)
+     internal val quests = QuestRunner(bot)
++    private val derby = DerbyVisit(bot)
++    private var derbyLeaveRetryAt = 0L
++    private var derbyLeaveFailures = 0
+     private var underAttackSince = 0L
+     private var questBeatAt = 0L
+     private var underAttackLoggedAt = 0L
+@@ -204,7 +207,20 @@ internal class LifeBehavior(private val bot: Autobot) {
+         // A fight in progress is finished first, like a player who kills the mob before leaving the keyboard.
+         if (session.isOver() && (bot.target == null || session.activity == null)) nextSegment()
+ 
++        // Still at the race track after the visit (a segment cut short, a login there): back to town first.
++        if (session.activity != SessionPlan.Activity.Derby && DerbyVisit.atTrack(bot)) {
++            val now = System.currentTimeMillis()
++            if (!bot.isMoving && derbyLeaveFailures < MAX_DERBY_LEAVE_FAILURES && now >= derbyLeaveRetryAt) {
++                if (derby.leave()) derbyLeaveFailures = 0
++                else if (++derbyLeaveFailures >= MAX_DERBY_LEAVE_FAILURES) println("Autobots derby: ${bot.name} id=${bot.objectId} can't leave the race track, stays")
++                derbyLeaveRetryAt = now + DERBY_LEAVE_RETRY_MS
++            }
++            // Stuck there after all tries: the life goes on from the track (its next trip to town takes it out).
++            if (derbyLeaveFailures < MAX_DERBY_LEAVE_FAILURES) return
++        }
++
+         when (session.activity) {
++            SessionPlan.Activity.Derby -> if (derby.update { goToTown(HOME_MAX_WALK, "derby") }) nextSegment(reason = "derby visit over")
+             SessionPlan.Activity.Afk -> afk()
+             SessionPlan.Activity.Trade -> trade()
+             SessionPlan.Activity.Home -> goHome()
+@@ -215,17 +231,22 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private fun context() = SessionPlan.Context(
+             hasGoal = quests.hasBusiness(),
+             canTrade = economy && StoreKeeper.hasBusiness(bot),
+-            isCrafter = CraftBook.isCrafter(bot))
++            isCrafter = CraftBook.isCrafter(bot),
++            canBet = DerbyVisit.canVisit(bot))
+ 
+     /** Ends the current segment and sets the bot up for the next one. */
+     private fun nextSegment(canTrade: Boolean? = null, reason: String = "segment over") {
+         val previous = session.activity
+-        val context = context().let { if (canTrade == null) it else SessionPlan.Context(it.hasGoal, canTrade, it.isCrafter) }
++        val context = context().let { if (canTrade == null) it else SessionPlan.Context(it.hasGoal, canTrade, it.isCrafter, it.canBet) }
+         val next = session.next(context, reason)
+         if(previous!=next && next==SessionPlan.Activity.Hunt) huntJourney.reset()
+         if (next != SessionPlan.Activity.Trade) StoreKeeper.close(bot)
+         if ((previous == SessionPlan.Activity.Afk || previous == SessionPlan.Activity.Home) && bot.isSitting) bot.standUp()
+         afkRetreats = 0
++        if (next == SessionPlan.Activity.Derby) {
++            dropSpot()
++            derby.begin()
++        }
+         // A trader leaves the hunting spot to others; a break keeps it.
+         if (next == SessionPlan.Activity.Trade) {
+             dropSpot()
+@@ -869,6 +890,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+         private const val HOME_EXTRA_MINUTES = 15
+         private const val HOME_MAX_WALK = 40000
+         private const val HOME_RETRY_MS = 60_000L
++        private const val DERBY_LEAVE_RETRY_MS = 60_000L
++        private const val MAX_DERBY_LEAVE_FAILURES = 5
+         private const val MAX_HOME_FAILURES = 3
+         private const val AFK_SAFE_RADIUS = 700
+         private const val AFK_RETREAT = 800
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index 0bf1d40..c3336c0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -109,6 +109,7 @@ internal object PopulationManager {
+             if ((ticks + 1) % SUMMARY_EVERY_TICKS == 0) {
+                 GroupFinder.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 SessionPlan.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
++                DerbyVisit.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 RaidLog.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 dev.l2j.autobots.population.group.StaticParties.summary()
+                 dev.l2j.autobots.population.llm.Llm.summary()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt b/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
+index fe2d7df..9b26881 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
+@@ -18,13 +18,13 @@ import java.util.Random
+  */
+ internal class SessionPlan(private val bot: Autobot) {
+ 
+-    enum class Activity { Hunt, Afk, Trade, Home }
++    enum class Activity { Hunt, Afk, Trade, Home, Derby }
+ 
+     /** How a player likes to spend a session. Crafters are traders; the others are fixed by the object id. */
+     enum class Style { Grinder, Casual, Trader }
+ 
+     /** What the bot knows when it picks the next segment. */
+-    class Context(val hasGoal: Boolean, val canTrade: Boolean, val isCrafter: Boolean)
++    class Context(val hasGoal: Boolean, val canTrade: Boolean, val isCrafter: Boolean, val canBet: Boolean = false)
+ 
+     var activity: Activity? = null
+         private set
+@@ -33,6 +33,8 @@ internal class SessionPlan(private val bot: Autobot) {
+     private var huntingSince = 0L
+     // An event that ended the current segment early, and how it shapes the next choice.
+     private var cause: Cause? = null
++    // Derby visits this session: one is plenty for most players.
++    private var derbyVisits = 0
+ 
+     private enum class Cause(val text: String) { Death("died"), LevelUp("new level"), TownTrip("goods to sell after a town trip") }
+ 
+@@ -104,6 +106,7 @@ internal class SessionPlan(private val bot: Autobot) {
+                 Activity.Afk -> "take a break away from the keyboard for a few minutes"
+                 Activity.Trade -> "sit in a private store in town and sell your goods"
+                 Activity.Home -> "go home and log out"
++                Activity.Derby -> "ride to the Monster Race Track and bet a little adena on a race"
+             }, weight * 100 / total)
+         }
+         val huntedMinutes = if (current == Activity.Hunt) (System.currentTimeMillis() - huntingSince) / 60_000L else 0L
+@@ -134,6 +137,7 @@ internal class SessionPlan(private val bot: Autobot) {
+             println("Autobots session: ${bot.name} lv ${bot.level} ${activity ?: "login"} -> $next for $minutes min ($reason)")
+         }
+         if (next == Activity.Hunt && activity != Activity.Hunt) huntingSince = now
++        if (next == Activity.Derby) derbyVisits++
+         activity = next
+         endsAt = now + minutes * 60_000L
+         cause = null
+@@ -143,13 +147,13 @@ internal class SessionPlan(private val bot: Autobot) {
+         val style = style(context)
+         val base: Map<Activity, Double> = when (previous) {
+             null -> mapOf(Activity.Hunt to 75.0, Activity.Trade to 15.0, Activity.Afk to 10.0)
+-            Activity.Afk -> mapOf(Activity.Hunt to 75.0, Activity.Trade to 25.0)
+-            Activity.Trade, Activity.Home -> mapOf(Activity.Hunt to 80.0, Activity.Afk to 20.0)
++            Activity.Afk -> mapOf(Activity.Hunt to 75.0, Activity.Trade to 25.0, Activity.Derby to DERBY_WEIGHT)
++            Activity.Trade, Activity.Home, Activity.Derby -> mapOf(Activity.Hunt to 80.0, Activity.Afk to 20.0)
+             Activity.Hunt -> when (cause) {
+                 Cause.TownTrip -> mapOf(Activity.Trade to 100.0)
+                 Cause.LevelUp -> mapOf(Activity.Afk to 100.0)
+-                Cause.Death -> mapOf(Activity.Hunt to 25.0, Activity.Afk to 45.0, Activity.Trade to 30.0)
+-                null -> mapOf(Activity.Hunt to 45.0, Activity.Afk to 35.0, Activity.Trade to 20.0)
++                Cause.Death -> mapOf(Activity.Hunt to 25.0, Activity.Afk to 45.0, Activity.Trade to 30.0, Activity.Derby to DERBY_WEIGHT)
++                null -> mapOf(Activity.Hunt to 45.0, Activity.Afk to 35.0, Activity.Trade to 20.0, Activity.Derby to DERBY_WEIGHT)
+             }
+         }
+         val fatigueHours = if (previous == Activity.Hunt) (System.currentTimeMillis() - huntingSince) / 3_600_000.0 else 0.0
+@@ -160,12 +164,17 @@ internal class SessionPlan(private val bot: Autobot) {
+                         when (style) { Style.Grinder -> 0.5; Style.Casual -> 1.3; Style.Trader -> 1.0 }
+                 Activity.Trade -> weight * when (style) { Style.Grinder -> 0.4; Style.Casual -> 1.0; Style.Trader -> 2.5 }
+                 Activity.Home -> weight
++                // Rare: a casual player or a gambler now and then, a grinder hardly ever.
++                Activity.Derby -> weight * AutobotData.settings.derbyChancePercent / 100.0 *
++                        (if (DerbyVisit.isGambler(bot)) 2.0 else 0.5) *
++                        when (style) { Style.Grinder -> 0.3; Style.Casual -> 1.3; Style.Trader -> 1.0 }
+             }
+         }.filter { (activity, _) ->
+             when (activity) {
+                 Activity.Trade -> context.canTrade && !context.hasGoal
+                 // At login or with a goal waiting, a break only comes after some hunting.
+                 Activity.Afk -> !context.hasGoal || previous == Activity.Hunt
++                Activity.Derby -> context.canBet && !context.hasGoal && derbyVisits < MAX_DERBY_VISITS && !isNight()
+                 else -> true
+             }
+         }.mapValues { it.value.toInt() }
+@@ -187,6 +196,8 @@ internal class SessionPlan(private val bot: Autobot) {
+                 if (isNight()) minutes * 3 / 2 else minutes
+             }
+             Activity.Home -> HOME_MINUTES
++            // An upper bound: the visit ends on its own once the ticket is cashed (see DerbyVisit).
++            Activity.Derby -> DERBY_MINUTES
+         }
+     }
+ 
+@@ -201,13 +212,17 @@ internal class SessionPlan(private val bot: Autobot) {
+         private val NIGHT_HOURS = 1..5
+         // Long enough to cover the rest of the session; the population manager logs the bot out.
+         private const val HOME_MINUTES = 60
++        // Out of ~100 for the usual choices: a casual gambler picks it about one choice in 15, others far less.
++        private const val DERBY_WEIGHT = 3.0
++        private const val MAX_DERBY_VISITS = 1
++        private const val DERBY_MINUTES = 45
+ 
+         /** One line for the every-10-minutes log: what the online population is busy with. */
+         fun summary(online: Collection<Autobot>) {
+             val solo = online.filter { !it.isInParty }.mapNotNull { it.life?.activity }
+             val counts = Activity.values().associateWith { activity -> solo.count { it == activity } }
+             println("Autobots session summary: online=${online.size} hunting=${counts[Activity.Hunt]} trading=${counts[Activity.Trade]} " +
+-                    "afk=${counts[Activity.Afk]} goingHome=${counts[Activity.Home]} inParty=${online.count { it.isInParty }} " +
++                    "afk=${counts[Activity.Afk]} derby=${counts[Activity.Derby]} goingHome=${counts[Activity.Home]} inParty=${online.count { it.isInParty }} " +
+                     "inStore=${online.count { it.isInStoreMode }}")
+         }
+     }
