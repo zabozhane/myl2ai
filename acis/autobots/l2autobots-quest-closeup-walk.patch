@@ -1,0 +1,75 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+index 05223ad..da72bb6 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+@@ -86,7 +86,25 @@ internal object NpcTravel {
+             search(player,from,to,maxDistance,200,2000,deadline,reversible).route else null
+     }
+ 
+-    private class Search(val route: List<Location>?,val exhausted: Boolean,val expanded: Int=0,val best: Location?=null)
++    private class Search(val route: List<Location>?,val exhausted: Boolean,val expanded: Int=0,val best: Location?=null,
++                         val bestRoute: List<Location> = emptyList())
++
++    /**
++     * A one-way walk too winding for [toPoint]: the wide grid, then the fine one, and when the fine grid runs out of
++     * nodes close to the goal (an NPC on a ledge above the valley floor), a close-up search from the nearest point it
++     * reached, joined to the way there.
++     */
++    fun longOneWay(player: Player,from: Location,to: Location,maxDistance: Int): Walk? {
++        val deadline=System.nanoTime()+10_000_000_000L
++        val wide=search(player,from,to,maxDistance,2400,800,deadline,false)
++        val route=wide.route ?: run {
++            val fine=search(player,from,to,maxDistance,400,6000,deadline,false)
++            fine.route ?: fine.best?.takeIf { distance(it,to)<=4000 }?.let { near ->
++                search(player,near,to,6000,150,4000,deadline,false).route?.let { fine.bestRoute+it }
++            }
++        } ?: return null
++        return Walk(route,(listOf(from)+route).zipWithNext().sumOf { distance(it.first,it.second) })
++    }
+ 
+     /** Why a long walk does not plan: how far the wide grid search got towards [to], for the logs. */
+     fun probe(player: Player,from: Location,to: Location,maxDistance: Int): String {
+@@ -95,7 +113,8 @@ internal object NpcTravel {
+         val fine=if(wide.route==null) search(player,from,to,maxDistance,400,6000,deadline,false) else null
+         fun Search.text()=if(route!=null) "found" else "exhausted=$exhausted expanded=$expanded" +
+                 (best?.let { " best=${it.x},${it.y},${it.z} left=${distance(it,to).toInt()}" } ?: "")
+-        return "wide ${wide.text()}" + (fine?.let { "; fine ${it.text()}" } ?: "")
++        val close=fine?.best?.takeIf { fine.route==null && distance(it,to)<=4000 }?.let { search(player,it,to,6000,150,4000,deadline+5_000_000_000L,false) }
++        return "wide ${wide.text()}" + (fine?.let { "; fine ${it.text()}" } ?: "") + (close?.let { "; close ${it.text()}" } ?: "")
+     }
+     private fun search(player: Player,from: Location,to: Location,maxDistance: Int,
+                        step: Int,limit: Int,deadline: Long,reversible: Boolean): Search {
+@@ -105,9 +124,10 @@ internal object NpcTravel {
+         val geo=GeoEngine.getInstance()
+         var expanded=0
+         var best=from
++        var bestRoute=emptyList<Location>()
+         while(queue.isNotEmpty() && expanded++<limit && System.nanoTime()<deadline) {
+             val node=queue.poll()
+-            if(distance(node.at,to)<distance(best,to)) best=node.at
++            if(distance(node.at,to)<distance(best,to)) { best=node.at; bestRoute=node.route }
+             if(distance(node.at,to)<=2800) segment(player,node.at,to,reversible)?.let { return Search(node.route+it,false) }
+             for(dx in -1..1) for(dy in -1..1) {
+                 if(dx==0 && dy==0) continue
+@@ -125,7 +145,7 @@ internal object NpcTravel {
+                 queue.add(Node(nx,ny,at,node.route+link,cost))
+             }
+         }
+-        return Search(null,queue.isEmpty(),expanded,best)
++        return Search(null,queue.isEmpty(),expanded,best,bestRoute)
+     }
+ 
+     suspend fun reach(player: Player,npc: Npc,maxDistance: Int=12000): Boolean {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 8ce459f..9ea9fe0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -547,7 +547,7 @@ internal class QuestRunner(private val bot: Player) {
+                 val travel = dev.l2j.autobots.population.economy.NpcTravel
+                 val route = if (npc != null && distance(bot.location(), destination) > LONG_NPC_WALK) {
+                     val goal = dev.l2j.autobots.population.economy.Approach.pointNear(bot, npc) ?: npc.location()
+-                    travel.plan(bot, npc, bot.location(), HOP_WALK) ?: travel.toPoint(bot, bot.location(), goal, HOP_WALK)
++                    travel.plan(bot, npc, bot.location(), HOP_WALK) ?: travel.longOneWay(bot, bot.location(), goal, HOP_WALK)
+                             ?: null.also { println("Autobots quests: ${bot.name} no walk to ${npc.name} at ${goal.x},${goal.y},${goal.z}" +
+                                     " from ${bot.x},${bot.y},${bot.z}: ${travel.probe(bot, bot.location(), goal, HOP_WALK)}") }
+                 } else null
