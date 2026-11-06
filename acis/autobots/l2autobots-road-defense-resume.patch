@@ -1,0 +1,74 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index c31f90a..bf13ffe 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -113,6 +113,8 @@ object OfflineFarmManager {
+     private val townRetryAfter=ConcurrentHashMap<Int,Long>()
+     /** A supply walk interrupted by an attacker: fight back, then continue to town instead of hunting. */
+     private val supplyDefense=ConcurrentHashMap<Int,Travel>()
++    /** A walk to a hunting spot interrupted by an attack; the roadside fight is not the new hunting anchor. */
++    private val roadDefense=ConcurrentHashMap<Int,Travel>()
+     private val lastTownTripAt = ConcurrentHashMap<Int, Long>()
+     private val diedAt = ConcurrentHashMap<Int, Long>()
+     private val townJobs = ConcurrentHashMap<Int, Job>()
+@@ -384,6 +386,7 @@ object OfflineFarmManager {
+             townCheckedAt.remove(id)
+             townRetryAfter.remove(id)
+             supplyDefense.remove(id)
++            roadDefense.remove(id)
+             lastTownTripAt.remove(id)
+             diedAt.remove(id)
+             questsLoaded.remove(id)
+@@ -626,7 +629,10 @@ object OfflineFarmManager {
+                     // A supply walk keeps its purpose: defend here, then resume the road to town.
+                     // Ordinary hunting on the road would fight on without the missing healing.
+                     if(travel.trip==Trip.TO_TOWN) defendSupplyWalk(player,travel)
+-                    else startFarmLogged(player, "jumped on the road")
++                    else {
++                        if(travel.trip==Trip.TO_SPOT || travel.trip==Trip.BACK_TO_SPOT) roadDefense[id]=travel
++                        startFarmLogged(player, "jumped on the road")
++                    }
+                     continue
+                 }
+                 val huntDeadline=if(travel.trip==Trip.TO_SPOT && huntJourneys.containsKey(id)) huntDeadline(player,now) else Long.MAX_VALUE
+@@ -794,6 +800,7 @@ object OfflineFarmManager {
+                 AutofarmManager.stopFarm(player, "died")
+                 clearTravel(id)
+                 supplyDefense.remove(id)
++                roadDefense.remove(id)
+                 diedAt.remove(id)
+                 player.doRevive()
+                 if (player.isDead) continue
+@@ -816,6 +823,23 @@ object OfflineFarmManager {
+             resumeSupplyWalk(player,interrupted)
+         }
+ 
++        // A hunting walk continues to its chosen spot once the roadside fight is over. The road is neither
++        // an outgrown nor an unproductive anchor: judging it so excluded the spot the walk was heading for.
++        for ((id, interrupted) in roadDefense) {
++            val player=farming[id]
++            if(player==null || !isActive(player) || player.isDead) { roadDefense.remove(id);continue }
++            if(traveling.containsKey(id) || townJobs.containsKey(id)) { roadDefense.remove(id);continue }
++            if(player.isUnderAttack() || player.isAttackingNow || player.isCastingNow || player.isSitting ||
++                    (player.target as? Monster)?.isDead==false) continue
++            if(!roadDefense.remove(id,interrupted)) continue
++            AutofarmManager.stopFarm(player,"hunting walk resumes")
++            huntProgress.remove(id)
++            setTravel(player,Travel(interrupted.trip,interrupted.targetX,interrupted.targetY,interrupted.targetZ,
++                    spotX=interrupted.spotX,spotY=interrupted.spotY,spotZ=interrupted.spotZ,gkHopped=interrupted.gkHopped,
++                    spotKey=interrupted.spotKey,lastMoveAt=now))
++            LOGGER.info("Offline farm: ${player.name} id=$id resumes the ${interrupted.trip} walk after defense to=${interrupted.targetX},${interrupted.targetY},${interrupted.targetZ} at=${player.x},${player.y},${player.z}.")
++        }
++
+         for ((id, player) in farming) {
+             if (!isActive(player) || player.isDead || OfflineLife.owns(player) || traveling.containsKey(id) || townJobs.containsKey(id) || supplyDefense.containsKey(id)) continue
+             if(now<(townRetryAfter[id]?:0L)) continue
+@@ -883,7 +907,7 @@ object OfflineFarmManager {
+         // An enabled farm with no prey is also a stall; the anchor may be empty or all prey too low level.
+         for ((id,player) in farming) {
+             if (!isActive(player) || player.isDead || OfflineLife.owns(player) || traveling.containsKey(id) || townJobs.containsKey(id) ||
+-                    !AutofarmManager.isAutoFarming(player)) { huntProgress.remove(id); continue }
++                    roadDefense.containsKey(id) || !AutofarmManager.isAutoFarming(player)) { huntProgress.remove(id); continue }
+             // An anchor can be outgrown: a level 20 orc fighter was left at Kaboo grunts (7-10), where the odd
+             // aggressor still gave a little experience and kept the "unproductive" rule from ever firing.
+             if (now-(outgrownCheckAt[id]?:0L)>=OUTGROWN_CHECK_MS && !player.isSitting && !player.isUnderAttack() &&
