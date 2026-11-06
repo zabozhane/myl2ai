@@ -1,0 +1,74 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+index da72bb6..b8eda5c 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+@@ -89,6 +89,17 @@ internal object NpcTravel {
+     private class Search(val route: List<Location>?,val exhausted: Boolean,val expanded: Int=0,val best: Location?=null,
+                          val bestRoute: List<Location> = emptyList())
+ 
++    /** A one-way walk through [waypoints] in order, each leg planned on the geodata. */
++    fun through(player: Player,from: Location,waypoints: List<Location>): Walk? {
++        val route=mutableListOf<Location>()
++        var at=from
++        for(point in waypoints) {
++            route+=toPoint(player,at,point,4000)?.points ?: return null
++            at=point
++        }
++        return Walk(route,(listOf(from)+route).zipWithNext().sumOf { distance(it.first,it.second) })
++    }
++
+     /**
+      * A one-way walk too winding for [toPoint]: the wide grid, then the fine one, and when the fine grid runs out of
+      * nodes close to the goal (an NPC on a ledge above the valley floor), a close-up search from the nearest point it
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 9ea9fe0..84f8fce 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -545,6 +545,17 @@ internal class QuestRunner(private val bot: Player) {
+                 // The NPC plan wants a way back too; a quest walk may drop off a ledge the bot can't climb again
+                 // (it carries an escape scroll), so a one-way route comes next.
+                 val travel = dev.l2j.autobots.population.economy.NpcTravel
++                val via = npc?.let { QuestWorld.via(bot, it.npcId) }
++                if (npc != null && via != null) {
++                    val goal = dev.l2j.autobots.population.economy.Approach.pointNear(bot, npc) ?: npc.location()
++                    val probed = travel.through(bot, bot.location(), via + goal)
++                    if (probed != null) {
++                        // One way: replanning on the way must not ask for a way back over the drop.
++                        walk.withRecoveryRoute(probed).execute()
++                        return
++                    }
++                    println("Autobots quests: ${bot.name} probed walk to ${npc.name} failed from ${bot.x},${bot.y},${bot.z}")
++                }
+                 val route = if (npc != null && distance(bot.location(), destination) > LONG_NPC_WALK) {
+                     val goal = dev.l2j.autobots.population.economy.Approach.pointNear(bot, npc) ?: npc.location()
+                     travel.plan(bot, npc, bot.location(), HOP_WALK) ?: travel.longOneWay(bot, bot.location(), goal, HOP_WALK)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
+index 4b732e4..4fb3823 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
+@@ -15,6 +15,25 @@ import net.sf.l2j.gameserver.data.xml.ScriptData
+ 
+ /** Where quest NPCs and monsters are: the server's spawn list, plus a world scan for monsters a quest spawned itself. */
+ internal object QuestWorld {
++    /**
++     * Walks the pathfinder can't find on its own, from a landing to quest NPCs, as waypoints probed on the geodata.
++     * Martankus and the First Orc stand in a valley east of the Cave of Trials landing that is entered only by a drop
++     * off a ledge (13753,-110732 down to 13625,-110732): a planner that wants a way back never takes it.
++     */
++    private val MARTANKUS_VALLEY = listOf(
++            Location(10361, -112524, -2536), Location(11385, -112524, -2808), Location(12409, -112524, -2976),
++            Location(13177, -112268, -2976), Location(14201, -112268, -3072), Location(14905, -112012, -3320),
++            Location(14841, -111052, -3336), Location(14137, -110732, -3352), Location(13753, -110732, -3392),
++            Location(13625, -110732, -3480), Location(13561, -110284, -3456), Location(14201, -109900, -3448),
++            Location(15225, -109900, -3232), Location(16185, -109964, -3040), Location(17017, -109772, -3040),
++            Location(17145, -108876, -3040), Location(17913, -109004, -3040), Location(18489, -108940, -3040),
++            Location(18489, -108364, -3040), Location(18681, -108236, -3040), Location(19257, -107788, -3040),
++            Location(20025, -107532, -3040), Location(20089, -107532, -3040), Location(21049, -107596, -3040))
++    private val viaPoints = mapOf(30649 to MARTANKUS_VALLEY, 30643 to MARTANKUS_VALLEY)
++
++    /** The probed waypoints to [npcId] when the bot stands near where they start (the landing), else null. */
++    fun via(bot: Player, npcId: Int): List<Location>? = viaPoints[npcId]?.takeIf { distance(bot.location(), it.first()) <= 5000 }
++
+     // The spawn is kept rather than its NPC: the NPC object is replaced when it respawns.
+     private class SpawnPoint(val location: Location, val spawn: L2Spawn)
+ 
