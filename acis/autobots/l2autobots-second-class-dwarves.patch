@@ -1,0 +1,359 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
+index 355df29..a4084f7 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
+@@ -58,7 +58,9 @@ internal object StoreKeeper {
+         val crystals = listOfNotNull(Gear.summonCrystal(bot)?.takeIf { Gear.count(bot, it) < Crystals.WANTED })
+         // Spellbooks no town shop sells come from drops: a buy store asks other players for them.
+         val books = SkillLearner.missingBooks(bot).filter { Market.npcPrice(it) == null }.take(1)
+-        return (gear + books + crystals + scrolls + craftWants(bot).keys).distinct()
++        // Materials a dwarf's profession quest crafts with (Steel, Varnish, D crystals) or delivers (Animal Skin).
++        val quest = dev.l2j.autobots.population.quests.SecondClassQuests.materialNeeds(bot).filter { (id, n) -> Gear.count(bot, id) < n }.keys
++        return (gear + books + crystals + scrolls + craftWants(bot).keys + quest).distinct()
+     }
+ 
+     /** Actual missing items, shared by the buyer and the market diagnostic. Gear must not hide needed books. */
+@@ -75,6 +77,10 @@ internal object StoreKeeper {
+             val missing=Crystals.WANTED-Gear.count(bot,id)
+             if(missing>0) needs[id]=missing
+         }
++        dev.l2j.autobots.population.quests.SecondClassQuests.materialNeeds(bot).forEach { (id,count) ->
++            val missing=count-Gear.count(bot,id)
++            if(missing>0) needs[id]=maxOf(needs[id] ?: 0,missing)
++        }
+         return needs.filterValues { it>0 }
+     }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 6097c2e..e177e13 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -355,7 +355,70 @@ internal class QuestRunner(private val bot: Player) {
+                 setTargets(null)
+                 buy(path, action)
+             }
++            is Craft -> {
++                setTargets(null)
++                craft(path, action)
++            }
++            is Stock -> {
++                setTargets(null)
++                if (!acquire(action.itemId, action.count)) giveUp(path, "short of ${action.itemId}: ${QuestView(bot, null).count(action.itemId)}/${action.count}")
++            }
++        }
++    }
++
++    /** Learns the quest's recipe, gets the materials and crafts one piece a tick, sitting for MP in between. */
++    private fun craft(path: PathQuest, craft: Craft) {
++        val book = dev.l2j.autobots.population.economy.craft.CraftBook
++        val recipe = book.byRecipeItem(craft.recipeItemId) ?: return giveUp(path, "no recipe ${craft.recipeItemId}")
++        if (QuestView(bot, null).count(craft.productId) >= craft.count || bot.isCrafting) return
++        if (!bot.hasRecipeList(recipe.id)) {
++            val item = bot.inventory.getItemByItemId(craft.recipeItemId) ?: return giveUp(path, "lost recipe ${craft.recipeItemId}")
++            if (book.skillLevel(bot) < recipe.level) return giveUp(path, "can't craft level ${recipe.level}")
++            if (bot.dwarvenRecipeBook.size >= bot.dwarfRecipeLimit) return giveUp(path, "recipe book full")
++            net.sf.l2j.gameserver.handler.ItemHandler.getInstance().getHandler(item.etcItem)?.useItem(bot, item, false)
++            if (!bot.hasRecipeList(recipe.id)) return giveUp(path, "couldn't learn ${item.itemName}")
++            dev.l2j.autobots.population.economy.craft.RecipeBookDao.save(bot)
++            QuestLog.log(bot, QuestEvent.Step, "${path.questName}: learned ${item.itemName}")
++            return
++        }
++        val short = recipe.materials.filter { !acquire(it.id, it.value) }
++        if (short.isNotEmpty()) return giveUp(path, "short of materials ${short.joinToString { "${it.id}x${it.value}" }}")
++        if (bot.currentMp < recipe.mpCost) {
++            if (!bot.isSitting && !bot.isMoving) bot.sitDown()
++            return
+         }
++        if (bot.isSitting) {
++            bot.standUp()
++            return
++        }
++        val maker = net.sf.l2j.gameserver.model.craft.RecipeItemMaker(bot, recipe, bot)
++        if (!maker._isValid) {
++            bot.isCrafting = false
++            return giveUp(path, "can't craft ${craft.productId} now")
++        }
++        maker.run()
++        QuestLog.log(bot, QuestEvent.Step, "${path.questName}: crafted, ${QuestView(bot, null).count(craft.productId)}/${craft.count} of ${craft.productId}")
++    }
++
++    /**
++     * Makes sure the bag holds [count] of a tradable item: what is short is bought from private stores around (up to
++     * half again the market value) or a shop close by. @return true when the bag holds enough.
++     */
++    private fun acquire(itemId: Int, count: Int): Boolean {
++        val market = dev.l2j.autobots.population.economy.Market
++        var short = count - QuestView(bot, null).count(itemId)
++        if (short <= 0) return true
++        val limit = (dev.l2j.autobots.population.economy.MarketBook.value(itemId) * 1.5).toInt().coerceAtLeast(1)
++        for (offer in market.sellOffers(bot, itemId).filter { it.tradeItem.price <= limit }.sortedBy { it.tradeItem.price }) {
++            val n = minOf(short, offer.tradeItem.count, bot.adena / offer.tradeItem.price.coerceAtLeast(1))
++            if (n > 0 && market.buyFromStore(bot, offer, n)) short -= n
++            if (short <= 0) return true
++        }
++        market.shopsNear(bot).firstNotNullOfOrNull { shop -> shop.products[itemId]?.let { shop to it } }?.let { (shop, product) ->
++            val n = minOf(short, bot.adena / market.priceWithTax(shop, product).coerceAtLeast(1))
++            if (n > 0 && market.buyFromNpc(bot, shop, product, n)) short -= n
++        }
++        return short <= 0
+     }
+ 
+     private suspend fun buy(path: PathQuest, buy: Buy) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+index be979d1..1c8a66e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+@@ -36,6 +36,16 @@ internal class Hunt(val monsterIds: Set<Int>, val weapon: Int?, val orElse: Ques
+  */
+ internal class Duel(val monsterId: Int, val summons: List<Int>) : QuestAction()
+ 
++/**
++ * Craft [productId] with the dwarven recipe [recipeItemId] (learned from the item the quest gave) until the bag holds
++ * [count]. Materials short are bought from stores around; failing that the quest waits while the bot's own errands
++ * look for them.
++ */
++internal class Craft(val recipeItemId: Int, val productId: Int, val count: Int) : QuestAction()
++
++/** Have [count] of the tradable [itemId] in the bag (a quest delivery): bought like [Craft] materials. */
++internal class Stock(val itemId: Int, val count: Int) : QuestAction()
++
+ /** Walk up to merchant [npcId] and buy what is short of [count] pieces of [itemId], when the quest asks for shop goods. */
+ internal class Buy(val npcId: Int, val itemId: Int, val count: Int) : QuestAction()
+ 
+@@ -134,6 +144,10 @@ internal class PathQuestBuilder(private val questName: String, private val from:
+ 
+     fun buy(npcId: Int, itemId: Int, count: Int) = Buy(npcId, itemId, count)
+ 
++    fun craft(recipeItemId: Int, productId: Int, count: Int) = Craft(recipeItemId, productId, count)
++
++    fun stock(itemId: Int, count: Int) = Stock(itemId, count)
++
+     fun build() = PathQuest(questName, from, to, mark, masterEvent, startNpc, startEvents, rules.toList(), minLevel)
+ }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index 0bceaae..686a139 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -36,12 +36,17 @@ internal object SecondClassQuests {
+     const val MARK_OF_LORD = 3390
+     const val MARK_OF_REFORMER = 2821
+     const val MARK_OF_SUMMONER = 3336
++    const val MARK_OF_GUILDSMAN = 3119
++    const val MARK_OF_PROSPERITY = 3238
++    const val MARK_OF_MAESTRO = 2867
+ 
+     /** Human and elven fighter guild masters of SecondClassChange. */
+     private val HUMAN_ELF_FIGHTER_MASTERS = listOf(30109, 30187, 30689, 30849, 30900, 31965, 32094)
+     private val HUMAN_ELF_MAGE_MASTERS = listOf(30115, 30174, 30176, 30694, 30854, 31996)
+     private val HUMAN_ELF_PRIEST_MASTERS = listOf(30120, 30191, 30857, 30905, 31276, 31321, 31279, 31755, 31968, 32095, 31336)
+     private val ORC_MASTERS = listOf(30513, 30681, 30704, 30865, 30913, 31288, 31326, 31977)
++    private val BOUNTY_HUNTER_MASTERS = listOf(30511, 30676, 30685, 30845, 30894, 31269, 31314, 31958)
++    private val WARSMITH_MASTERS = listOf(30512, 30677, 30687, 30847, 30897, 31272, 31317, 31961)
+     private val DARK_ELF_MASTERS = listOf(31328, 30195, 30699, 30474, 31324, 30862, 30910, 31285, 31331, 31334, 31974, 32096)
+ 
+     val classes: List<SecondClass> = listOf(
+@@ -73,7 +78,9 @@ internal object SecondClassQuests {
+             SecondClass(SHILLIEN_ORACLE, SHILLIEN_ELDER, "SE", listOf(MARK_OF_PILGRIM, MARK_OF_FATE, MARK_OF_REFORMER), DARK_ELF_MASTERS),
+             SecondClass(HUMAN_WIZARD, WARLOCK, "HW", listOf(MARK_OF_SCHOLAR, MARK_OF_TRUST, MARK_OF_SUMMONER), HUMAN_ELF_MAGE_MASTERS),
+             SecondClass(ELVEN_WIZARD, ELEMENTAL_SUMMONER, "ES", listOf(MARK_OF_SCHOLAR, MARK_OF_LIFE, MARK_OF_SUMMONER), HUMAN_ELF_MAGE_MASTERS),
+-            SecondClass(DARK_WIZARD, PHANTOM_SUMMONER, "PS", listOf(MARK_OF_SCHOLAR, MARK_OF_FATE, MARK_OF_SUMMONER), DARK_ELF_MASTERS))
++            SecondClass(DARK_WIZARD, PHANTOM_SUMMONER, "PS", listOf(MARK_OF_SCHOLAR, MARK_OF_FATE, MARK_OF_SUMMONER), DARK_ELF_MASTERS),
++            SecondClass(SCAVENGER, BOUNTY_HUNTER, "BH", listOf(MARK_OF_GUILDSMAN, MARK_OF_PROSPERITY, MARK_OF_SEARCHER), BOUNTY_HUNTER_MASTERS),
++            SecondClass(ARTISAN, WARSMITH, "WS", listOf(MARK_OF_GUILDSMAN, MARK_OF_PROSPERITY, MARK_OF_MAESTRO), WARSMITH_MASTERS))
+ 
+     // Q230: the six summoners, the quest variable each keeps (1 not yet, 2 ready, 3 fighting, 4 lost, 5 foul, 6 won,
+     // 7 handed in) and the opponent spawned next to each.
+@@ -643,12 +650,127 @@ internal object SecondClassQuests {
+                 rule({ it.cond == 3 && it.value("Lara") == 0 && !it.has(BEGINNER_ARCANA) }, talk(30063, "30063-04.htm"))
+                 cond(4, talk(30634))
+             },
++            // Dwarves. Seven Journeyman Rings crafted from the quest's gems and beads plus Steel, Varnish and D
++            // crystals the bot has to buy (every dwarf knows Create Item 1). Valkon wants 2000 adena up front.
++            mark("Q216_TrialOfTheGuildsman", MARK_OF_GUILDSMAN, 35) {
++                start(30103, "30103-06.htm")
++                cond(1, talk(30103, "30103-06c.htm"))
++                cond(2, talk(30103, "30103-07c.htm"))
++                cond(3, hunt(20154, 20155, 20156))
++                cond(4, talk(30283, "30283-03.htm"))
++                rule({ it.cond == 5 && it.has(ALTRAN_RECOMMENDATION_1) }, talk(30210, "30210-04.htm"))
++                rule({ it.cond == 5 && it.has(NORMAN_RECEIPT) }, talk(30688, "30688-02.htm"))
++                rule({ it.cond == 5 && it.has(DUNING_INSTRUCTIONS) && it.count(DUNING_KEY) >= 30 }, talk(30688))
++                rule({ it.cond == 5 && it.has(DUNING_INSTRUCTIONS) }, hunt(20269, 20270, 20271))
++                rule({ it.cond == 5 && it.count(DUNING_KEY) >= 30 }, talk(30210, "30210-10.htm"))
++                gather({ it.cond == 5 && it.has(NORMAN_LIST) }, Drop(3130, 70, intArrayOf(20200, 20201)), Drop(3131, 70, intArrayOf(20083)),
++                        Drop(3132, 70, intArrayOf(20202)), Drop(3133, 70, intArrayOf(20168)))
++                rule({ it.cond == 5 && it.has(NORMAN_LIST) }, talk(30210))
++                // Pinter takes only level 36.
++                rule({ it.cond == 5 && it.has(ALTRAN_RECOMMENDATION_2) && it.player.level >= 36 }, talk(30298, "30298-04.htm"))
++                rule({ it.cond == 5 && it.has(PINTER_INSTRUCTIONS) && it.count(AMBER_BEAD) >= 70 }, talk(30298))
++                rule({ it.cond == 5 && it.has(PINTER_INSTRUCTIONS) }, hunt(20079, 20080))
++                rule({ it.cond == 6 && it.count(JOURNEYMAN_RING) < 7 }, craft(RECIPE_JOURNEYMAN_RING, JOURNEYMAN_RING, 7))
++                cond(6, talk(30103, "30103-09a.htm"))
++            },
++            // Dwarves from 37. Five contributions for Lockirin's book, a seed, a wafer and Emily's recipe; then the
++            // Key of Titan crafted from shells, sacs, thorns and 10 D crystals opens the box. Maryse wants 100
++            // Animal Skins and Keef 5000 adena.
++            mark("Q221_TestimonyOfProsperity", MARK_OF_PROSPERITY, 37) {
++                start(30104, "30104-04.htm")
++                rule({ it.cond == 1 && !it.has(BLESSED_SEED) }, talk(30597, "30597-02.htm"))
++                rule({ it.cond == 1 && it.has(CRYSTAL_BROOCH) }, talk(30368, "30368-03.htm"))
++                rule({ it.cond == 1 && !it.has(LILITH_ELVEN_WAFER) }, talk(30005, "30005-04.htm"))
++                rule({ it.cond == 1 && it.has(MANDRAGORA_BOUQUET) }, talk(30620, "30620-03.htm"))
++                rule({ it.cond == 1 && it.has(BRIGHT_LIST) && it.count(MANDRAGORA_PETAL) >= 20 && it.count(CRIMSON_MOSS) >= 10 }, talk(30466))
++                gather({ it.cond == 1 && it.has(BRIGHT_LIST) }, Drop(MANDRAGORA_PETAL, 20, intArrayOf(20223, 20154, 20155, 20156)),
++                        Drop(CRIMSON_MOSS, 10, intArrayOf(20228)))
++                rule({ it.cond == 1 && !it.has(EMILY_RECIPE) }, talk(30466, "30466-03.htm"))
++                rule({ it.cond == 1 && !it.has(OLD_ACCOUNT_BOOK) && !it.has(COLLECTION_LICENSE) }, talk(30531, "30531-03.htm"))
++                rule({ it.cond == 1 && it.has(COLLECTION_LICENSE) && it.has(RECEIPT_1, RECEIPT_2, RECEIPT_3, RECEIPT_4, RECEIPT_5) }, talk(30531))
++                // The five contributions: each notice to its collector first, then the giver, then the receipt.
++                rule({ it.cond == 1 && it.has(LOCKIRIN_NOTICE_1) }, talk(30532))
++                rule({ it.cond == 1 && it.has(CONTRIBUTION_OF_SHARI) }, talk(30532))
++                rule({ it.cond == 1 && it.has(COLLECTION_LICENSE) && !it.has(RECEIPT_1) }, talk(30517))
++                rule({ it.cond == 1 && it.has(LOCKIRIN_NOTICE_2) }, talk(30533))
++                rule({ it.cond == 1 && it.has(CONTRIBUTION_OF_MION, CONTRIBUTION_OF_MARYSE) }, talk(30533))
++                rule({ it.cond == 1 && it.has(COLLECTION_LICENSE) && !it.has(RECEIPT_2) && !it.has(CONTRIBUTION_OF_MION) }, talk(30519))
++                rule({ it.cond == 1 && it.has(MARYSE_REQUEST) && it.count(ANIMAL_SKIN) >= 100 }, talk(30553))
++                rule({ it.cond == 1 && it.has(COLLECTION_LICENSE) && !it.has(RECEIPT_2) && !it.has(CONTRIBUTION_OF_MARYSE) && !it.has(MARYSE_REQUEST) }, talk(30553))
++                rule({ it.cond == 1 && it.has(LOCKIRIN_NOTICE_3) }, talk(30534))
++                rule({ it.cond == 1 && it.has(PROCURATION_OF_TOROCCO) && it.player.adena >= 5000 }, talk(30534, "30534-03a.htm"))
++                rule({ it.cond == 1 && it.has(COLLECTION_LICENSE) && !it.has(RECEIPT_3) && !it.has(PROCURATION_OF_TOROCCO) }, talk(30555, "30555-02.htm"))
++                rule({ it.cond == 1 && it.has(LOCKIRIN_NOTICE_4) }, talk(30535))
++                rule({ it.cond == 1 && it.has(RECEIPT_OF_BOLTER) }, talk(30535))
++                rule({ it.cond == 1 && it.has(COLLECTION_LICENSE) && !it.has(RECEIPT_4) }, talk(30554))
++                rule({ it.cond == 1 && it.has(LOCKIRIN_NOTICE_5) }, talk(30536))
++                rule({ it.cond == 1 && it.has(CONTRIBUTION_OF_TOMA) }, talk(30536))
++                rule({ it.cond == 1 && it.has(COLLECTION_LICENSE) && !it.has(RECEIPT_5) }, talk(30556))
++                // The skins last: everything else goes on while the bot's errands look for them.
++                rule({ it.cond == 1 && it.has(MARYSE_REQUEST) }, stock(ANIMAL_SKIN, 100))
++                cond(2, talk(30104, "30104-07.htm"))
++                // Parman wants 38 for the second half.
++                rule({ it.cond == 3 && it.player.level >= 38 }, talk(30104))
++                cond(4, talk(30621, "30621-04.htm"))
++                cond(5, talk(30622, "30622-02.htm"))
++                cond(6, talk(30621))
++                rule({ it.cond in 7..8 && it.has(KEY_OF_TITAN) }, talk(30622, "30622-04.htm"))
++                gather({ it.cond == 7 }, Drop(STAKATO_SHELL, 20, intArrayOf(20157, 20230, 20232, 20234)),
++                        Drop(TOAD_LORD_SAC, 10, intArrayOf(20231)), Drop(SPIDER_THORN, 10, intArrayOf(20233)))
++                rule({ it.cond in 7..8 }, craft(RECIPE_TITAN_KEY, KEY_OF_TITAN, 1))
++                cond(9, talk(30104))
++            },
++            // Artisans. Three recommendations: Kamuru's necklace off the Evil Eye Lord, the teleport device (Toma
++            // sends the bot among three King Bugbears) and the antidote ingredients for Lorain.
++            mark("Q231_TestOfTheMaestro", MARK_OF_MAESTRO, 39) {
++                start(30531, "30531-04.htm")
++                rule({ it.cond == 1 && it.value("bCond") == 0 }, talk(30533, "30533-02.htm"))
++                rule({ it.cond == 1 && it.value("bCond") == 1 && it.has(NECKLACE_OF_KAMURU) }, talk(30671))
++                rule({ it.cond == 1 && it.value("bCond") == 1 && it.has(PAINT_OF_KAMURU) }, hunt(27133))
++                rule({ it.cond == 1 && it.value("bCond") == 1 }, talk(30671, "30671-02.htm"))
++                rule({ it.cond == 1 && it.value("bCond") == 2 }, talk(30533))
++                rule({ it.cond == 1 && it.value("aCond") == 0 }, talk(30536))
++                rule({ it.cond == 1 && it.value("aCond") == 1 && it.has(BROKEN_TELEPORT_DEVICE) }, talk(30556))
++                rule({ it.cond == 1 && it.value("aCond") == 1 }, talk(30556, "30556-05.htm"))
++                rule({ it.cond == 1 && it.value("aCond") == 2 }, talk(30536))
++                rule({ it.cond == 1 && it.value("fCond") == 0 }, talk(30535))
++                rule({ it.cond == 1 && it.value("fCond") == 1 && it.has(INGREDIENTS_OF_ANTIDOTE) && it.count(STINGER_WASP_NEEDLE) >= 10 &&
++                        it.count(MARSH_SPIDER_WEB) >= 10 && it.count(BLOOD_OF_LEECH) >= 10 }, talk(30673, "30673-04.htm"))
++                gather({ it.cond == 1 && it.value("fCond") == 1 && it.has(INGREDIENTS_OF_ANTIDOTE) }, Drop(STINGER_WASP_NEEDLE, 10, intArrayOf(20229)),
++                        Drop(MARSH_SPIDER_WEB, 10, intArrayOf(20233)), Drop(BLOOD_OF_LEECH, 10, intArrayOf(20225)))
++                rule({ it.cond == 1 && it.value("fCond") == 1 }, talk(30673))
++                rule({ it.cond == 1 && it.value("fCond") == 2 }, talk(30535))
++                cond(2, talk(30531))
++            },
+     ).associateBy { it.mark }
+ 
+     /** Shop goods a started mark quest still has to hand in: never sold off as surplus on a town trip. */
+     fun boughtFor(bot: net.sf.l2j.gameserver.model.actor.Player): Set<Int> =
+-            if (bot.getQuestState("Q232_TestOfTheLord")?.isStarted == true && bot.inventory.getItemByItemId(TANTUS_CHARM) != null) setOf(BONE_ARROW)
+-            else emptySet()
++            (if (bot.getQuestState("Q232_TestOfTheLord")?.isStarted == true && bot.inventory.getItemByItemId(TANTUS_CHARM) != null) setOf(BONE_ARROW)
++            else emptySet()) + materialNeeds(bot).keys
++
++    /**
++     * Tradable materials a dwarf's profession quest needs in its bag now, item to total count: the ring and key
++     * crafts and Maryse's skins. The bot's errands and buy store look for them, and it doesn't sell them.
++     */
++    fun materialNeeds(bot: net.sf.l2j.gameserver.model.actor.Player): Map<Int, Int> {
++        if (bot.race != net.sf.l2j.gameserver.enums.actors.ClassRace.DWARF) return emptyMap()
++        val needs = mutableMapOf<Int, Int>()
++        val guildsman = QuestView(bot, bot.getQuestState("Q216_TrialOfTheGuildsman"))
++        if (guildsman.started && guildsman.cond in 5..6) {
++            val rings = (7 - guildsman.count(JOURNEYMAN_RING)).coerceAtLeast(0)
++            if (rings > 0) {
++                needs[STEEL] = rings
++                needs[VARNISH] = rings * 10
++                needs[CRYSTAL_D] = rings * 10
++            }
++        }
++        val prosperity = QuestView(bot, bot.getQuestState("Q221_TestimonyOfProsperity"))
++        if (prosperity.started && prosperity.cond in 7..8 && !prosperity.has(KEY_OF_TITAN))
++            needs.merge(CRYSTAL_D, 10, Int::plus)
++        if (prosperity.started && prosperity.cond == 1 && prosperity.has(MARYSE_REQUEST)) needs[ANIMAL_SKIN] = 100
++        return needs
++    }
+ 
+     /** Second professions of [first] whose three mark quests the bots can play. */
+     fun forFirstClass(first: ClassId): List<SecondClass> = classes.filter { c -> c.from == first && c.marks.all { it in quests } }
+@@ -708,6 +830,62 @@ internal object SecondClassQuests {
+     private const val SYLPH_CHARM = 2861
+     private const val UNDINE_CHARM = 2862
+     private const val SERPENT_CHARM = 2863
++    // Q216 items checked by the rules, and the ring's shop materials.
++    private const val RECIPE_JOURNEYMAN_RING = 3024
++    private const val ALTRAN_RECOMMENDATION_1 = 3123
++    private const val ALTRAN_RECOMMENDATION_2 = 3124
++    private const val NORMAN_RECEIPT = 3126
++    private const val DUNING_INSTRUCTIONS = 3127
++    private const val DUNING_KEY = 3128
++    private const val NORMAN_LIST = 3129
++    private const val PINTER_INSTRUCTIONS = 3135
++    private const val AMBER_BEAD = 3136
++    private const val JOURNEYMAN_RING = 3139
++    private const val STEEL = 1880
++    private const val VARNISH = 1865
++    private const val CRYSTAL_D = 1458
++    // Q221 items checked by the rules.
++    private const val ANIMAL_SKIN = 1867
++    private const val RECIPE_TITAN_KEY = 3023
++    private const val KEY_OF_TITAN = 3030
++    private const val OLD_ACCOUNT_BOOK = 3241
++    private const val BLESSED_SEED = 3242
++    private const val EMILY_RECIPE = 3243
++    private const val LILITH_ELVEN_WAFER = 3244
++    private const val COLLECTION_LICENSE = 3246
++    private const val LOCKIRIN_NOTICE_1 = 3247
++    private const val LOCKIRIN_NOTICE_2 = 3248
++    private const val LOCKIRIN_NOTICE_3 = 3249
++    private const val LOCKIRIN_NOTICE_4 = 3250
++    private const val LOCKIRIN_NOTICE_5 = 3251
++    private const val CONTRIBUTION_OF_SHARI = 3252
++    private const val CONTRIBUTION_OF_MION = 3253
++    private const val CONTRIBUTION_OF_MARYSE = 3254
++    private const val MARYSE_REQUEST = 3255
++    private const val CONTRIBUTION_OF_TOMA = 3256
++    private const val RECEIPT_OF_BOLTER = 3257
++    private const val RECEIPT_1 = 3258
++    private const val RECEIPT_2 = 3259
++    private const val RECEIPT_3 = 3260
++    private const val RECEIPT_4 = 3261
++    private const val RECEIPT_5 = 3262
++    private const val PROCURATION_OF_TOROCCO = 3263
++    private const val BRIGHT_LIST = 3264
++    private const val MANDRAGORA_PETAL = 3265
++    private const val CRIMSON_MOSS = 3266
++    private const val MANDRAGORA_BOUQUET = 3267
++    private const val STAKATO_SHELL = 3273
++    private const val TOAD_LORD_SAC = 3274
++    private const val SPIDER_THORN = 3275
++    private const val CRYSTAL_BROOCH = 3428
++    // Q231 items checked by the rules.
++    private const val PAINT_OF_KAMURU = 2869
++    private const val NECKLACE_OF_KAMURU = 2870
++    private const val BROKEN_TELEPORT_DEVICE = 2916
++    private const val INGREDIENTS_OF_ANTIDOTE = 2875
++    private const val STINGER_WASP_NEEDLE = 2876
++    private const val MARSH_SPIDER_WEB = 2877
++    private const val BLOOD_OF_LEECH = 2878
+     // Q227: Disrupt Undead, and the spells the Crimson Werewolf allows that clerics and Shillien oracles own: Ice
+     // Bolt, Wind Strike, Vampiric Touch from their mystic days (Disrupt Undead only takes undead targets).
+     private const val DISRUPT_UNDEAD = 1031

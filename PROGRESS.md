@@ -1,3 +1,18 @@
+## 2026-11-06 — гномы: Bounty Hunter и Warsmith
+
+- `l2autobots-second-class-dwarves.patch`: Scavenger → Bounty Hunter (Guildsman, Prosperity, Searcher) и
+  Artisan → Warsmith (Guildsman, Prosperity, Maestro) у своих мастеров.
+- Q216 Guildsman: мандрагоры, ключи Дунинга, список Нормана (4 × 70), бусины Пинтера, затем 7 Journeyman Ring
+  крафтом. Create Item 1 есть у всех гномов. Рецепт учится из квестового предмета.
+- Q221 Prosperity: семя, вафля, рецепт Эмили, пять взносов для Локирина (Keef берёт 5000 адены, Maryse 100 Animal
+  Skin), потом ящик Титана: ракушки, мешочки, шипы и 10 кристаллов D → Key of Titan крафтом.
+- Q231 Maestro (только Artisan): ожерелье Камуру с Evil Eye Lord, телепорт Томы (три King Bugbear), антидот Лорейн.
+- Новые шаги: `craft` (учит рецепт, докупает материалы в лавках рядом, ждёт MP сидя, крафтит по одному) и `stock`.
+  Steel, Varnish, кристаллы D и шкуры попадают в покупки бота в городе и в его лавку покупки и не продаются, пока
+  квест их ждёт. Без них квест откладывается с причиной `short of materials`.
+- Собрано локально. Стенд не гонялся. Слабые места: хватит ли материалов на рынке (70 Varnish, 70 кристаллов D,
+  7 Steel), Box of Titan на z -12088.
+
 ## 2026-11-06 — Q230 Summoner: Warlock, Elemental Summoner, Phantom Summoner
 
 - `l2autobots-second-class-summoner.patch`: Human/Elven/Dark Wizard → Warlock, Elemental Summoner, Phantom Summoner
