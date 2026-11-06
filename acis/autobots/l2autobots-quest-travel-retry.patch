@@ -1,0 +1,53 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index f156497..bd5e40d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -49,6 +49,9 @@ internal class QuestRunner(private val bot: Player) {
+     private var pausedUntil = 0L
+     private var retryLoaded = false
+     private var travelFailures = 0
++    // First travel failure of the current streak: a bot in a sealed cell recovers (escape scroll) within minutes,
++    // so a burst of failures right after arrival is not yet proof that the quest is unreachable.
++    private var firstFailureAt = 0L
+     private var lastFailure = ""
+     // After a failed teleport (no adena, no gatekeeper) or escape (no scroll) the bot walks for a while, like a
+     // player who can't pay.
+@@ -505,6 +508,7 @@ internal class QuestRunner(private val bot: Player) {
+     }
+ 
+     private fun failed(reason: String, walk: Boolean) {
++        if (travelFailures == 0) firstFailureAt = System.currentTimeMillis()
+         travelFailures++
+         lastFailure = reason
+         if (walk) walkOnlyUntil = System.currentTimeMillis() + WALK_ONLY_MS
+@@ -568,13 +572,17 @@ internal class QuestRunner(private val bot: Player) {
+             travelFailures = 0
+             return
+         }
+-        if (now - lastProgressAt > STUCK_MS || travelFailures > MAX_TRAVEL_FAILURES) {
+-            giveUp(path, if (travelFailures > MAX_TRAVEL_FAILURES) "can't get where the quest leads ($lastFailure)" else "no progress for ${STUCK_MS / 60_000} minutes")
++        if (now - lastProgressAt > STUCK_MS) {
++            giveUp(path, "no progress for ${STUCK_MS / 60_000} minutes")
++        } else if (travelFailures > MAX_TRAVEL_FAILURES && now - firstFailureAt > TRAVEL_GRACE_MS) {
++            // A route problem is often local (sealed cell, no gatekeeper from here): retry soon from wherever the
++            // bot ends up instead of dropping the quest for hours.
++            giveUp(path, "can't get where the quest leads ($lastFailure)", TRAVEL_PAUSE_MS)
+         }
+     }
+ 
+-    private fun giveUp(path: PathQuest, reason: String) {
+-        pausedUntil = System.currentTimeMillis() + PAUSE_MS
++    private fun giveUp(path: PathQuest, reason: String, pauseMs: Long = PAUSE_MS) {
++        pausedUntil = System.currentTimeMillis() + pauseMs
+         lastProgressAt = pausedUntil
+         travelFailures = 0
+         relax()
+@@ -617,6 +625,8 @@ internal class QuestRunner(private val bot: Player) {
+         private const val STUCK_MS = 60 * 60 * 1000L
+         private const val PAUSE_MS = 3 * 60 * 60 * 1000L
+         private const val MAX_TRAVEL_FAILURES = 8
++        private const val TRAVEL_GRACE_MS = 5 * 60 * 1000L
++        private const val TRAVEL_PAUSE_MS = 20 * 60 * 1000L
+         private const val WALK_ONLY_MS = 10 * 60 * 1000L
+         /** A quest giver farther than this is in another town: the errand waits for a visit there. */
+         private const val GIVER_WITHIN = 6000
