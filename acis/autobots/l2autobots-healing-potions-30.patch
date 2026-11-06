@@ -1,0 +1,32 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt
+index b5cc108..f702e14 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Healing.kt
+@@ -17,10 +17,23 @@ internal object Healing {
+         return dev.l2j.autobots.movement.SupplyBudget.worthRestocking(player.adena,count(player),price)
+     }
+ 
+-    fun product(player: Player): Int? = Gear.HEALING_POTIONS.mapNotNull { id ->
+-        Market.findProduct(player,id)?.let { (shop,p) -> id to Market.priceWithTax(shop,p) }
+-    }.filter { it.second<=player.adena }.minByOrNull { it.second }?.first
+-        ?: Gear.HEALING_POTIONS.filter { Market.findProduct(player,it)!=null }.minByOrNull { Market.npcPrice(it)?:Int.MAX_VALUE }
++    /**
++     * The cheapest potion the wallet allows, except that from [HEALING_POTION_LEVEL] a bot that can pay for a full stock
++     * of Healing Potions takes them: ten Lesser ones barely cover a fight with mobs of the late 30s (the second
++     * profession stand lost bots 37-40 with an empty bag).
++     */
++    fun product(player: Player): Int? {
++        val offers=Gear.HEALING_POTIONS.mapNotNull { id ->
++            Market.findProduct(player,id)?.let { (shop,p) -> id to Market.priceWithTax(shop,p) }
++        }
++        if(player.level>=HEALING_POTION_LEVEL) offers.firstOrNull { it.first==HEALING_POTION }
++                ?.takeIf { (_,price) -> price.toLong()*(10-count(player).coerceIn(0,10))<=player.adena }?.let { return it.first }
++        return offers.filter { it.second<=player.adena }.minByOrNull { it.second }?.first
++                ?: Gear.HEALING_POTIONS.filter { Market.findProduct(player,it)!=null }.minByOrNull { Market.npcPrice(it)?:Int.MAX_VALUE }
++    }
++
++    private const val HEALING_POTION = 1061
++    private const val HEALING_POTION_LEVEL = 30
+ 
+     /** Keep the two essential purchases in one budget, without extra shopping dialogues. */
+     fun restockTarget(player: Player,potion: Int): Int {
