@@ -1,0 +1,132 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+index e9fb27f..454fe56 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+@@ -39,6 +39,9 @@ internal class QuestView(val player: Player, val state: QuestState?) {
+     fun has(vararg itemIds: Int) = itemIds.all { count(it) > 0 }
+ }
+ 
++/** [need] of [item], dropped by [monsters]. */
++internal class Drop(val item: Int, val need: Int, val monsters: IntArray)
++
+ internal class QuestRule(val applies: (QuestView) -> Boolean, val actionFor: (QuestView) -> QuestAction) {
+     constructor(applies: (QuestView) -> Boolean, action: QuestAction) : this(applies, { _ -> action })
+ }
+@@ -91,10 +94,13 @@ internal class PathQuestBuilder(private val questName: String, private val from:
+      * At [cond], hunt the monsters of every item still short of [need]: the closest of them first, like a player
+      * ticking items off a list. Each pair is an item and the monsters that drop it.
+      */
+-    fun collect(cond: Int, need: Int, vararg drops: Pair<Int, IntArray>) {
+-        rules += QuestRule({ it.cond == cond }, { view ->
+-            Hunt(drops.filter { (item, _) -> view.count(item) < need }.flatMap { it.second.toList() }.toSet()
+-                    .ifEmpty { drops.flatMap { it.second.toList() }.toSet() }, null, null)
++    fun collect(cond: Int, need: Int, vararg drops: Pair<Int, IntArray>) =
++            gather({ it.cond == cond }, *drops.map { Drop(it.first, need, it.second) }.toTypedArray())
++
++    /** Like [collect], while [applies] holds and with its own count for each item. */
++    fun gather(applies: (QuestView) -> Boolean, vararg drops: Drop) {
++        rules += QuestRule({ view -> applies(view) && drops.any { view.count(it.item) < it.need } }, { view ->
++            Hunt(drops.filter { view.count(it.item) < it.need }.flatMap { it.monsters.toList() }.toSet(), null, null)
+         })
+     }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index 818822f..5ad54d9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -20,13 +20,18 @@ internal object SecondClassQuests {
+     const val MARK_OF_TRUST = 2734
+     const val MARK_OF_DUELIST = 2762
+     const val MARK_OF_CHAMPION = 3276
++    const val MARK_OF_LIFE = 3140
++    const val MARK_OF_FATE = 3172
+ 
+     /** Human and elven fighter guild masters of SecondClassChange. */
+     private val HUMAN_ELF_FIGHTER_MASTERS = listOf(30109, 30187, 30689, 30849, 30900, 31965, 32094)
++    private val DARK_ELF_MASTERS = listOf(31328, 30195, 30699, 30474, 31324, 30862, 30910, 31285, 31331, 31334, 31974, 32096)
+ 
+     val classes: List<SecondClass> = listOf(
+             SecondClass(WARRIOR, GLADIATOR, "GL", listOf(MARK_OF_CHALLENGER, MARK_OF_TRUST, MARK_OF_DUELIST), HUMAN_ELF_FIGHTER_MASTERS),
+-            SecondClass(WARRIOR, WARLORD, "WL", listOf(MARK_OF_CHALLENGER, MARK_OF_TRUST, MARK_OF_CHAMPION), HUMAN_ELF_FIGHTER_MASTERS))
++            SecondClass(WARRIOR, WARLORD, "WL", listOf(MARK_OF_CHALLENGER, MARK_OF_TRUST, MARK_OF_CHAMPION), HUMAN_ELF_FIGHTER_MASTERS),
++            SecondClass(ELVEN_KNIGHT, SWORD_SINGER, "SS", listOf(MARK_OF_CHALLENGER, MARK_OF_LIFE, MARK_OF_DUELIST), HUMAN_ELF_FIGHTER_MASTERS),
++            SecondClass(PALUS_KNIGHT, BLADEDANCER, "BD", listOf(MARK_OF_CHALLENGER, MARK_OF_FATE, MARK_OF_DUELIST), DARK_ELF_MASTERS))
+ 
+     private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
+             path(questName, HUMAN_FIGHTER, HUMAN_FIGHTER, mark, "") { level(minLevel); body() }
+@@ -109,6 +114,64 @@ internal object SecondClassQuests {
+                 cond(13, talk(30196))
+                 cond(14, talk(30624))
+             },
++            // Elves only. Taken from 38 although the script allows 37: Thalia halfway through wants 38.
++            mark("Q218_TestimonyOfLife", MARK_OF_LIFE, 38) {
++                start(30460, "30460-04.htm")
++                cond(1, talk(30154, "30154-07.htm"))
++                cond(2, talk(30371, "30371-03.htm"))
++                cond(3, talk(30300, "30300-06.htm"))
++                gather({ it.cond == 4 }, Drop(3161, 10, intArrayOf(20550)), Drop(3163, 20, intArrayOf(20176)),
++                        Drop(3162, 20, intArrayOf(20082, 20084, 20086, 20087, 20088)))
++                cond(5, talk(30300, "30300-10.htm"))
++                cond(6, talk(30371))
++                cond(7, talk(30419, "30419-04.htm"))
++                cond(8, talk(30375, "30375-02.htm"))
++                collect(9, 20, 3164 to intArrayOf(20233), 3165 to intArrayOf(20145))
++                cond(10, talk(30375))
++                cond(11, talk(30419))
++                cond(12, talk(30371, "30371-11.htm"))
++                cond(13, talk(30371))
++                cond(14, talk(30655, "30655-02.htm"))
++                cond(15, hunt(20581, 20582))
++                cond(16, talk(30655))
++                cond(17, talk(30371))
++                // The unicorn counts only when slain with Talin's Spear in hand.
++                cond(18, hunt(27077, weapon = 3026))
++                cond(19, talk(30371))
++                cond(20, talk(30154))
++                cond(21, talk(30460))
++            },
++            // Dark elves only. Taken from 38 although the script allows 37: Kaira halfway through wants 38.
++            mark("Q219_TestimonyOfFate", MARK_OF_FATE, 38) {
++                start(30476, "30476-05.htm")
++                cond(1, talk(30614))
++                cond(2, hunt(20144))
++                cond(3, talk(30614))
++                cond(5, talk(30463))
++                collect(6, 10, 3180 to intArrayOf(20202), 3181 to intArrayOf(20192, 20193), 3178 to intArrayOf(20158),
++                        3182 to intArrayOf(20157, 20230, 20232, 20234), 3179 to intArrayOf(20233))
++                cond(7, talk(30463))
++                cond(8, talk(30614))
++                // Kaira calls up the Alder Spirit next to the bot.
++                cond(9, talk(30476))
++                cond(10, talk(30613))
++                cond(11, talk(30114, "30114-04.htm"))
++                cond(12, talk(30210))
++                cond(13, talk(30476, "30476-12.htm"))
++                cond(14, talk(30476))
++                cond(15, talk(30358))
++                cond(16, talk(30419, "30419-02.htm"))
++                // Two errands in any order: the pixy's skulls for the fairy dust, the treant's leaf for the sap.
++                rule({ it.cond == 17 && !it.has(RED_FAIRY_DUST) && !it.has(PIXY_GARNET) }, talk(31845, "31845-02.htm"))
++                gather({ it.cond == 17 && it.has(PIXY_GARNET) }, Drop(3194, 10, intArrayOf(20554)), Drop(3195, 10, intArrayOf(20600)),
++                        Drop(3196, 10, intArrayOf(20270)), Drop(3197, 10, intArrayOf(20582)))
++                rule({ it.cond == 17 && it.has(PIXY_GARNET) }, talk(31845))
++                rule({ it.cond == 17 && !it.has(BLIGHT_TREANT_SAP) && !it.has(BLIGHT_TREANT_SEED) }, talk(31850, "31850-02.htm"))
++                rule({ it.cond == 17 && it.has(BLIGHT_TREANT_SEED) && !it.has(BLACK_WILLOW_LEAF) }, hunt(27079))
++                rule({ it.cond == 17 && it.has(BLIGHT_TREANT_SEED) }, talk(31850))
++                cond(17, talk(30419, "30419-05.htm"))
++                cond(18, talk(30358))
++            },
+     ).associateBy { it.mark }
+ 
+     /** Second professions of [first] whose three mark quests the bots can play. */
+@@ -120,4 +183,10 @@ internal object SecondClassQuests {
+     private const val BASILIK_PLASMA = 2752
+     private const val HONEY_DEW = 2753
+     private const val STAKATO_ICHOR = 2754
++    // Q219 items checked by the rules.
++    private const val PIXY_GARNET = 3193
++    private const val RED_FAIRY_DUST = 3198
++    private const val BLIGHT_TREANT_SEED = 3199
++    private const val BLACK_WILLOW_LEAF = 3200
++    private const val BLIGHT_TREANT_SAP = 3201
+ }

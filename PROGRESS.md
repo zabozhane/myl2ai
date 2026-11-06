@@ -1,3 +1,11 @@
+## 2026-11-06 — 2-я профессия, партия 2: эльфы и тёмные эльфы
+
+- `l2autobots-second-class-elves.patch`: сценарии Q218 Testimony of Life (эльфы, с 38) и
+  Q219 Testimony of Fate (тёмные эльфы, с 38). Новый шаг `gather` — набор предметов, у каждого
+  своё количество и своё условие. Открыты Elven Knight → Sword Singer (Challenger, Life, Duelist)
+  и Palus Knight → Bladedancer (Challenger, Fate, Duelist).
+- Проверено: сборка; все NPC и мобы есть в spawnlist, кроме Alder Spirit, которого спавнит сам квест.
+
 ## 2026-11-06 — 2-я профессия населения, партия 1
 
 - `l2autobots-second-class.patch`. С 35 уровня первая профессия играет марочные квесты, которые
