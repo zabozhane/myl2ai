@@ -1,0 +1,98 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+index 4bf7561..e97d488 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/HuntingSpots.kt
+@@ -19,7 +19,9 @@ import kotlin.math.exp
+ internal class HuntingSpot(val key: Long, val location: Location, private val monsterLevels: List<Int>, dangerLevel: Int = 0,
+                            private val npcIds: List<Int> = emptyList(),
+                            /** Aggressive spawns close to the anchor: a lone hunter is swarmed there whatever their level. */
+-                           val aggressiveCrowd: Int = 0) {
++                           val aggressiveCrowd: Int = 0,
++                           /** Highest aggressive monster within [HuntingSpots.NEAR_AGGRO_RADIUS] of the anchor on its floor, any cell. */
++                           val nearAggroLevel: Int = 0) {
+     /** Raised at run time when an aggressive monster the spawns didn't show kills a hunter here ([HuntingSpots.reportKillerAt]). */
+     @Volatile var dangerLevel: Int = dangerLevel
+         private set
+@@ -70,10 +72,17 @@ internal object HuntingSpots {
+     /** Live deaths: 14 aggressive spawns within 1500 swarmed a lv 20 fighter; productive spots had at most 3. */
+     private const val AGGRESSIVE_CROWD_RADIUS = 1500.0
+     private const val AGGRESSIVE_CROWD_LIMIT = 6
++    /** Below this a newbie's deaths are part of learning ([dev.l2j.autobots.population.economy.Fitness]). */
++    private const val WEAK_NOVICE_MIN_LEVEL = 10
+     /** Floors of one place (a village above, catacombs below) are separate spots. */
+     private const val FLOOR_HEIGHT = 1000
+     /** Aggressive monsters this many levels above the hunter make a spot a death trap. */
+     private const val DANGER_LEVELS_ABOVE = 5
++    /**
++     * Aggressive camps next to a spot's own cell reach its hunters: live, elves 11-15 farming wolves and fungi in
++     * starter gear died to Kaboo orcs 10-12 standing one cell over, humans to werewolves 10-12 the same way.
++     */
++    const val NEAR_AGGRO_RADIUS = 3000
+     /** Every spot within this radius of a death, on any floor, is marked dangerous. */
+     private const val KILLER_MARK_RADIUS = 5000
+     /** A fall off a ledge is remembered this long and steers hunters around it. */
+@@ -108,7 +117,7 @@ internal object HuntingSpots {
+                maxWalk: Int, useExits: Boolean, preferredNpcIds: Set<Int>, allowCrowded: Boolean): HuntingSpot? {
+         val exits=if(useExits) dev.l2j.autobots.population.economy.GatekeeperTravel.offers(bot).map { it.exit } else emptyList()
+         val candidates = spots.asSequence()
+-                .filter { it.key !in excluded && isSuitable(it, level) && !isDangerousFor(bot,it.dangerLevel) && (allowCrowded || !isCrowdedFor(bot,it)) }
++                .filter { it.key !in excluded && isSuitable(it, level) && !isDangerousFor(bot,it) && (allowCrowded || !isCrowdedFor(bot,it)) }
+                 .filter { preferredNpcIds.isEmpty() || it.npcIds().any { id -> id in preferredNpcIds } }
+                 .filter { withinReach(bot, it, maxWalk, exits) }
+                 .filter { !crossesLedge(bot, it) && RouteSafety.safeDestination(bot,it.location) }
+@@ -163,6 +172,19 @@ internal object HuntingSpots {
+                     (player is dev.l2j.autobots.Autobot && !player.isInParty && player.life?.isFallingBack==true))
+                 monsterLevel>targetLevels(player).last else isDeadly(monsterLevel,player.level)
+ 
++    /**
++     * [isDangerousFor] the spot's own cell, plus the aggressive camps around it for an autonomous novice. One that
++     * hunts below its level because its gear is weak ([LifeBehavior.ordinaryTargetLevel]) must not have aggressive
++     * monsters above that hunting level nearby: in starter gear a pack of its own level kills it.
++     */
++    fun isDangerousFor(player: Player,spot: HuntingSpot): Boolean {
++        if(isDangerousFor(player,spot.dangerLevel)) return true
++        if(player.level>=20 || !(player is dev.l2j.autobots.Autobot || dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(player))) return false
++        val hunting=(player as? dev.l2j.autobots.Autobot)?.takeIf { !it.isInParty }?.life?.ordinaryTargetLevel ?: player.level
++        val cap=if(hunting<player.level && player.level>=WEAK_NOVICE_MIN_LEVEL) hunting else targetLevels(player).last
++        return spot.nearAggroLevel>cap
++    }
++
+     fun huntAnchor(player: Player, spot: HuntingSpot, origin: Location=player.location(),validateDirect: Boolean=true): Location? = SpawnTable.getInstance().spawns.asSequence()
+             .filter { it.template.isType("Monster") && it.template.level.toInt() in targetLevels(player) }
+             .mapNotNull { spawn -> (spawn.loc ?: spawn.npc?.position)?.let { Location(it.x,it.y,it.z) } }
+@@ -175,7 +197,7 @@ internal object HuntingSpots {
+                 if(player is dev.l2j.autobots.Autobot) nearArrival(player,origin,excluded,maxWalk,surfaceOnly,allowCrowded=true) else emptyList() }
+ 
+     private fun nearArrival(player: Player,origin: Location,excluded: Set<Long>,maxWalk: Int,surfaceOnly: Boolean,allowCrowded: Boolean): List<HuntingSpot> =
+-            spots.asSequence().filter { it.key !in excluded && it.monstersIn(targetLevels(player))>0 && !isDangerousFor(player,it.dangerLevel) && (allowCrowded || !isCrowdedFor(player,it)) && distance(origin,it.location)<=maxWalk }
++            spots.asSequence().filter { it.key !in excluded && it.monstersIn(targetLevels(player))>0 && !isDangerousFor(player,it) && (allowCrowded || !isCrowdedFor(player,it)) && distance(origin,it.location)<=maxWalk }
+                     .filter { RouteSafety.safeDestination(player,it.location) }
+                     .filter { !surfaceOnly || kotlin.math.abs(net.sf.l2j.gameserver.geoengine.GeoEngine.getInstance().getHeight(it.location.x,it.location.y,it.location.z+5000)-it.location.z)<=200 }
+                     .sortedBy { distance(origin,it.location) }.filter { huntAnchor(player,it,origin,validateDirect=false)!=null }.take(8).toList()
+@@ -319,8 +341,12 @@ internal object HuntingSpots {
+             for (dx in -1..1) for (dy in -1..1) for (spawn in byCell[Triple(cell.cx + dx, cell.cy + dy, cell.cz)]?.spawns.orEmpty())
+                 if (spawn.aggressive && kotlin.math.abs(spawn.z - anchor.z) <= FLOOR_HEIGHT &&
+                         kotlin.math.hypot((spawn.x - anchor.x).toDouble(), (spawn.y - anchor.y).toDouble()) <= AGGRESSIVE_CROWD_RADIUS) crowd++
++            var nearAggro = 0
++            for (dx in -2..2) for (dy in -2..2) for (spawn in byCell[Triple(cell.cx + dx, cell.cy + dy, cell.cz)]?.spawns.orEmpty())
++                if (spawn.aggressive && spawn.level > nearAggro && kotlin.math.abs(spawn.z - anchor.z) <= FLOOR_HEIGHT &&
++                        kotlin.math.hypot((spawn.x - anchor.x).toDouble(), (spawn.y - anchor.y).toDouble()) <= NEAR_AGGRO_RADIUS) nearAggro = spawn.level
+             HuntingSpot(cellKey(anchor.x, anchor.y, anchor.z), Location(anchor.x, anchor.y, anchor.z),
+-                    cell.spawns.map { it.level }, danger, cell.spawns.map { it.npcId }, crowd)
++                    cell.spawns.map { it.level }, danger, cell.spawns.map { it.npcId }, crowd, nearAggro)
+         }
+         // Danger marks from previous runs, kept in the database so a restart doesn't send hunters back.
+         val saved = SpotDangerDao.load()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index fda7a05..0cdc413 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -647,7 +647,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+                 !HuntingSpots.isDeadly(current.dangerLevel,bot.level)
+         val recoverySuitable=current!=null && recovery?.spot?.key==current.key &&
+                 current.monstersIn(HuntingSpots.targetLevels(bot))>0 && !HuntingSpots.isDeadly(current.dangerLevel,bot.level)
+-        if (current != null && !HuntingSpots.isDangerousFor(bot,current.dangerLevel) &&
++        if (current != null && !HuntingSpots.isDangerousFor(bot,current) &&
+                 (HuntingSpots.isSuitable(current,level)||repeatSuitable||recoverySuitable) && RouteSafety.safeDestination(bot,current.location)) {
+             spotLevel = level
+             return current
