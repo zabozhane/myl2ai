@@ -1,0 +1,16 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 6d37733..a185f4f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -495,7 +495,10 @@ internal class QuestRunner(private val bot: Player) {
+         when {
+             exit != null -> TravelByGatekeeperSequence(bot, exit) { failed("no teleport to ${exit.x},${exit.y} (adena ${bot.adena})", walk = true) }.execute()
+             // Far from town and from the target: back to town first, then the gatekeeper.
+-            far && !inTown && homeExit != null && distance(bot.location(), destination) > FAR_FROM_TOWN -> {
++            // Only when the town's gatekeeper lands clearly closer than the bot already is: a bot a quest hop left in
++            // the field (Neutral Zone, 25k from the cave) would otherwise be sent back to town and fly out again forever.
++            far && !inTown && homeExit != null && distance(bot.location(), destination) > FAR_FROM_TOWN &&
++                    distance(homeExit.exit, destination) < distance(bot.location(), destination) - MIN_WALK_SAVED_BY_TELEPORT -> {
+                 dev.l2j.autobots.population.economy.EconomyLog.note(bot,
+                         "quest route via=town gatekeeper=${homeExit.gatekeeper.name} menu=${homeExit.id} fare=${homeExit.price}" +
+                                 " to=${destination.x},${destination.y},${destination.z}")
