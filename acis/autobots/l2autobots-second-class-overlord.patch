@@ -1,0 +1,187 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index 5b435e0..599a676 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -318,6 +318,8 @@ internal object Gear {
+         keep += AbstractEnchantPacket._scrolls.filter { (_, scroll) -> worn.any { scroll.isValid(it) } }.keys
+         // Recipes, materials and parts for the bot's own crafts or workshop orders.
+         keep += CraftStock.keep(bot)
++        // Shop goods a profession quest asks for, like the Bone Arrows of the Test of the Lord.
++        keep += dev.l2j.autobots.population.quests.SecondClassQuests.boughtFor(bot)
+         // Borrowed gear and what it replaced are not the bot's to sell.
+         val lent = Loans.protectedObjects(bot)
+         return bot.inventory.items.filter {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+index 409999e..cb67325 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Market.kt
+@@ -71,6 +71,10 @@ internal object Market {
+         return fitting.filter { it is net.sf.l2j.gameserver.model.item.kind.Armor && it.itemType == target.itemType }.maxByOrNull { it.referencePrice }?.itemId ?: 0
+     }
+ 
++    /** What [merchant] itself sells of [itemId]. */
++    fun productOf(merchant: Npc, itemId: Int): Pair<Shop, Product>? =
++            shops.firstOrNull { it.merchant.objectId == merchant.objectId }?.let { shop -> shop.products[itemId]?.let { shop to it } }
++
+     fun shopsNear(bot: Player): List<Shop> = shops.filter { distance(bot, it.merchant) <= TOWN_RADIUS }
+ 
+     /** The closest shop in town that sells [itemId], with the product. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index d886a9a..ba612ad 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -338,9 +338,31 @@ internal class QuestRunner(private val bot: Player) {
+                 talk(path, action)
+             }
+             is Hunt -> hunt(path, action)
++            is Buy -> {
++                holdWeapon(null)
++                setTargets(null)
++                buy(path, action)
++            }
+         }
+     }
+ 
++    private suspend fun buy(path: PathQuest, buy: Buy) {
++        val npc = QuestWorld.closestNpc(bot, listOf(buy.npcId)) ?: return giveUp(path, "npc ${buy.npcId} is not in the world")
++        val (shop, product) = dev.l2j.autobots.population.economy.Market.productOf(npc, buy.itemId)
++                ?: return giveUp(path, "${npc.name} doesn't sell ${buy.itemId}")
++        val need = buy.count - QuestView(bot, null).count(buy.itemId)
++        if (need <= 0) return
++        val total = need.toLong() * dev.l2j.autobots.population.economy.Market.priceWithTax(shop, product)
++        if (bot.adena < total) return giveUp(path, "can't afford $need ${product.item.name} for $total (adena ${bot.adena})")
++        if (!reach(npc)) return
++        bot.target = npc
++        delay(Rnd.get(1500, 4000).toLong())
++        val bought = dev.l2j.autobots.population.economy.Market.buyFromNpc(bot, shop, product, need)
++        bot.target = null
++        if (bought) QuestLog.log(bot, QuestEvent.Step, "${path.questName}: bought $need ${product.item.name} from ${npc.name}")
++        else giveUp(path, "couldn't buy $need ${product.item.name} from ${npc.name}")
++    }
++
+     private suspend fun talk(path: PathQuest, talk: Talk) {
+         val npc = QuestWorld.closestNpc(bot, listOf(talk.npcId))
+         if (talk.orElse != null && (npc == null || distance(bot, npc) > SPAWNED_NPC_RADIUS)) return execute(path, talk.orElse)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+index 454fe56..2a429a0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+@@ -25,6 +25,9 @@ internal class Talk(val npcId: Int, val events: List<String>, val unlessAdvanced
+  */
+ internal class Hunt(val monsterIds: Set<Int>, val weapon: Int?, val orElse: QuestAction?, val spoil: Set<Int> = emptySet()) : QuestAction()
+ 
++/** Walk up to merchant [npcId] and buy what is short of [count] pieces of [itemId], when the quest asks for shop goods. */
++internal class Buy(val npcId: Int, val itemId: Int, val count: Int) : QuestAction()
++
+ /** What the bot knows about its quest when it decides the next step: the journal step and its own bag. */
+ internal class QuestView(val player: Player, val state: QuestState?) {
+     val started get() = state?.isStarted == true
+@@ -109,6 +112,8 @@ internal class PathQuestBuilder(private val questName: String, private val from:
+     fun hunt(vararg monsterIds: Int, weapon: Int? = null, orElse: QuestAction? = null, spoil: Set<Int> = emptySet()) =
+             Hunt(monsterIds.toSet(), weapon, orElse, spoil)
+ 
++    fun buy(npcId: Int, itemId: Int, count: Int) = Buy(npcId, itemId, count)
++
+     fun build() = PathQuest(questName, from, to, mark, masterEvent, startNpc, startEvents, rules.toList(), minLevel)
+ }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index 1d2d630..5445696 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -33,6 +33,7 @@ internal object SecondClassQuests {
+     const val MARK_OF_WITCHCRAFT = 3307
+     const val MARK_OF_PILGRIM = 2721
+     const val MARK_OF_WARSPIRIT = 2879
++    const val MARK_OF_LORD = 3390
+ 
+     /** Human and elven fighter guild masters of SecondClassChange. */
+     private val HUMAN_ELF_FIGHTER_MASTERS = listOf(30109, 30187, 30689, 30849, 30900, 31965, 32094)
+@@ -64,7 +65,8 @@ internal object SecondClassQuests {
+             SecondClass(PALUS_KNIGHT, SHILLIEN_KNIGHT, "SK", listOf(MARK_OF_DUTY, MARK_OF_FATE, MARK_OF_WITCHCRAFT), DARK_ELF_MASTERS),
+             SecondClass(CLERIC, BISHOP, "BI", listOf(MARK_OF_PILGRIM, MARK_OF_TRUST, MARK_OF_HEALER), HUMAN_ELF_PRIEST_MASTERS),
+             SecondClass(ELVEN_ORACLE, ELVEN_ELDER, "EE", listOf(MARK_OF_PILGRIM, MARK_OF_LIFE, MARK_OF_HEALER), HUMAN_ELF_PRIEST_MASTERS),
+-            SecondClass(ORC_SHAMAN, WARCRYER, "WC", listOf(MARK_OF_PILGRIM, MARK_OF_GLORY, MARK_OF_WARSPIRIT), ORC_MASTERS))
++            SecondClass(ORC_SHAMAN, WARCRYER, "WC", listOf(MARK_OF_PILGRIM, MARK_OF_GLORY, MARK_OF_WARSPIRIT), ORC_MASTERS),
++            SecondClass(ORC_SHAMAN, OVERLORD, "OL", listOf(MARK_OF_PILGRIM, MARK_OF_GLORY, MARK_OF_LORD), ORC_MASTERS))
+ 
+     private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
+             path(questName, HUMAN_FIGHTER, HUMAN_FIGHTER, mark, "") { level(minLevel); body() }
+@@ -519,8 +521,48 @@ internal object SecondClassQuests {
+                 cond(4, talk(30510))
+                 cond(5, talk(30649, "30649-03.htm"))
+             },
++            // Orc shamans. Six charms, each traded for a token; the order keeps the orc village errands together. Jakal's
++            // axe blade costs 1000 adena and Tantus wants 1000 Bone Arrows from the village shop, so the bot sets out
++            // on that errand only with the money for both.
++            mark("Q232_TestOfTheLord", MARK_OF_LORD, 39) {
++                start(30565, "30565-05.htm")
++                rule({ it.cond == 1 && !it.has(VARKEES_CHARM) && !it.has(HUGE_ORC_FANG) }, talk(30566, "30566-02.htm"))
++                rule({ it.cond == 1 && !it.has(HATOS_CHARM) && !it.has(SWORD_INTO_SKULL) }, talk(30568, "30568-02.htm"))
++                rule({ it.cond == 1 && it.has(HATOS_CHARM) && !it.has(SUMARIS_LETTER) && !it.has(URUTU_BLADE) }, talk(30564))
++                rule({ it.cond == 1 && !it.has(TANTUS_CHARM) && !it.has(AXE_OF_CEREMONY) && it.player.adena >= 4000 }, talk(30567, "30567-02.htm"))
++                rule({ it.cond == 1 && it.has(TANTUS_CHARM) && !it.has(NERUGA_AXE_BLADE) && it.player.adena >= 1000 }, talk(30558, "30558-02.htm"))
++                rule({ it.cond == 1 && it.has(TANTUS_CHARM, NERUGA_AXE_BLADE) && it.count(BONE_ARROW) < 1000 }, buy(30561, BONE_ARROW, 1000))
++                rule({ it.cond == 1 && it.has(TANTUS_CHARM, NERUGA_AXE_BLADE) }, talk(30567))
++                rule({ it.cond == 1 && it.has(VARKEES_CHARM, MANAKIAS_AMULET) }, talk(30566))
++                rule({ it.cond == 1 && it.has(HATOS_CHARM, URUTU_BLADE) && it.count(TIMAK_ORC_SKULL) >= 10 }, talk(30568))
++                rule({ it.cond == 1 && it.has(SUMARIS_LETTER) }, talk(30510))
++                rule({ it.cond == 1 && !it.has(CHIANTA_CHARM) && !it.has(MONSTEREYE_WOODCARVING) }, talk(30642, "30642-02.htm"))
++                rule({ it.cond == 1 && it.has(CHIANTA_CHARM) && it.count(MONSTEREYE_CORNEA) >= 20 }, talk(30642))
++                rule({ it.cond == 1 && it.has(VARKEES_CHARM) && !it.has(MANAKIAS_ORDERS) && !it.has(MANAKIAS_AMULET) }, talk(30515))
++                rule({ it.cond == 1 && it.has(MANAKIAS_ORDERS) && it.count(BREKA_ORC_FANG) >= 20 }, talk(30515))
++                rule({ it.cond == 1 && it.has(MANAKIAS_ORDERS) }, hunt(20269, 20270))
++                rule({ it.cond == 1 && !it.has(TAKUNA_CHARM) && !it.has(HANDIWORK_SPIDER_BROOCH) }, talk(30641, "30641-02.htm"))
++                rule({ it.cond == 1 && it.has(TAKUNA_CHARM) && it.count(MARSH_SPIDER_FEELER) >= 10 && it.count(MARSH_SPIDER_FEET) >= 10 }, talk(30641))
++                // Timak Overlords (45) are left alone: the skulls drop from the lesser Timak orcs too.
++                rule({ it.cond == 1 && it.has(HATOS_CHARM) }, hunt(20583, 20584, 20585, 20586, 20587))
++                rule({ it.cond == 1 && it.has(CHIANTA_CHARM) }, hunt(20564))
++                rule({ it.cond == 1 && it.has(TAKUNA_CHARM) }, hunt(20233))
++                cond(2, talk(30565, "30565-08.htm"))
++                cond(3, talk(30649, "30649-04.htm"))
++                // The chief's notice first, then a head: two Ragna orcs.
++                cond(4, hunt(20778, 20779))
++                cond(5, talk(30649))
++                // Martankus calls up the First Orc next to himself for a short while.
++                cond(6, talkOr(30643, "30643-02.htm", orElse = talk(30649, "30649-07.htm")))
++                cond(7, talk(30565))
++            },
+     ).associateBy { it.mark }
+ 
++    /** Shop goods a started mark quest still has to hand in: never sold off as surplus on a town trip. */
++    fun boughtFor(bot: net.sf.l2j.gameserver.model.actor.Player): Set<Int> =
++            if (bot.getQuestState("Q232_TestOfTheLord")?.isStarted == true && bot.inventory.getItemByItemId(TANTUS_CHARM) != null) setOf(BONE_ARROW)
++            else emptySet()
++
+     /** Second professions of [first] whose three mark quests the bots can play. */
+     fun forFirstClass(first: ClassId): List<SecondClass> = classes.filter { c -> c.from == first && c.marks.all { it in quests } }
+ 
+@@ -530,6 +572,28 @@ internal object SecondClassQuests {
+     private const val BASILIK_PLASMA = 2752
+     private const val HONEY_DEW = 2753
+     private const val STAKATO_ICHOR = 2754
++    // Q232 items checked by the rules.
++    private const val VARKEES_CHARM = 3392
++    private const val TANTUS_CHARM = 3393
++    private const val HATOS_CHARM = 3394
++    private const val TAKUNA_CHARM = 3395
++    private const val CHIANTA_CHARM = 3396
++    private const val MANAKIAS_ORDERS = 3397
++    private const val BREKA_ORC_FANG = 3398
++    private const val MANAKIAS_AMULET = 3399
++    private const val HUGE_ORC_FANG = 3400
++    private const val SUMARIS_LETTER = 3401
++    private const val URUTU_BLADE = 3402
++    private const val TIMAK_ORC_SKULL = 3403
++    private const val SWORD_INTO_SKULL = 3404
++    private const val NERUGA_AXE_BLADE = 3405
++    private const val AXE_OF_CEREMONY = 3406
++    private const val MARSH_SPIDER_FEELER = 3407
++    private const val MARSH_SPIDER_FEET = 3408
++    private const val HANDIWORK_SPIDER_BROOCH = 3409
++    private const val MONSTEREYE_CORNEA = 3410
++    private const val MONSTEREYE_WOODCARVING = 3411
++    private const val BONE_ARROW = 1341
+     // Q233 items checked by the rules.
+     private const val ORIM_CONTRACT = 2883
+     private const val BRAKI_REMAINS_1 = 2887

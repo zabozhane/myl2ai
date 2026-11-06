@@ -7,9 +7,11 @@
 Warrior → Gladiator/Warlord. Партиями добавлены Q218 Life, Q219 Fate, Q212 Duty, Q226 Healer и Q220 Glory
 (орки: Destroyer и Tyrant), Q213 Seeker, Q224 Sagittarius и Q225 Searcher (Rogue, Elven Scout, Assassin — шесть
 профессий). Q214 Scholar, Q228 Magus и Q229 Witchcraft (Sorcerer, Necromancer, Spellsinger, Spellhowler,
-Dark Avenger, Shillien Knight). Q215 Pilgrim (Bishop, Elven Elder), Q233 War Spirit (Warcryer).
-Q230 Summoner (дуэли призывателей), Q227 Reformer (бить нежить и оборотня строго определёнными скиллами), Q232 Lord
-(1000 Bone Arrow) пока не сделаны. Остальные марки добавляются партиями в `SecondClassQuests.kt`.
+Dark Avenger, Shillien Knight). Q215 Pilgrim (Bishop, Elven Elder), Q233 War Spirit (Warcryer), Q232 Lord
+(Overlord; 1000 Bone Arrow покупаются в лавке деревни орков новым шагом `buy`).
+Q230 Summoner (дуэли призывателей) и Q227 Reformer (бить нежить и оборотня строго определёнными скиллами) пока не
+сделаны. Гномы ждут крафта: Q216 Guildsman просит скрафтить 7 Journeyman Ring, а Steel, Varnish и Crystal D для них
+в магазинах ботов не продаются (только дроп, спойл и крафт). Остальные марки добавляются партиями в `SecondClassQuests.kt`.
 
 ## Что есть сейчас
 
