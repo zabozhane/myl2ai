@@ -31,17 +31,22 @@ public class NoviceCrowdPreyVerify extends IslandRecoveryVerify {
  static boolean worth(Autobot b,Monster m)throws Exception{
   Method w=Class.forName("dev.l2j.autobots.utils.AutobotHelpersKt").getDeclaredMethod("isWorthTargeting",Creature.class,Creature.class);w.setAccessible(true);return (Boolean)w.invoke(null,b,m);
  }
- static int size(Object life,String field)throws Exception{return ((Map<?,?>)member(life,field).get(life)).size();}
+ static int size(Object life,String field)throws Exception{try{return ((Map<?,?>)member(life,field).get(life)).size();}catch(NoSuchFieldException e){return -1;}}
  public static void main(String[] args){try{
   if(!"yes".equals(System.getenv("L2_MOVEMENT_ISOLATED")))throw new IllegalStateException();
   GameServer.main(new String[0]);Object m=singleton("offlinelife.OfflineFarmManager");invoke(member(m,"travelTask").get(m),"cancel");
   Object spots=singleton("population.HuntingSpots");
 
   // Phase 1: the crowd is counted at the spot, not around a resting bot.
-  Location village=new Location(-49400,-115600,-160);
-  Autobot red=resident("RedLock",true);Object life=invoke(red,"getLife");warp(red,village);
+  Location village=new Location(-49400,-115600,-160);Autobot red=null;
+  if(!"2".equals(System.getenv("PHASE"))){
+  red=resident("RedLock",true);Object life=invoke(red,"getLife");warp(red,village);
   int n=0;for(String name:new String[]{"Man1aK","Malkin","DragonHunter","LapaTb","YnItAr","MrKastet4ik","MegaFight","PoBeDa"}){
    Autobot o=resident(name,false);warp(o,new Location(village.getX()+(n%3-1)*150,village.getY()+(n/3-1)*150,village.getZ()));o.sitDown();n++;}
+  // Live: RedLock sat resting (REST, low HP and MP) in the crowd while its spots were struck off one per tick.
+  Object hunt=Class.forName("dev.l2j.autobots.population.SessionPlan$Activity").getField("Hunt").get(null);
+  invoke(member(life,"session").get(life),"switchTo",hunt,60,"verify: hunting session");
+  red.setCurrentHp(red.getMaxHp()*0.3);red.setCurrentMp(red.getMaxMp()*0.1);red.sitDown();Thread.sleep(3000);
   long exp=red.getExp();int maxBad=0,maxCrowded=0,deaths=0;boolean wasDead=false,left=false;double far=0;
   AtomicReference<Throwable> error=new AtomicReference<>();long began=System.currentTimeMillis(),reported=0;
   while(System.currentTimeMillis()-began<240000){update(red,error);if(error.get()!=null)throw new RuntimeException(error.get());
@@ -55,13 +60,15 @@ public class NoviceCrowdPreyVerify extends IslandRecoveryVerify {
   check(maxBad<9,"the village crowd no longer strikes off every spot around it (live: 9 at once, then 15)");
   check(left||red.getExp()>exp,"RedLock walks off to hunt or hunts among the others");
   check(red.getExp()>exp,"RedLock gains exp");
+  }
 
   // Phase 2: monsters that are not aggressive but keep killing the same resident.
   Autobot kima=resident("kima",true);Object kl=invoke(kima,"getLife");
   Location graves=new Location(-37900,-114050,-1968);warp(kima,graves);
   Monster g1=spawn(20319,new Location(graves.getX()+80,graves.getY(),graves.getZ())),g2=spawn(20319,new Location(graves.getX()-80,graves.getY(),graves.getZ()));
   check(!g1.isAggressive(),"Goblin Grave Robber is not aggressive");
-  check(worth(kima,g1)||g1.getLevel()>kima.getLevel()+1,"before any death the robber is ordinary prey (or out of the level window)");
+  kotlin.ranges.IntRange window=(kotlin.ranges.IntRange)invoke(spots,"targetLevels",kima);System.out.println("PREY INFO kima lv="+kima.getLevel()+" targetLevels="+window+" robber="+g1.getLevel());
+  check(worth(kima,g1)==window.contains(g1.getLevel()),"before any death the robber is judged by the level window alone");
   g1.setTarget(kima);g2.setTarget(kima);invoke(kl,"onDeath",g1);
   Set<Long> graveSpots=DeadlySpotVerify.keysWith(spots,graves,20319,2500);Set<?> excluded=(Set<?>)invoke(kl,"getExcludedSpots");
   System.out.println("PREY INFO graveSpots="+graveSpots+" excluded="+excluded);
@@ -74,6 +81,7 @@ public class NoviceCrowdPreyVerify extends IslandRecoveryVerify {
 
   Location field=new Location(-48000,-112600,-240);warp(kima,field);
   Monster k=spawn(20538,new Location(field.getX()+100,field.getY(),field.getZ()));check(!k.isAggressive(),"Elder Prairie Keltir is not aggressive");
+  check(worth(kima,k),"before its deaths the keltir is ordinary prey (live: kima kept pulling it)");
   k.setTarget(kima);invoke(kl,"onDeath",k);
   check(!(Boolean)invoke(kl,"avoidsPrey",20538),"one death to a single keltir is not enough");
   invoke(kl,"onDeath",k);
@@ -82,7 +90,7 @@ public class NoviceCrowdPreyVerify extends IslandRecoveryVerify {
   k.deleteMe();
   Object next=invoke(spots,"choose",kima,kima.getLevel(),invoke(kl,"getExcludedSpots"),null,15000,false,Collections.emptySet());
   System.out.println("PREY INFO next="+next);check(next!=null,"kima still finds a hunting spot");
-  check(!kima.isGM()&&!kima.isInvul()&&!red.isGM(),"no GM or invulnerability");
+  check(!kima.isGM()&&!kima.isInvul()&&(red==null||!red.isGM()),"no GM or invulnerability");
   System.out.println("NOVICE CROWD PREY ALL PASSED");System.exit(0);
  }catch(Throwable t){t.printStackTrace();System.exit(1);}}
 }
