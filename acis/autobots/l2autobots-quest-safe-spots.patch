@@ -1,0 +1,59 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/RouteSafety.kt b/src/main/kotlin/dev/l2j/autobots/population/RouteSafety.kt
+index 1bbf5d3..5ca31f9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/RouteSafety.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/RouteSafety.kt
+@@ -16,10 +16,10 @@ internal object RouteSafety {
+     private const val CELL = 2500
+     private const val RADIUS = 900.0
+     private val waterDeaths = ConcurrentHashMap<Pair<Int, Int>, Location>()
+-    private data class Threat(val loc: Location, val level: Int)
++    private data class Threat(val loc: Location, val level: Int, val npcId: Int)
+     private val threats by lazy {
+         SpawnTable.getInstance().spawns.filter { it.template.isType("Monster") && it.template.aggroRange > 0 }
+-                .mapNotNull { s -> (s.loc ?: s.npc?.position)?.let { Threat(Location(it.x,it.y,it.z),s.template.level.toInt()) } }
++                .mapNotNull { s -> (s.loc ?: s.npc?.position)?.let { Threat(Location(it.x,it.y,it.z),s.template.level.toInt(),s.template.npcId) } }
+                 .groupBy { cell(it.loc.x,it.loc.y) }
+     }
+     private fun cell(x: Int,y: Int) = Math.floorDiv(x,CELL) to Math.floorDiv(y,CELL)
+@@ -43,6 +43,16 @@ internal object RouteSafety {
+         }
+     }
+ 
++    /** Aggressive monsters dangerous to [player] that spawn within [radius] of [at], [ignore]d ones (the prey) aside. */
++    fun dangerNear(player: Player, at: Location, radius: Int, ignore: Set<Int>): Int {
++        var count=0
++        for (cx in Math.floorDiv(at.x-radius,CELL)..Math.floorDiv(at.x+radius,CELL))
++            for (cy in Math.floorDiv(at.y-radius,CELL)..Math.floorDiv(at.y+radius,CELL))
++                count+=threats[cx to cy].orEmpty().count { it.npcId !in ignore && abs(it.loc.z-at.z)<1000 &&
++                        hypot((it.loc.x-at.x).toDouble(),(it.loc.y-at.y).toDouble())<radius && HuntingSpots.isDangerousFor(player,it.level) }
++        return count
++    }
++
+     fun isWater(at: Location): Boolean = ZoneManager.getInstance().getZone(at.x,at.y,at.z,WaterZone::class.java)!=null
+ 
+     /** Includes underwater spawn anchors; a spawn is not proof that the shore is reachable. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index a185f4f..6808568 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -413,7 +413,10 @@ internal class QuestRunner(private val bot: Player) {
+         huntSpot?.let { return it }
+         val now = System.currentTimeMillis()
+         emptySpots.entries.removeIf { now - it.value > EMPTY_SPOT_MS }
+-        val points = QuestWorld.spawnPoints(bot, hunt.monsterIds)
++        // Spawn points among aggressive monsters too strong for the bot come last (the second profession stand lost
++        // bots 37-40 to Gigantiops and Cursed Seers next to their prey); closest first otherwise.
++        val points = QuestWorld.spawnPoints(bot, hunt.monsterIds).take(MAX_SPOT_CANDIDATES)
++                .sortedBy { if (dev.l2j.autobots.population.RouteSafety.dangerNear(bot, it, DANGER_RADIUS, hunt.monsterIds) > 0) 1 else 0 }
+         if (points.isEmpty()) return null
+         // All spawn points were empty a moment ago: start over from the closest one.
+         val next = points.firstOrNull { it !in emptySpots } ?: points.first().also { emptySpots.clear() }
+@@ -644,6 +647,8 @@ internal class QuestRunner(private val bot: Player) {
+         private const val MAX_TRAVEL_FAILURES = 8
+         private const val LONG_TRIP = 100000
+         private const val LONG_HOP_FROM = 30000
++        private const val MAX_SPOT_CANDIDATES = 40
++        private const val DANGER_RADIUS = 1500
+         // A hop is complete when the walk from its exit to the target can be planned; from the field exits that serve
+         // quest areas (Neutral Zone, Plains of Dion) that walk is often 20-30k.
+         private const val HOP_WALK = 30000
