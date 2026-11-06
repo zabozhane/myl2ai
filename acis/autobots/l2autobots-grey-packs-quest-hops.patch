@@ -1,0 +1,42 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index b3bd563..a4c5fd2 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -41,15 +41,19 @@ internal fun Player.isUnderAttack(): Boolean =
+ 
+ private const val ATTACKER_RADIUS = 1000
+ private const val GREY_ATTACKER_LEVELS = 15
++private const val GREY_HIT_RANGE = 300
++private const val GREY_HURT_SHARE = 0.8
+ 
+ /**
+  * A monster that has the bot as its target but neither sees it nor can walk to it (a skeleton on the cave floor below
+  * a ledge path) is no attack: counting it froze quest walks above the Cave of Trials for the whole session.
+  */
+ private fun Player.canReach(monster: Monster): Boolean {
+-    // Far weaker monsters are no attack either: the bot's own targeting skips them as grey, and a Crypt Horror
+-    // (15) behind a hump held a level 39 shaman for nine minutes without a scratch. A player walks on.
+-    if (monster.level + GREY_ATTACKER_LEVELS <= level) return false
++    // Far weaker monsters are no attack either while they don't hurt: a Crypt Horror (15) behind a hump held a level
++    // 39 shaman for nine minutes without a scratch, and a player walks on. Once they close in or the bot bleeds they
++    // count again: a pack of 11-13 skeletons (12-19) killed two priests of 39 on the Martankus path, ignored.
++    if (monster.level + GREY_ATTACKER_LEVELS <= level &&
++            (currentHp >= maxHp * GREY_HURT_SHARE && !isInsideRadius(monster, GREY_HIT_RANGE, true, false))) return false
+     if (kotlin.math.abs(monster.z - z) < 200) return true
+     val geo = net.sf.l2j.gameserver.geoengine.GeoEngine.getInstance()
+     return geo.canSeeTarget(monster, this) || geo.canMoveToTarget(monster.x, monster.y, monster.z, x, y, z)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index e177e13..c34a5fe 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -679,6 +679,10 @@ internal class QuestRunner(private val bot: Player) {
+         val viaRoute = distance(bot,npc)>LONG_NPC_WALK && QuestWorld.via(bot,npc.npcId)!=null
+         if (distance(bot,npc)>12000 || viaRoute) {
+             travelTo(npc.location(),800,npc)
++            // Still a town hop or more away (Altran on Talking Island from Giran's fields): the trip goes on next
++            // tick and its own failures count. Walking the rest from here only stalled two dwarves for five minutes
++            // and hid the trip's real reason behind "can't reach".
++            if (!bot.isDead && distance(bot,npc)>12000 && !viaRoute) return false
+         }
+         val reached = dev.l2j.autobots.population.economy.NpcTravel.reach(bot,npc)
+         // Counted like any failed trip, so the quest is put aside instead of the bot standing there for good.
