@@ -1,0 +1,398 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 66c7c43..f156497 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -40,6 +40,7 @@ internal class QuestRunner(private val bot: Player) {
+ 
+     private var loaded = false
+     private var chosen: PathQuest? = null
++    private var chosenSecond: SecondClass? = null
+ 
+     // Progress watch: a quest that does not move for a long time is put aside for a while, like a player who gives up
+     // for the evening.
+@@ -55,6 +56,7 @@ internal class QuestRunner(private val bot: Player) {
+ 
+     // Hunting for the quest.
+     private var huntSpot: Location? = null
++    private var huntSet: Set<Int> = emptySet()
+     private val emptySpots = mutableMapOf<Location, Long>()
+     private var idleTicks = 0
+     private var liveScanAt = 0L
+@@ -80,18 +82,32 @@ internal class QuestRunner(private val bot: Player) {
+     fun hasBusiness(): Boolean = repeatReady() || professionBusiness()
+ 
+     fun professionBusiness(): Boolean {
+-        if(!AutobotData.settings.questsEnabled || bot.classId.level()!=0 || bot.level<START_LEVEL || bot.isInParty) return false
++        if(!AutobotData.settings.questsEnabled || bot.isInParty) return false
++        if(bot.classId.level()==1) return secondClassBusiness()
++        if(bot.classId.level()!=0 || bot.level<START_LEVEL) return false
+         restoreRetry()
+         return System.currentTimeMillis()>=pausedUntil && PathQuests.forBaseClass(bot.classId).any { it.to in getSupportedClasses }
+     }
+ 
++    /** From 35 a first profession plays the mark quests its level allows, and at 40 with all three marks changes class. */
++    private fun secondClassBusiness(): Boolean {
++        if(bot.level<MARK_START_LEVEL) return false
++        restoreRetry()
++        if(System.currentTimeMillis()<pausedUntil) return false
++        ensureLoaded()
++        val target=currentSecond() ?: return false
++        return nextMarkQuest(target)!=null || (hasAllMarks(target) && bot.level>=SECOND_CLASS_LEVEL)
++    }
++
++    private fun allQuests(): List<PathQuest> = PathQuests.forBaseClass(bot.classId) + SecondClassQuests.quests.values
++
+     /** Load once per runner; a changed class, quest step or region is a genuinely different attempt. */
+     private fun restoreRetry() {
+         if(retryLoaded) return
+         retryLoaded=true
+         val saved=QuestRetryStore.load(bot.objectId) ?: return
+         ensureLoaded()
+-        val path=PathQuests.forBaseClass(bot.classId).firstOrNull { it.questName==saved.quest && it.to in getSupportedClasses }
++        val path=allQuests().firstOrNull { it.questName==saved.quest && (it.mark in SecondClassQuests.quests || it.to in getSupportedClasses) }
+         val now=System.currentTimeMillis()
+         if(path==null || saved.classId!=bot.classId.id || saved.until<=now || saved.until>now+PAUSE_MS ||
+                 distance(bot.location(),Location(saved.x,saved.y,saved.z))>5000 || retryContext(path)!=saved.stage) {
+@@ -211,6 +227,7 @@ internal class QuestRunner(private val bot: Player) {
+     }
+ 
+     private suspend fun update(): Boolean {
++        if (bot.classId.level() == 1) return updateSecond()
+         if (bot.classId.level() != 0 || bot.level < START_LEVEL) return false
+         restoreRetry()
+         if (System.currentTimeMillis() < pausedUntil) return false
+@@ -232,7 +249,11 @@ internal class QuestRunner(private val bot: Player) {
+         watchProgress(path, view)
+         if (System.currentTimeMillis() < pausedUntil) return false
+ 
+-        val action = if (!view.started) Talk(path.startNpc, path.startEvents) else path.rules.firstOrNull { it.applies(view) }?.action
++        return play(path, view)
++    }
++
++    private suspend fun play(path: PathQuest, view: QuestView): Boolean {
++        val action = if (!view.started) Talk(path.startNpc, path.startEvents) else path.rules.firstOrNull { it.applies(view) }?.actionFor?.invoke(view)
+         if (action == null) {
+             giveUp(path, "no step for cond ${view.cond}")
+             return false
+@@ -241,6 +262,53 @@ internal class QuestRunner(private val bot: Player) {
+         return true
+     }
+ 
++    /** The second profession: the next mark quest the level allows, then the guild master. */
++    private suspend fun updateSecond(): Boolean {
++        if (bot.level < MARK_START_LEVEL) return false
++        restoreRetry()
++        if (System.currentTimeMillis() < pausedUntil) return false
++        ensureLoaded()
++        val target = currentSecond() ?: return false
++        val quest = nextMarkQuest(target)
++        if (quest == null) {
++            if (!hasAllMarks(target) || bot.level < SECOND_CLASS_LEVEL) return false
++            relax()
++            val last = SecondClassQuests.quests.getValue(target.marks.last())
++            watchProgress(last, QuestView(bot, bot.getQuestState(last.questName)))
++            if (System.currentTimeMillis() < pausedUntil) return false
++            changeClassAt(last, target.masters, SECOND_CLASS_SCRIPT, target.masterEvent, target.to)
++            if (bot.classId == target.to) chosenSecond = null
++            return true
++        }
++        val view = QuestView(bot, bot.getQuestState(quest.questName))
++        watchProgress(quest, view)
++        if (System.currentTimeMillis() < pausedUntil) return false
++        return play(quest, view)
++    }
++
++    private fun hasAllMarks(target: SecondClass) = target.marks.all { QuestView(bot, null).has(it) }
++
++    /** A mark quest under way first, else the first missing mark whose quest takes the bot at its level. */
++    private fun nextMarkQuest(target: SecondClass): PathQuest? {
++        val missing = target.marks.filter { !QuestView(bot, null).has(it) }.mapNotNull { SecondClassQuests.quests[it] }
++        missing.firstOrNull { bot.getQuestState(it.questName)?.isStarted == true }?.let { return it }
++        return missing.firstOrNull { bot.level >= it.minLevel && bot.getQuestState(it.questName)?.isCompleted != true }
++    }
++
++    /** The profession whose marks the bot already gathers, else one picked by the population's branch weights. */
++    private fun currentSecond(): SecondClass? {
++        val targets = SecondClassQuests.forFirstClass(bot.classId).filter { it.to in getSupportedClasses }
++        if (targets.isEmpty()) return null
++        chosenSecond?.takeIf { it in targets }?.let { return it }
++        val view = QuestView(bot, null)
++        val progress = targets.associateWith { t -> t.marks.count { view.has(it) ||
++                bot.getQuestState(SecondClassQuests.quests.getValue(it).questName)?.isStarted == true } }
++        val best = progress.values.maxOrNull() ?: 0
++        val candidates = targets.filter { progress[it] == best }
++        val pick = if (candidates.size == 1) candidates.first() else pickWeighted(candidates.map { it.to })?.let { to -> candidates.first { it.to == to } }
++        return pick?.also { chosenSecond = it }
++    }
++
+     /** The Path quest under way, else the one for the branch the bot wants (weighted like the free change was). */
+     private fun currentPath(): PathQuest? {
+         val paths = PathQuests.forBaseClass(bot.classId).filter { it.to in getSupportedClasses }
+@@ -265,7 +333,9 @@ internal class QuestRunner(private val bot: Player) {
+     }
+ 
+     private suspend fun talk(path: PathQuest, talk: Talk) {
+-        val npc = QuestWorld.closestNpc(bot, listOf(talk.npcId)) ?: return giveUp(path, "npc ${talk.npcId} is not in the world")
++        val npc = QuestWorld.closestNpc(bot, listOf(talk.npcId))
++        if (talk.orElse != null && (npc == null || distance(bot, npc) > SPAWNED_NPC_RADIUS)) return execute(path, talk.orElse)
++        if (npc == null) return giveUp(path, "npc ${talk.npcId} is not in the world")
+         if (!reach(npc)) return
+ 
+         val before = describe(path)
+@@ -287,6 +357,13 @@ internal class QuestRunner(private val bot: Player) {
+     }
+ 
+     private suspend fun hunt(path: PathQuest, hunt: Hunt) {
++        // A new list of prey (the next quest step, or an item ticked off a list): look for its spawns afresh.
++        if (hunt.monsterIds != huntSet) {
++            huntSet = hunt.monsterIds
++            huntSpot = null
++            liveTarget = null
++            liveScanAt = 0
++        }
+         holdWeapon(hunt.weapon)
+         setTargets(hunt.monsterIds)
+         if (hunt.spoil.isNotEmpty() && bot.getSkill(SPOIL_SKILL) == null) return giveUp(path, "can't spoil yet")
+@@ -355,16 +432,21 @@ internal class QuestRunner(private val bot: Player) {
+     /** Hands the guild master the mark; the FirstClassChange script checks race, class and level and changes the class. */
+     private suspend fun changeClass(path: PathQuest) {
+         val masters = PathQuests.guildMasters[path.from] ?: return
++        changeClassAt(path, masters, CLASS_CHANGE_SCRIPT, path.masterEvent, path.to)
++    }
++
++    /** Talks to the closest of [masters]; the [script] checks race, class, level and marks and changes the class. */
++    private suspend fun changeClassAt(path: PathQuest, masters: List<Int>, script: String, event: String, to: ClassId) {
+         val master = QuestWorld.closestNpc(bot, masters) ?: return giveUp(path, "no guild master in the world")
+         if (!reach(master)) return
+ 
+         bot.target = master
+         delay(Rnd.get(1500, 4000).toLong())
+-        master.onBypassFeedback(bot, "Quest $CLASS_CHANGE_SCRIPT")
++        master.onBypassFeedback(bot, "Quest $script")
+         delay(Rnd.get(2000, 5000).toLong())
+-        bot.processQuestEvent(CLASS_CHANGE_SCRIPT, path.masterEvent)
++        bot.processQuestEvent(script, event)
+ 
+-        if (bot.classId != path.to) return giveUp(path, "${master.name} did not change the class")
++        if (bot.classId != to) return giveUp(path, "${master.name} did not change the class")
+         bot.rewardSkills()
+         val attackPlayerType = bot.getCombatBehavior().combatPreferences.attackPlayerType
+         supportedCombatPrefs[bot.classId]?.let {
+@@ -518,6 +600,12 @@ internal class QuestRunner(private val bot: Player) {
+         private const val START_LEVEL = 19
+         private const val CLASS_CHANGE_LEVEL = 20
+         private const val CLASS_CHANGE_SCRIPT = "FirstClassChange"
++        private const val SECOND_CLASS_SCRIPT = "SecondClassChange"
++        // The mark quests take players from 35 at the earliest.
++        private const val MARK_START_LEVEL = 35
++        private const val SECOND_CLASS_LEVEL = 40
++        /** An NPC a quest spawns for a moment stands where the bot made it appear. */
++        private const val SPAWNED_NPC_RADIUS = 3000
+         private const val NEAR_RADIUS = 1200
+         private const val SPOT_RADIUS = 1200
+         private const val MIN_WALK_SAVED_BY_TELEPORT = 12000
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+index ecc07b4..e9fb27f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+@@ -14,7 +14,9 @@ internal sealed class QuestAction
+  * Walk up to an NPC, open its quest dialog and click [events] in order, like a player reading the window. With
+  * [unlessAdvanced], opening the dialog may already move the quest on (a window with no link): nothing is clicked then.
+  */
+-internal class Talk(val npcId: Int, val events: List<String>, val unlessAdvanced: Boolean = false) : QuestAction()
++internal class Talk(val npcId: Int, val events: List<String>, val unlessAdvanced: Boolean = false,
++                    /** An NPC the quest spawns for a short while: when it is not close by, this brings it back. */
++                    val orElse: QuestAction? = null) : QuestAction()
+ 
+ /**
+  * Hunt [monsterIds] until a rule further up applies. [weapon] is held while hunting (0 for bare hands) when the script
+@@ -37,7 +39,9 @@ internal class QuestView(val player: Player, val state: QuestState?) {
+     fun has(vararg itemIds: Int) = itemIds.all { count(it) > 0 }
+ }
+ 
+-internal class QuestRule(val applies: (QuestView) -> Boolean, val action: QuestAction)
++internal class QuestRule(val applies: (QuestView) -> Boolean, val actionFor: (QuestView) -> QuestAction) {
++    constructor(applies: (QuestView) -> Boolean, action: QuestAction) : this(applies, { _ -> action })
++}
+ 
+ /**
+  * A first profession quest ("Path to ..."): taken from [startNpc] with [startEvents], played by the first matching
+@@ -52,13 +56,20 @@ internal class PathQuest(
+         val masterEvent: String,
+         val startNpc: Int,
+         val startEvents: List<String>,
+-        val rules: List<QuestRule>)
++        val rules: List<QuestRule>,
++        /** The script turns away players below this level. */
++        val minLevel: Int = 0)
+ 
+ internal class PathQuestBuilder(private val questName: String, private val from: ClassId, private val to: ClassId,
+                                 private val mark: Int, private val masterEvent: String) {
+     private var startNpc = 0
+     private var startEvents = emptyList<String>()
+     private val rules = mutableListOf<QuestRule>()
++    private var minLevel = 0
++
++    fun level(min: Int) {
++        minLevel = min
++    }
+ 
+     fun start(npcId: Int, vararg events: String) {
+         startNpc = npcId
+@@ -73,12 +84,26 @@ internal class PathQuestBuilder(private val questName: String, private val from:
+ 
+     fun talk(npcId: Int, vararg events: String) = Talk(npcId, events.toList())
+ 
++    /** Talk to an NPC the quest spawned near the bot; while it is not around, [orElse] brings it back. */
++    fun talkOr(npcId: Int, vararg events: String, orElse: QuestAction) = Talk(npcId, events.toList(), orElse = orElse)
++
++    /**
++     * At [cond], hunt the monsters of every item still short of [need]: the closest of them first, like a player
++     * ticking items off a list. Each pair is an item and the monsters that drop it.
++     */
++    fun collect(cond: Int, need: Int, vararg drops: Pair<Int, IntArray>) {
++        rules += QuestRule({ it.cond == cond }, { view ->
++            Hunt(drops.filter { (item, _) -> view.count(item) < need }.flatMap { it.second.toList() }.toSet()
++                    .ifEmpty { drops.flatMap { it.second.toList() }.toSet() }, null, null)
++        })
++    }
++
+     fun talkUnlessAdvanced(npcId: Int, vararg events: String) = Talk(npcId, events.toList(), unlessAdvanced = true)
+ 
+     fun hunt(vararg monsterIds: Int, weapon: Int? = null, orElse: QuestAction? = null, spoil: Set<Int> = emptySet()) =
+             Hunt(monsterIds.toSet(), weapon, orElse, spoil)
+ 
+-    fun build() = PathQuest(questName, from, to, mark, masterEvent, startNpc, startEvents, rules.toList())
++    fun build() = PathQuest(questName, from, to, mark, masterEvent, startNpc, startEvents, rules.toList(), minLevel)
+ }
+ 
+ internal fun path(questName: String, from: ClassId, to: ClassId, mark: Int, masterEvent: String, body: PathQuestBuilder.() -> Unit): PathQuest =
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+new file mode 100644
+index 0000000..818822f
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -0,0 +1,123 @@
++package dev.l2j.autobots.population.quests
++
++import net.sf.l2j.gameserver.enums.actors.ClassId
++import net.sf.l2j.gameserver.enums.actors.ClassId.*
++
++/**
++ * A second profession as the SecondClassChange script of aCis 382 grants it: a guild master of [masters] changes
++ * [from] into [to] on [masterEvent] when the player is 40 or above and carries the three [marks].
++ */
++internal class SecondClass(val from: ClassId, val to: ClassId, val masterEvent: String, val marks: List<Int>, val masters: List<Int>)
++
++/**
++ * The mark quests of aCis 382 (scripting/quests/Q211-Q233) as steps a bot can play, and the second professions they
++ * open. Npc, monster, item ids and event names are the scripts' own. A mark quest is not tied to one class (the
++ * script checks who may take it), so its [PathQuest.from]/[PathQuest.to] are unused placeholders.
++ */
++internal object SecondClassQuests {
++
++    const val MARK_OF_CHALLENGER = 2627
++    const val MARK_OF_TRUST = 2734
++    const val MARK_OF_DUELIST = 2762
++    const val MARK_OF_CHAMPION = 3276
++
++    /** Human and elven fighter guild masters of SecondClassChange. */
++    private val HUMAN_ELF_FIGHTER_MASTERS = listOf(30109, 30187, 30689, 30849, 30900, 31965, 32094)
++
++    val classes: List<SecondClass> = listOf(
++            SecondClass(WARRIOR, GLADIATOR, "GL", listOf(MARK_OF_CHALLENGER, MARK_OF_TRUST, MARK_OF_DUELIST), HUMAN_ELF_FIGHTER_MASTERS),
++            SecondClass(WARRIOR, WARLORD, "WL", listOf(MARK_OF_CHALLENGER, MARK_OF_TRUST, MARK_OF_CHAMPION), HUMAN_ELF_FIGHTER_MASTERS))
++
++    private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
++            path(questName, HUMAN_FIGHTER, HUMAN_FIGHTER, mark, "") { level(minLevel); body() }
++
++    val quests: Map<Int, PathQuest> = listOf(
++            // Taken from 36 although the script allows 35: Filaur halfway through wants 36, a bot must not stall there.
++            mark("Q211_TrialOfTheChallenger", MARK_OF_CHALLENGER, 36) {
++                start(30644, "30644-05.htm")
++                cond(1, hunt(27110))
++                cond(2, talk(30644))
++                cond(3, talk(30645, "30645-02.htm"))
++                cond(4, hunt(27112))
++                cond(5, talk(30645))
++                cond(6, hunt(27113))
++                // Raldo shows up for 100 seconds where Baraham fell; a new kill brings him back.
++                cond(7, talkOr(30646, "30646-04.htm", orElse = hunt(27113)))
++                // Filaur sends the bot on only from 36.
++                rule({ it.cond == 8 && it.player.level >= 36 }, talk(30535))
++                cond(9, hunt(27114))
++                cond(10, talkOr(30646, orElse = hunt(27114)))
++            },
++            // Taken from 38 although the script allows 37: Seresin halfway through wants 38.
++            mark("Q217_TestimonyOfTrust", MARK_OF_TRUST, 38) {
++                start(30191, "30191-04.htm")
++                cond(1, talk(30154, "30154-03.htm"))
++                // Dryads and Lireins call up the spirits that carry the seed and the breath.
++                rule({ it.cond == 2 && !it.has(SEED_OF_VERDURE) }, hunt(20013, 20019, 27121))
++                rule({ it.cond == 2 && !it.has(BREATH_OF_WINDS) }, hunt(20036, 20044, 27120))
++                cond(3, talk(30154))
++                cond(4, talk(30358, "30358-02.htm"))
++                cond(5, talk(30464))
++                rule({ it.cond == 6 && !it.has(STAKATO_ICHOR) }, hunt(20157, 20230, 20232, 20234))
++                rule({ it.cond == 6 && !it.has(HONEY_DEW) }, hunt(20082, 20084, 20086, 20087, 20088))
++                rule({ it.cond == 6 && !it.has(BASILIK_PLASMA) }, hunt(20550))
++                cond(7, talk(30464))
++                cond(8, talk(30358))
++                cond(9, talk(30191))
++                // Seresin sends the bot on only from 38.
++                rule({ (it.cond == 10 || it.cond == 11) && it.player.level >= 38 }, talk(30657, "30657-03.htm"))
++                cond(12, talk(30565, "30565-02.htm"))
++                cond(13, talk(30515, "30515-02.htm"))
++                cond(14, hunt(20553))
++                cond(15, talk(30515))
++                cond(16, talk(30565))
++                cond(17, talk(30531, "30531-02.htm"))
++                cond(18, talk(30621, "30621-02.htm"))
++                cond(19, hunt(20213))
++                cond(20, talk(30621))
++                cond(21, talk(30531))
++                cond(22, talk(30191))
++                cond(23, talk(30031))
++            },
++            mark("Q222_TestOfTheDuelist", MARK_OF_DUELIST, 39) {
++                start(30623, "30623-07.htm")
++                collect(2, 10,
++                        2768 to intArrayOf(20085), 2769 to intArrayOf(20090), 2770 to intArrayOf(20234),
++                        2771 to intArrayOf(20202), 2772 to intArrayOf(20270), 2773 to intArrayOf(20552),
++                        2774 to intArrayOf(20582), 2775 to intArrayOf(20564), 2776 to intArrayOf(20601),
++                        2777 to intArrayOf(20602))
++                cond(3, talk(30623, "30623-16.htm"))
++                collect(4, 3,
++                        2779 to intArrayOf(20214), 2780 to intArrayOf(20217), 2781 to intArrayOf(20554),
++                        2782 to intArrayOf(20588), 2783 to intArrayOf(20604))
++                cond(5, talk(30623))
++            },
++            mark("Q223_TestOfTheChampion", MARK_OF_CHAMPION, 39) {
++                start(30624, "30624-06.htm")
++                cond(1, talk(30625, "30625-03.htm"))
++                cond(2, hunt(20780))
++                cond(3, talk(30625))
++                cond(4, talk(30624, "30624-10.htm"))
++                cond(5, talk(30093, "30093-02.htm"))
++                collect(6, 30, 3287 to intArrayOf(20145, 27088), 3288 to intArrayOf(20158), 3289 to intArrayOf(20553))
++                cond(7, talk(30093))
++                cond(8, talk(30624, "30624-14.htm"))
++                cond(9, talk(30196, "30196-03.htm"))
++                cond(10, hunt(20551, 27089))
++                cond(11, talk(30196, "30196-06.htm"))
++                cond(12, hunt(20577, 20578, 20579, 20580, 20581, 20582))
++                cond(13, talk(30196))
++                cond(14, talk(30624))
++            },
++    ).associateBy { it.mark }
++
++    /** Second professions of [first] whose three mark quests the bots can play. */
++    fun forFirstClass(first: ClassId): List<SecondClass> = classes.filter { c -> c.from == first && c.marks.all { it in quests } }
++
++    // Q217 items checked by the rules.
++    private const val BREATH_OF_WINDS = 2746
++    private const val SEED_OF_VERDURE = 2747
++    private const val BASILIK_PLASMA = 2752
++    private const val HONEY_DEW = 2753
++    private const val STAKATO_ICHOR = 2754
++}
