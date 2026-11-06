@@ -1,0 +1,184 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 0cdc413..33971bb 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -97,6 +97,13 @@ internal class LifeBehavior(private val bot: Autobot) {
+     // A spot that turned out empty, crowded or unreachable, with when it was marked: marks fade and the spot is tried again.
+     private val badSpots = mutableMapOf<Long, Long>()
+     private val badSpotTtlMs = Rnd.get(BAD_SPOT_TTL_MIN_MINUTES, BAD_SPOT_TTL_MAX_MINUTES) * 60_000L
++    // Spots left because too many players stood there: a short mark, a crowd moves on sooner than respawns run out.
++    private val crowdedSpots = mutableMapOf<Long, Long>()
++    // The current spot was taken although crowded (nothing else was free): hunting it beats standing idle.
++    private var crowdAccepted = false
++    // Prey that killed this bot again and again (aggressive or not): npc id -> until when it is left alone.
++    private val avoidedPrey = java.util.concurrent.ConcurrentHashMap<Int, Long>()
++    private val preyDeaths = mutableMapOf<Int, ArrayDeque<Long>>()
+     private var idleTicks = 0
+     private var gatekeeperFailed = false
+     private var nextSpotRetryAt = 0L
+@@ -117,6 +124,14 @@ internal class LifeBehavior(private val bot: Autobot) {
+         get() {
+             val now = System.currentTimeMillis()
+             badSpots.entries.removeIf { now - it.value > badSpotTtlMs }
++            crowdedSpots.entries.removeIf { now - it.value > CROWDED_SPOT_TTL_MS }
++            return if (crowdedSpots.isEmpty()) badSpots.keys else badSpots.keys + crowdedSpots.keys
++        }
++
++    /** Spots excluded for a real reason (empty, unreachable, deadly); crowded ones are still better than none. */
++    private val excludedIgnoringCrowd: Set<Long>
++        get() {
++            excludedSpots
+             return badSpots.keys
+         }
+ 
+@@ -372,6 +387,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+                     (RaidPlanner.raidOf(bot.party)?.let { ", raid ${it.boss.name} ${it.phase}" } ?: ""))
+         }
+         avoidDeadlySpot(killer)
++        if (killer is Monster) rememberPreyDeath(killer)
+         // Died on a long walk to its spot: the way there is what kills, don't walk it again.
+         if (killer === bot) {
+             RouteSafety.reportWaterDeath(bot.location())
+@@ -435,6 +451,38 @@ internal class LifeBehavior(private val bot: Autobot) {
+                 " ${if (alone) "everywhere" else "around ${bot.x},${bot.y}"} after a death")
+     }
+ 
++    /**
++     * The same kind of monster killed this bot again. Live residents died over and over on one spot to monsters that
++     * are not aggressive (kima, Orc Fighter 4: 22 deaths to Goblin Grave Robbers and Elder Prairie Keltir; AianamiRei,
++     * Elven Mystic 5: 17 deaths to pairs of Kaboo Orcs), which the deadly-spot memory never looks at: the bot itself
++     * kept pulling them. After a second death to one kind within an hour, or the first to two of them at once, the bot
++     * leaves that monster alone for an hour and moves off the spots around the place of death.
++     */
++    private fun rememberPreyDeath(killer: Monster) {
++        if (killer.isRaidRelated || RaidPlanner.isRaiding(bot)) return
++        val now = System.currentTimeMillis()
++        val deaths = preyDeaths.getOrPut(killer.npcId) { ArrayDeque() }
++        deaths.addLast(now)
++        while (deaths.isNotEmpty() && now - deaths.first() > PREY_DEATH_WINDOW_MS) deaths.removeFirst()
++        val pack = bot.getKnownTypeInRadius(Monster::class.java, ATTACKER_RADIUS)
++                .count { !it.isDead && it.target === bot && it.npcId == killer.npcId }
++        if (deaths.size < PREY_DEATHS_TO_AVOID && pack < 2) return
++        avoidedPrey[killer.npcId] = now + PREY_AVOID_MS
++        val keys = HuntingSpots.keysWithNpcNear(bot.location(), killer.npcId, PREY_SPOT_RADIUS)
++        if (keys.isNotEmpty()) markBadSpots(keys)
++        println("Autobots movement: ${bot.name} id=${bot.objectId} lv ${bot.level} avoids prey ${killer.name} (${killer.npcId})" +
++                " for ${PREY_AVOID_MS / 60_000} minutes after ${deaths.size} deaths in an hour, pack $pack," +
++                " leaves ${keys.size} spots around ${bot.x},${bot.y}")
++    }
++
++    /** True while [npcId] killed this bot too often to be picked as prey again. */
++    fun avoidsPrey(npcId: Int): Boolean {
++        val until = avoidedPrey[npcId] ?: return false
++        if (until > System.currentTimeMillis()) return true
++        avoidedPrey.remove(npcId)
++        return false
++    }
++
+     internal fun markBadSpots(keys: Collection<Long>) {
+         val now = System.currentTimeMillis()
+         keys.forEach { badSpots[it] = now }
+@@ -595,9 +643,14 @@ internal class LifeBehavior(private val bot: Autobot) {
+         }
+ 
+         // A crowded spot is left between fights, like a player who would rather walk on than wait for respawns.
+-        if (bot.target == null && bot.getKnownTypeInRadius(Player::class.java, SPOT_RADIUS).size > MAX_PLAYERS_AT_SPOT) {
+-            abandon(target)
+-            return
++        // Only counted at the spot itself: a bot resting before a walk to a far spot used to count the crowd it sat
++        // in, and a starter village full of newbies struck off every spot around it in a few ticks without a step.
++        if (!isAway && !crowdAccepted && bot.target == null) {
++            val players = bot.getKnownTypeInRadius(Player::class.java, SPOT_RADIUS).count { it.party == null || it.party !== bot.party }
++            if (players > MAX_PLAYERS_AT_SPOT) {
++                leaveCrowded(target, players)
++                return
++            }
+         }
+ 
+         bot.combatBehavior.onUpdate()
+@@ -655,6 +708,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+         current?.let { HuntingSpots.leave(it) }
+         recovery=null
++        crowdAccepted=false
+         val wanted = if (economy) Prospecting.wantedLoot(bot) else null
+         // A bot reaches its spot on foot or by a gatekeeper ride plus a walk: either way no more than
+         // MAX_TRAVEL_ON_FOOT of walking, or the way there is what kills it. A crowded close spot beats a far one.
+@@ -663,6 +717,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         val next = (if(repeatTargets.isNotEmpty()) HuntingSpots.choose(bot,repeatLevel,excludedSpots,wanted,MAX_TRAVEL_ON_FOOT,
+                 useExits=canRide,preferredNpcIds=repeatTargets) else null)
+                 ?: HuntingSpots.choose(bot, level, excludedSpots, wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide)
++                ?: crowdedFallback(level, wanted, canRide)
+                 ?: if(economy && group==null && bot.isInsideZone(ZoneId.TOWN) && now>=nextFundingRetryAt) {
+                     nextFundingRetryAt=now+5*60_000L
+                     funding=dev.l2j.autobots.population.economy.HuntFunding.plan(bot,excludedSpots)
+@@ -696,7 +751,35 @@ internal class LifeBehavior(private val bot: Autobot) {
+         return found
+     }
+ 
++    /**
++     * Every free spot nearby is marked crowded: a starter village with dozens of newbies has more hunters than its
++     * spots allow. A player there hunts among the others rather than walking home and back without exp.
++     */
++    private fun crowdedFallback(level: Int, wanted: WantedLoot?, canRide: Boolean): HuntingSpot? {
++        if (crowdedSpots.isEmpty()) return null
++        val found = HuntingSpots.choose(bot, level, excludedIgnoringCrowd, wanted, MAX_TRAVEL_ON_FOOT, useExits = canRide) ?: return null
++        crowdAccepted = true
++        if (AutobotData.settings.populationSessionLog)
++            println("Autobots movement: ${bot.name} id=${bot.objectId} hunts a crowded spot=${found.key} at ${found.location}," +
++                    " crowded=${crowdedSpots.size} excluded=${badSpots.size}")
++        return found
++    }
++
++    /** Too many players hunt here: left for a few minutes, not for the half hour of an empty or unreachable spot. */
++    private fun leaveCrowded(target: HuntingSpot, players: Int) {
++        crowdedSpots[target.key] = System.currentTimeMillis()
++        if (AutobotData.settings.populationSessionLog)
++            println("Autobots movement: ${bot.name} id=${bot.objectId} leaves crowded spot=${target.key} players=$players" +
++                    " at ${bot.x},${bot.y},${bot.z}")
++        if (spot === target) {
++            HuntingSpots.leave(target)
++            spot = null
++            recovery = null
++        }
++    }
++
+     private fun dropSpot() {
++        crowdAccepted = false
+         spot?.let { HuntingSpots.leave(it) }
+         spot = null
+         recovery=null
+@@ -807,6 +890,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+         if (spot === target) {
+             HuntingSpots.leave(target)
+             spot = null
++            crowdAccepted = false
+         }
+     }
+ 
+@@ -849,6 +933,12 @@ internal class LifeBehavior(private val bot: Autobot) {
+         private const val WATER_ESCAPE_ARRIVAL = 100
+         private const val BAD_SPOT_TTL_MIN_MINUTES = 20
+         private const val BAD_SPOT_TTL_MAX_MINUTES = 30
++        private const val CROWDED_SPOT_TTL_MS = 5 * 60_000L
++        private const val PREY_DEATH_WINDOW_MS = 60 * 60_000L
++        private const val PREY_DEATHS_TO_AVOID = 2
++        private const val PREY_AVOID_MS = 60 * 60_000L
++        /** One spot cell around the place of death: the same monster elsewhere is still fair prey. */
++        private const val PREY_SPOT_RADIUS = 2500
+         /** A drop in place bigger than this is logged: how a hunter ends up a floor below its spot. */
+         private const val FALL_LOG_Z = 800
+         private const val FALL_LOG_XY = 2000
+diff --git a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+index 3e1673b..befcb66 100644
+--- a/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
++++ b/src/main/kotlin/dev/l2j/autobots/utils/AutobotHelpers.kt
+@@ -473,6 +473,8 @@ private fun Creature.isWorthTargeting(target: Creature): Boolean {
+     // A raid boss or its minion is no prey for a bot on its own: a passing hunter would only die to it.
+     if (this is Autobot && target.isRaidRelated) return false
+     (this as? Autobot)?.questTargets?.let { return target.npcId in it }
++    // A monster that keeps killing this resident is no prey for it for a while (LifeBehavior.rememberPreyDeath).
++    if (this is Autobot && !isInParty && life?.avoidsPrey(target.npcId) == true) return false
+     if(this is net.sf.l2j.gameserver.model.actor.Player && dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(this)) {
+         if(!dev.l2j.autobots.offlinelife.OfflineLife.allowsTarget(this,target)) return false
+         dev.l2j.autobots.offlinelife.OfflineLife.targets(this)?.let { return target.npcId in it }
