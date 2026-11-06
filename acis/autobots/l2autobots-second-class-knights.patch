@@ -1,0 +1,81 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index 5ad54d9..d318356 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -22,6 +22,8 @@ internal object SecondClassQuests {
+     const val MARK_OF_CHAMPION = 3276
+     const val MARK_OF_LIFE = 3140
+     const val MARK_OF_FATE = 3172
++    const val MARK_OF_DUTY = 2633
++    const val MARK_OF_HEALER = 2820
+ 
+     /** Human and elven fighter guild masters of SecondClassChange. */
+     private val HUMAN_ELF_FIGHTER_MASTERS = listOf(30109, 30187, 30689, 30849, 30900, 31965, 32094)
+@@ -31,6 +33,8 @@ internal object SecondClassQuests {
+             SecondClass(WARRIOR, GLADIATOR, "GL", listOf(MARK_OF_CHALLENGER, MARK_OF_TRUST, MARK_OF_DUELIST), HUMAN_ELF_FIGHTER_MASTERS),
+             SecondClass(WARRIOR, WARLORD, "WL", listOf(MARK_OF_CHALLENGER, MARK_OF_TRUST, MARK_OF_CHAMPION), HUMAN_ELF_FIGHTER_MASTERS),
+             SecondClass(ELVEN_KNIGHT, SWORD_SINGER, "SS", listOf(MARK_OF_CHALLENGER, MARK_OF_LIFE, MARK_OF_DUELIST), HUMAN_ELF_FIGHTER_MASTERS),
++            SecondClass(KNIGHT, PALADIN, "PL", listOf(MARK_OF_DUTY, MARK_OF_TRUST, MARK_OF_HEALER), HUMAN_ELF_FIGHTER_MASTERS),
++            SecondClass(ELVEN_KNIGHT, TEMPLE_KNIGHT, "TK", listOf(MARK_OF_DUTY, MARK_OF_LIFE, MARK_OF_HEALER), HUMAN_ELF_FIGHTER_MASTERS),
+             SecondClass(PALUS_KNIGHT, BLADEDANCER, "BD", listOf(MARK_OF_CHALLENGER, MARK_OF_FATE, MARK_OF_DUELIST), DARK_ELF_MASTERS))
+ 
+     private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
+@@ -172,6 +176,58 @@ internal object SecondClassQuests {
+                 cond(17, talk(30419, "30419-05.htm"))
+                 cond(18, talk(30358))
+             },
++            // Knights of all three races.
++            mark("Q212_TrialOfDuty", MARK_OF_DUTY, 35) {
++                start(30109, "30109-04.htm")
++                cond(1, talk(30653))
++                // The Hanged Man's ghost appears from the skeletons and counts only when slain with the Old Knight Sword.
++                cond(2, hunt(20190, 20191, 27119, weapon = 3027))
++                cond(3, talk(30653))
++                cond(4, talk(30654))
++                cond(5, hunt(20200, 20201))
++                cond(6, talk(30654))
++                cond(7, hunt(20144))
++                // Spirit Talianus stays 5 minutes where a Hangman Tree fell; another kill calls it again.
++                cond(8, talkOr(30656, orElse = hunt(20144)))
++                cond(9, talk(30654))
++                cond(10, talk(30655))
++                cond(11, hunt(20577, 20578, 20579, 20580, 20581, 20582))
++                cond(12, talk(30655))
++                cond(13, talk(30116, "30116-05.htm"))
++                cond(14, hunt(20270))
++                cond(15, talk(30116))
++                cond(16, talk(30311))
++                cond(17, talk(30116))
++                cond(18, talk(30109))
++            },
++            // Knights, elven knights, clerics and oracles. Gupu's errand is skipped the way the script allows
++            // (no Golden Statue): the mark comes with less experience but without 100 000 adena.
++            mark("Q226_TestOfTheHealer", MARK_OF_HEALER, 39) {
++                start(30473, "30473-04.htm")
++                // Perrin calls Tatoma for 200 seconds; talking to him again calls it back.
++                cond(1, talk(30428, "30428-02.htm"))
++                cond(2, hunt(27134, orElse = talk(30428, "30428-02.htm")))
++                cond(3, talk(30428))
++                cond(4, talk(30424))
++                cond(5, talk(30658))
++                cond(6, talkUnlessAdvanced(30658, "30658-03.htm"))
++                cond(9, talk(30327))
++                cond(10, talk(30674, "30674-02.htm"))
++                cond(11, hunt(27123, orElse = talk(30674)))
++                cond(12, talk(30674))
++                // The mysterious dark elf sends three waves of lizardmen at the bot.
++                cond(13, talk(30661))
++                cond(14, hunt(27124))
++                cond(15, talk(30661))
++                cond(16, hunt(27125))
++                cond(17, talk(30661))
++                cond(18, hunt(27127, 27126))
++                cond(19, talk(30661))
++                cond(20, talk(30662))
++                cond(21, talk(30665, "30665-02.htm"))
++                cond(22, talk(30327))
++                cond(23, talk(30473))
++            },
+     ).associateBy { it.mark }
+ 
+     /** Second professions of [first] whose three mark quests the bots can play. */

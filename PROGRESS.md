@@ -1,3 +1,11 @@
+## 2026-11-06 — 2-я профессия, партия 3: рыцари-целители
+
+- `l2autobots-second-class-knights.patch`: Q212 Trial of Duty (рыцари трёх рас, с 35) и Q226 Test of
+  the Healer (с 39; поручение Gupu пропускается так, как позволяет скрипт: без Golden Statue
+  и без 100 000 адены). Открыты Knight → Paladin (Duty, Trust, Healer) и Elven Knight → Temple
+  Knight (Duty, Life, Healer).
+- Итого открыто 6 вторых профессий: Gladiator, Warlord, Sword Singer, Bladedancer, Paladin, Temple Knight.
+
 ## 2026-11-06 — 2-я профессия, партия 2: эльфы и тёмные эльфы
 
 - `l2autobots-second-class-elves.patch`: сценарии Q218 Testimony of Life (эльфы, с 38) и
