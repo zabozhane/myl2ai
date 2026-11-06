@@ -639,3 +639,7 @@ No Grade бонуса атаки; его заменяет проверка D Gra
   отдыхать первой. `HERB LOOT ALL PASSED`.
 - `OwnDropLootVerify` — свой дроп в 800 от охотника (как у мага, бьющего издалека) подбирается; прежняя
   сборка ограничивалась 400. `OWN DROP LOOT ALL PASSED`.
+- `DerbyVisitVerify` — жители на облачном стенде (`cloud-stand.sh`, без геодаты; в `config.xml` стенда
+  `populationSize=8`, `populationAlwaysOnline=true`, `populationTestLevel=20`, квесты, группы и LLM выключены,
+  `derbyChancePercent=100000`): каждому из шести ботов 300 тыс. адены и смена сегмента; они едут на трек гонок,
+  ставят, смотрят забег, обналичивают билет и уезжают; боты, вошедшие в игру на треке, выходят. `DERBY VISIT ALL PASSED`.
