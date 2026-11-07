@@ -1,0 +1,67 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index 6c116ba..dd349b6 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -806,16 +806,16 @@ internal class QuestRunner(private val bot: Player) {
+                 // The NPC plan wants a way back too; a quest walk may drop off a ledge the bot can't climb again
+                 // (it carries an escape scroll), so a one-way route comes next.
+                 val travel = dev.l2j.autobots.population.economy.NpcTravel
+-                val via = npc?.let { QuestWorld.via(bot, it.npcId) }
+-                if (npc != null && via != null) {
+-                    val goal = dev.l2j.autobots.population.economy.Approach.pointNear(bot, npc) ?: npc.location()
++                val via = if (npc != null) QuestWorld.via(bot, npc.npcId) else QuestWorld.viaTo(bot, destination)
++                if (via != null) {
++                    val goal = npc?.let { dev.l2j.autobots.population.economy.Approach.pointNear(bot, it) ?: it.location() } ?: destination
+                     val probed = travel.through(bot, bot.location(), via + goal)
+                     if (probed != null) {
+                         // One way: replanning on the way must not ask for a way back over the drop.
+                         walk.withRecoveryRoute(probed).execute()
+                         return
+                     }
+-                    println("Autobots quests: ${bot.name} probed walk to ${npc.name} failed from ${bot.x},${bot.y},${bot.z}")
++                    println("Autobots quests: ${bot.name} probed walk to ${npc?.name ?: "${destination.x},${destination.y}"} failed from ${bot.x},${bot.y},${bot.z}")
+                 }
+                 val route = if (npc != null && distance(bot.location(), destination) > LONG_NPC_WALK) {
+                     val goal = dev.l2j.autobots.population.economy.Approach.pointNear(bot, npc) ?: npc.location()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
+index efd2bf5..9b24166 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestWorld.kt
+@@ -31,9 +31,35 @@ internal object QuestWorld {
+             Location(20025, -107532, -3040), Location(20089, -107532, -3040), Location(21049, -107596, -3040))
+     private val viaPoints = mapOf(30649 to MARTANKUS_VALLEY, 30643 to MARTANKUS_VALLEY)
+ 
++    /**
++     * The Evil Eye Lord of Q231 in the basin south of the Cave of Trials landing, z -3160: every planner climbed to the
++     * ledge above it at z -1000 and stopped 2200 short (stand 19). A server-side forward probe walks the lower level
++     * east, around the basin and in from the south.
++     */
++    private val EVIL_EYE_BASIN = listOf(
++            Location(9323, -112504, -2536), Location(10347, -112504, -2536), Location(11371, -112504, -2808),
++            Location(12395, -112504, -2976), Location(13099, -112568, -2976), Location(13355, -112568, -2976),
++            Location(14379, -112568, -3136), Location(15275, -112696, -3128), Location(15531, -113464, -3112),
++            Location(16171, -113848, -3112), Location(17131, -113912, -3112), Location(17259, -114808, -3112),
++            Location(17387, -115704, -3112), Location(17387, -116728, -3112), Location(18155, -116984, -3136),
++            Location(19179, -116984, -3136), Location(19499, -117688, -3136), Location(19179, -118392, -3136),
++            Location(19371, -119224, -3160), Location(19499, -119288, -3160), Location(19755, -119480, -3160),
++            Location(19883, -119736, -3160), Location(19819, -119992, -3160), Location(19435, -120312, -3160),
++            Location(18411, -120312, -3160), Location(17451, -120376, -3160), Location(16427, -120376, -3160),
++            Location(16491, -119416, -3160))
++    /** Hunting spots behind such walks, by the spot (the last waypoint stands next to it). */
++    private val spotVia = listOf(EVIL_EYE_BASIN)
++
++    /** The probed waypoints to a hunting spot at [destination], from the landing or from where the bot is on the way. */
++    fun viaTo(bot: Player, destination: Location): List<Location>? {
++        val points = spotVia.firstOrNull { distance(it.last(), destination) <= 1500 } ?: return null
++        return rest(bot, points)
++    }
++
+     /** The probed waypoints to [npcId] from the landing, or the rest of them from where the bot is on the way, else null. */
+-    fun via(bot: Player, npcId: Int): List<Location>? {
+-        val points = viaPoints[npcId] ?: return null
++    fun via(bot: Player, npcId: Int): List<Location>? = viaPoints[npcId]?.let { rest(bot, it) }
++
++    private fun rest(bot: Player, points: List<Location>): List<Location>? {
+         if (distance(bot.location(), points.first()) <= 5000) {
+             // Already on the way (a walk paused by a fight): go on from the closest waypoint, never back over the drop.
+             val (index, nearest) = points.withIndex().minByOrNull { distance(bot.location(), it.value) }!!
