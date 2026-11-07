@@ -1,0 +1,109 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index b6a74bf..6c116ba 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -567,16 +567,41 @@ internal class QuestRunner(private val bot: Player) {
+             return bot.getKnownTypeInRadius(Monster::class.java, NEAR_RADIUS).any { !it.isDead && it.npcId == duel.monsterId } && standBy(duel)
+         }
+         val hunt = currentHunt ?: return false
+-        if (hunt.opener.isEmpty() && hunt.spells == null) return false
++        if (hunt.opener.isEmpty() && hunt.spells == null && hunt.nukes.isEmpty()) return false
+         val target = (bot.target as? Monster)?.takeIf { !it.isDead && it.npcId in hunt.monsterIds }
+                 ?: bot.getKnownTypeInRadius(Monster::class.java, NEAR_RADIUS)
+                         .filter { !it.isDead && it.npcId in hunt.monsterIds }
+                         .minByOrNull { distance(bot, it) }
+                 ?: return false
++        // The quest fight owns the tick, so the bot's usual fighting never gets to heal it: a healer heals itself.
++        if (bot.currentHp < bot.maxHp * QUEST_FIGHT_HEAL_BELOW && selfHeal()) return true
+         if (bot.target !== target) bot.target = target
+         val opener = hunt.opener[target.npcId]
+         if (opener != null && !target.isScriptValue(1)) return cast(listOf(opener))
+-        return hunt.spells != null && cast(hunt.spells)
++        if (hunt.spells != null) return cast(hunt.spells)
++        return castIfCan(hunt.nukes)
++    }
++
++    /** A heal on itself, if the bot owns one it can cast now. */
++    private fun selfHeal(): Boolean {
++        if (bot.isCastingNow) return true
++        val skill = SELF_HEALS.asSequence().mapNotNull { bot.getSkill(it) }
++                .firstOrNull { !bot.isSkillDisabled(it) && bot.currentMp >= it.mpConsume } ?: return false
++        if (bot.ai.desire.intention == IntentionType.ATTACK) bot.ai.setIntention(IntentionType.IDLE)
++        bot.target = bot
++        bot.useMagicSkill(skill)
++        return true
++    }
++
++    /** Like [cast], but without mana or with all on cooldown the tick goes back to the bot's usual fighting. */
++    private fun castIfCan(skillIds: List<Int>): Boolean {
++        if (skillIds.isEmpty()) return false
++        if (bot.isCastingNow) return true
++        val skill = skillIds.asSequence().mapNotNull { bot.getSkill(it) }
++                .firstOrNull { !bot.isSkillDisabled(it) && bot.currentMp >= it.mpConsume } ?: return false
++        if (bot.ai.desire.intention == IntentionType.ATTACK) bot.ai.setIntention(IntentionType.IDLE)
++        bot.useMagicSkill(skill)
++        return true
+     }
+ 
+     /** Casts the first of [skillIds] the bot can cast now on its target. @return true: the tick is taken even while waiting for mana. */
+@@ -944,6 +969,9 @@ internal class QuestRunner(private val bot: Player) {
+         private const val MARK_START_LEVEL = 35
+         private const val SECOND_CLASS_LEVEL = 40
+         private const val THIRD_CLASS_LEVEL = 76
++        private const val QUEST_FIGHT_HEAL_BELOW = 0.55
++        // Greater Battle Heal, Greater Heal, Battle Heal, Heal.
++        private val SELF_HEALS = listOf(1218, 1217, 1015, 1011)
+         /** An NPC a quest spawns for a moment stands where the bot made it appear. */
+         private const val SPAWNED_NPC_RADIUS = 3000
+         private const val NEAR_RADIUS = 1200
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+index 1c8a66e..f597d11 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestScript.kt
+@@ -28,7 +28,9 @@ internal class Talk(val npcId: Int, val events: List<String>, val unlessAdvanced
+  * first one it can cast; a hit by anything else makes the script take the monster away.
+  */
+ internal class Hunt(val monsterIds: Set<Int>, val weapon: Int?, val orElse: QuestAction?, val spoil: Set<Int> = emptySet(),
+-                    val opener: Map<Int, Int> = emptyMap(), val spells: List<Int>? = null) : QuestAction()
++                    val opener: Map<Int, Int> = emptyMap(), val spells: List<Int>? = null,
++                    /** Cast first while the bot has the mana; then it fights as usual (unlike [spells]). */
++                    val nukes: List<Int> = emptyList()) : QuestAction()
+ 
+ /**
+  * A summoner's duel: the bot's servitor alone fights [monsterId] from full health, the bot never strikes it. [summons]
+@@ -139,8 +141,8 @@ internal class PathQuestBuilder(private val questName: String, private val from:
+     fun talkUnlessAdvanced(npcId: Int, vararg events: String) = Talk(npcId, events.toList(), unlessAdvanced = true)
+ 
+     fun hunt(vararg monsterIds: Int, weapon: Int? = null, orElse: QuestAction? = null, spoil: Set<Int> = emptySet(),
+-             opener: Map<Int, Int> = emptyMap(), spells: List<Int>? = null) =
+-            Hunt(monsterIds.toSet(), weapon, orElse, spoil, opener, spells)
++             opener: Map<Int, Int> = emptyMap(), spells: List<Int>? = null, nukes: List<Int> = emptyList()) =
++            Hunt(monsterIds.toSet(), weapon, orElse, spoil, opener, spells, nukes)
+ 
+     fun buy(npcId: Int, itemId: Int, count: Int) = Buy(npcId, itemId, count)
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index bc5abd6..da7a286 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -599,8 +599,10 @@ internal object SecondClassQuests {
+             mark("Q227_TestOfTheReformer", MARK_OF_REFORMER, 39) {
+                 start(30118, "30118-04.htm")
+                 // Seven diaries; the last one calls up Aruraune where the revenant fell.
+-                cond(1, hunt(27099, opener = mapOf(27099 to DISRUPT_UNDEAD)))
+-                cond(2, hunt(27128, 27099, opener = mapOf(27099 to DISRUPT_UNDEAD)))
++                // Disrupt Undead is the oracle's best blow on the revenant too: swinging a staff at it after the
++                // opener, Oracleone died at 39 with 8 potions left (stand 19).
++                cond(1, hunt(27099, opener = mapOf(27099 to DISRUPT_UNDEAD), nukes = REVENANT_NUKES))
++                cond(2, hunt(27128, 27099, opener = mapOf(27099 to DISRUPT_UNDEAD), nukes = REVENANT_NUKES))
+                 cond(3, talk(30118, "30118-06.htm"))
+                 cond(4, talk(30666, "30666-04.htm"))
+                 // Katari calls up the Ol Mahum pilgrim and the inspector who hunts him.
+@@ -894,6 +896,7 @@ internal object SecondClassQuests {
+     // Bolt, Wind Strike, Vampiric Touch from their mystic days (Disrupt Undead only takes undead targets).
+     private const val DISRUPT_UNDEAD = 1031
+     private val REFORMER_NUKES = listOf(1184, 1177, 1147)
++    private val REVENANT_NUKES = listOf(DISRUPT_UNDEAD, 1184, 1177)
+     // Q229 items checked by the rules.
+     private const val IKER_LIST = 3310
+     private const val LARA_MEMO = 3314
