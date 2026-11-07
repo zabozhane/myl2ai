@@ -1,0 +1,87 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index c34a5fe..d0115f6 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -92,6 +92,7 @@ internal class QuestRunner(private val bot: Player) {
+     fun professionBusiness(): Boolean {
+         if(!AutobotData.settings.questsEnabled || bot.isInParty) return false
+         if(bot.classId.level()==1) return secondClassBusiness()
++        if(bot.classId.level()==2) return bot.level>=THIRD_CLASS_LEVEL && thirdClassFor()!=null
+         if(bot.classId.level()!=0 || bot.level<START_LEVEL) return false
+         restoreRetry()
+         return System.currentTimeMillis()>=pausedUntil && PathQuests.forBaseClass(bot.classId).any { it.to in getSupportedClasses }
+@@ -236,6 +237,7 @@ internal class QuestRunner(private val bot: Player) {
+ 
+     private suspend fun update(): Boolean {
+         if (bot.classId.level() == 1) return updateSecond()
++        if (bot.classId.level() == 2) return updateThird()
+         if (bot.classId.level() != 0 || bot.level < START_LEVEL) return false
+         restoreRetry()
+         if (System.currentTimeMillis() < pausedUntil) return false
+@@ -294,6 +296,35 @@ internal class QuestRunner(private val bot: Player) {
+         return play(quest, view)
+     }
+ 
++    /**
++     * The third profession. The bots don't play the sagas yet (fishing, Ketra and Varka drops, 700 Halisha marks and
++     * three solo fights at 76-81 are missing), so at 76 the bot goes to the guild master that gave it the second
++     * profession and gets the third there. Without this the population stayed in its second profession for good.
++     */
++    private suspend fun updateThird(): Boolean {
++        if (bot.level < THIRD_CLASS_LEVEL) return false
++        if (System.currentTimeMillis() < pausedUntil) return false
++        val to = thirdClassFor() ?: return false
++        val masters = SecondClassQuests.classes.firstOrNull { it.to == bot.classId }?.masters.orEmpty()
++        val master = QuestWorld.closestNpc(bot, masters)
++        if (master != null) {
++            if (!reach(master)) return true
++            bot.target = master
++            delay(Rnd.get(1500, 4000).toLong())
++        } else if (!bot.isInsideZone(ZoneId.TOWN)) return false
++        bot.setClassId(to.id)
++        bot.target = null
++        if (bot.classId != to) {
++            pausedUntil = System.currentTimeMillis() + PAUSE_MS
++            return false
++        }
++        applyNewClass()
++        QuestLog.log(bot, QuestEvent.ClassChanged, "became ${bot.classId} without the saga" + (master?.let { " at ${it.name}" } ?: " in town"))
++        return true
++    }
++
++    private fun thirdClassFor(): ClassId? = ClassId.values().firstOrNull { it.parent == bot.classId && it.level() == 3 }
++
+     private fun hasAllMarks(target: SecondClass) = target.marks.all { QuestView(bot, null).has(it) }
+ 
+     /** A mark quest under way first, else the first missing mark whose quest takes the bot at its level. */
+@@ -661,6 +692,13 @@ internal class QuestRunner(private val bot: Player) {
+         bot.processQuestEvent(script, event)
+ 
+         if (bot.classId != to) return giveUp(path, "${master.name} did not change the class")
++        applyNewClass()
++        chosen = null
++        QuestLog.log(bot, QuestEvent.ClassChanged, "became ${bot.classId} at ${master.name}")
++    }
++
++    /** New skills and the fighting style of the class the bot has just taken. */
++    private fun applyNewClass() {
+         bot.rewardSkills()
+         val attackPlayerType = bot.getCombatBehavior().combatPreferences.attackPlayerType
+         supportedCombatPrefs[bot.classId]?.let {
+@@ -668,8 +706,6 @@ internal class QuestRunner(private val bot: Player) {
+             if(bot is Autobot) bot.combatBehavior=behavior else bot.setCombatBehavior(behavior)
+         }
+         bot.getCombatBehavior().combatPreferences.attackPlayerType = attackPlayerType
+-        chosen = null
+-        QuestLog.log(bot, QuestEvent.ClassChanged, "became ${bot.classId} at ${master.name}")
+     }
+ 
+     /** Walks (or takes a gatekeeper) to an NPC until it can talk. @return true once in talking range. */
+@@ -890,6 +926,7 @@ internal class QuestRunner(private val bot: Player) {
+         // The mark quests take players from 35 at the earliest.
+         private const val MARK_START_LEVEL = 35
+         private const val SECOND_CLASS_LEVEL = 40
++        private const val THIRD_CLASS_LEVEL = 76
+         /** An NPC a quest spawns for a moment stands where the bot made it appear. */
+         private const val SPAWNED_NPC_RADIUS = 3000
+         private const val NEAR_RADIUS = 1200
