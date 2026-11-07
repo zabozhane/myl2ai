@@ -1,0 +1,66 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index d0115f6..b6a74bf 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -526,7 +526,13 @@ internal class QuestRunner(private val bot: Player) {
+             return
+         }
+         if (distance(bot.location(), spot) > SPOT_RADIUS) {
++            val failures = travelFailures
+             travelTo(spot, SPOT_RADIUS)
++            // A spawn point the bot can't get to: the next one, instead of the same walk until the quest is put aside.
++            if (travelFailures > failures && huntSpot == spot) {
++                emptySpots[spot] = System.currentTimeMillis()
++                huntSpot = null
++            }
+             return
+         }
+ 
+@@ -792,7 +798,18 @@ internal class QuestRunner(private val bot: Player) {
+                             ?: null.also { println("Autobots quests: ${bot.name} no walk to ${npc.name} at ${goal.x},${goal.y},${goal.z}" +
+                                     " from ${bot.x},${bot.y},${bot.z}: ${travel.probe(bot, bot.location(), goal, HOP_WALK)}") }
+                 } else null
+-                (if (route != null) walk.withNpcRoute(route) else walk).execute()
++                // A hunting spot far off gets the wider search too, one way: the walk's own planner gave up on the
++                // Execution Grounds from Giran (29k) and on the Evil Eye Lord from the Cave of Trials landing (9k).
++                val huntRoute = if (npc == null && distance(bot.location(), destination) > LONG_NPC_WALK)
++                    travel.toPoint(bot, bot.location(), destination, HOP_WALK) ?: travel.longOneWay(bot, bot.location(), destination, HOP_WALK)
++                            ?: null.also { println("Autobots quests: ${bot.name} no walk to ${destination.x},${destination.y},${destination.z}" +
++                                    " from ${bot.x},${bot.y},${bot.z}: ${travel.probe(bot, bot.location(), destination, HOP_WALK)}") }
++                else null
++                when {
++                    route != null -> walk.withNpcRoute(route)
++                    huntRoute != null -> walk.withRecoveryRoute(huntRoute)
++                    else -> walk
++                }.execute()
+             }
+         }
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index 686a139..bc5abd6 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -678,9 +678,7 @@ internal object SecondClassQuests {
+             // Animal Skins and Keef 5000 adena.
+             mark("Q221_TestimonyOfProsperity", MARK_OF_PROSPERITY, 37) {
+                 start(30104, "30104-04.htm")
+-                rule({ it.cond == 1 && !it.has(BLESSED_SEED) }, talk(30597, "30597-02.htm"))
+-                rule({ it.cond == 1 && it.has(CRYSTAL_BROOCH) }, talk(30368, "30368-03.htm"))
+-                rule({ it.cond == 1 && !it.has(LILITH_ELVEN_WAFER) }, talk(30005, "30005-04.htm"))
++                // Dion first: Emily and Bright, the mandragoras between Dion and Giran.
+                 rule({ it.cond == 1 && it.has(MANDRAGORA_BOUQUET) }, talk(30620, "30620-03.htm"))
+                 rule({ it.cond == 1 && it.has(BRIGHT_LIST) && it.count(MANDRAGORA_PETAL) >= 20 && it.count(CRIMSON_MOSS) >= 10 }, talk(30466))
+                 gather({ it.cond == 1 && it.has(BRIGHT_LIST) }, Drop(MANDRAGORA_PETAL, 20, intArrayOf(20223, 20154, 20155, 20156)),
+@@ -706,6 +704,12 @@ internal object SecondClassQuests {
+                 rule({ it.cond == 1 && it.has(LOCKIRIN_NOTICE_5) }, talk(30536))
+                 rule({ it.cond == 1 && it.has(CONTRIBUTION_OF_TOMA) }, talk(30536))
+                 rule({ it.cond == 1 && it.has(COLLECTION_LICENSE) && !it.has(RECEIPT_5) }, talk(30556))
++                // Piotur by Gludin and the Talking Island pair after Dion and the dwarven village: started in Giran,
++                // the bot went Giran - Gludin - Talking Island first and spent 76 500 of its 100 000 adena on
++                // gatekeepers before it could get back to Bright in Dion (stand 18).
++                rule({ it.cond == 1 && !it.has(BLESSED_SEED) }, talk(30597, "30597-02.htm"))
++                rule({ it.cond == 1 && it.has(CRYSTAL_BROOCH) }, talk(30368, "30368-03.htm"))
++                rule({ it.cond == 1 && !it.has(LILITH_ELVEN_WAFER) }, talk(30005, "30005-04.htm"))
+                 // The skins last: everything else goes on while the bot's errands look for them.
+                 rule({ it.cond == 1 && it.has(MARYSE_REQUEST) }, stock(ANIMAL_SKIN, 100))
+                 cond(2, talk(30104, "30104-07.htm"))
