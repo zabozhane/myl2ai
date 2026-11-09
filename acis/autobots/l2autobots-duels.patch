@@ -301,10 +301,10 @@ index 9b26881..238d2a5 100644
      }
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/duel/DuelGrounds.kt b/src/main/kotlin/dev/l2j/autobots/population/duel/DuelGrounds.kt
 new file mode 100644
-index 0000000..1fbcf53
+index 0000000..b17740e
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/duel/DuelGrounds.kt
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,85 @@
 +package dev.l2j.autobots.population.duel
 +
 +import dev.l2j.autobots.extensions.location
@@ -334,7 +334,8 @@ index 0000000..1fbcf53
 +    private const val MARGIN = 400
 +    private const val AGGRO_RADIUS = 1500.0
 +
-+    private val grounds = ConcurrentHashMap<Long, Optional<Location>>()
++    /** Town name -> its ground. A town has many respawn points; the first one seen is where the search starts. */
++    private val grounds = ConcurrentHashMap<String, Optional<Location>>()
 +
 +    /** The duel ground of the town the bot would return to, or null when that town has none. */
 +    fun of(bot: Player): Location? {
@@ -343,13 +344,13 @@ index 0000000..1fbcf53
 +    }
 +
 +    fun of(town: Location): Location? =
-+            grounds.computeIfAbsent((town.x.toLong() shl 32) or (town.y.toLong() and 0xffffffffL)) { Optional.ofNullable(find(town)) }.orElse(null)
++            grounds.computeIfAbsent(MapRegionData.getInstance().getClosestTownName(town.x, town.y)) { Optional.ofNullable(find(it, town)) }.orElse(null)
 +
 +    /** The ground the bot stands at, if it is at one (within [radius]). */
 +    fun near(bot: Player, radius: Int): Location? =
 +            grounds.values.mapNotNull { it.orElse(null) }.firstOrNull { distance(bot.location(), it) <= radius && kotlin.math.abs(bot.z - it.z) < 400 }
 +
-+    private fun find(town: Location): Location? {
++    private fun find(name: String, town: Location): Location? {
 +        val geo = GeoEngine.getInstance()
 +        val monsters = World.getInstance().objects.filterIsInstance<Monster>()
 +                .filter { it.isAggressive && distance(it.spawnLocation(), town) < MAX_RAY + MARGIN + AGGRO_RADIUS }
@@ -375,7 +376,7 @@ index 0000000..1fbcf53
 +                step += STEP
 +            }
 +        }
-+        println("Autobots duels: duel ground of the town at ${town.x},${town.y},${town.z}: " +
++        println("Autobots duels: duel ground of $name (from ${town.x},${town.y},${town.z}): " +
 +                (best?.let { "${it.x},${it.y},${it.z} (${bestDistance.toInt()} away)" } ?: "none"))
 +        return best
 +    }
