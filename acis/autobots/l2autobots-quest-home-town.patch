@@ -1,0 +1,51 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index dd349b6..b9b8488 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -773,14 +773,19 @@ internal class QuestRunner(private val bot: Player) {
+         val exit = if (far && inTown) routeExitFrom(bot.location(),destination,npc)?.exit else null
+         // There is usually no gatekeeper within reach in the field. Quote the actual
+         // town's service first; a current-position lookup would force a map-wide walk.
+-        val homeExit=if(far && !inTown) {
+-            val home=net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getLocationToTeleport(bot,
+-                    net.sf.l2j.gameserver.data.xml.MapRegionData.TeleportType.TOWN)
+-            routeExitFrom(home,destination,npc)?.takeIf {
++        val home=if(far && !inTown) net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getLocationToTeleport(bot,
++                net.sf.l2j.gameserver.data.xml.MapRegionData.TeleportType.TOWN) else null
++        val homeExit=home?.let { origin ->
++            routeExitFrom(origin,destination,npc)?.takeIf {
+                 it.price<=dev.l2j.autobots.population.economy.GatekeeperTravel.fareSpendable(bot)
+             }
+-        } else null
+-        if(npc!=null && exit==null && homeExit==null && distance(bot.location(),destination)>LONG_TRIP) {
++        }
++        // The quest NPC lives in (or next to) the town the bot returns to: no gatekeeper is needed, the town trip is.
++        // An orc fighter farming the Immortal Plateau (34k out) never got a walk to Karukia in the orc village and put
++        // the Orc Raider quest aside, while its own supply trips reached the same village every few minutes.
++        val homeIsGoal=home!=null && distance(home,destination)<=NPC_NEAR_TOWN &&
++                distance(home,destination)<distance(bot.location(),destination)-MIN_WALK_SAVED_BY_TELEPORT
++        if(npc!=null && exit==null && homeExit==null && !homeIsGoal && distance(bot.location(),destination)>LONG_TRIP) {
+             failed("no affordable complete route to ${npc.name}",walk=false)
+             return
+         }
+@@ -796,6 +801,11 @@ internal class QuestRunner(private val bot: Player) {
+                                 " to=${destination.x},${destination.y},${destination.z}")
+                 GoToTownSequence(bot,purpose="quest_route") { failed("couldn't get back to town", walk = true) }.execute()
+             }
++            homeIsGoal -> {
++                dev.l2j.autobots.population.economy.EconomyLog.note(bot,
++                        "quest route via=home town to=${destination.x},${destination.y},${destination.z} from=${bot.x},${bot.y},${bot.z}")
++                GoToTownSequence(bot,purpose="quest_route") { failed("couldn't get back to town", walk = false) }.execute()
++            }
+             else -> {
+                 val walk = WalkToSequence(bot, destination, radius) {
+                     failed("stuck walking to ${destination.x},${destination.y} from ${bot.x},${bot.y}", walk = false)
+@@ -981,6 +991,8 @@ internal class QuestRunner(private val bot: Player) {
+         private const val SERVITOR_HEAL_BELOW = 0.6
+         private const val MIN_WALK_SAVED_BY_TELEPORT = 12000
+         private const val FAR_FROM_TOWN = 20000
++        /** A quest NPC this close to the town's return point is reached on foot once the bot is in town. */
++        private const val NPC_NEAR_TOWN = 6000
+         // About 30 seconds at the default think interval.
+         private const val MAX_IDLE_TICKS = 90
+         private const val EMPTY_SPOT_MS = 10 * 60 * 1000L

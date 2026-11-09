@@ -1,0 +1,23 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+index e5e039e..77b08b9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineEquipment.kt
+@@ -29,10 +29,17 @@ internal object OfflineEquipment {
+             if (slot < 0 || !fits(player, item) ||
+                     !Gear.canEquipStockedWeapon(player,item) { OfflineChores.optionalBudget(player) }) continue
+             val worn = player.inventory.getPaperdollItem(slot)
+-            if (worn == null || score(player, item) > score(player, worn) + 0.01) Gear.equip(player, item)
++            if (worn == null || score(player, item) > score(player, worn) + 0.01) {
++                // The core puts a third earring or ring on the left one whatever is worn there, not on the weaker
++                // piece chosen here: KINGSLY swapped three earrings round and round, ~270 times in a session.
++                if (worn != null && slot in PAIRED_SLOTS) player.inventory.unEquipItemInSlot(slot)
++                Gear.equip(player, item)
++            }
+         }
+     }
+ 
++    private val PAIRED_SLOTS = setOf(Inventory.PAPERDOLL_LEAR, Inventory.PAPERDOLL_REAR, Inventory.PAPERDOLL_LFINGER, Inventory.PAPERDOLL_RFINGER)
++
+     /** One conservative weapon goal, paid for only from the caller's money after supplies and travel. */
+     fun weaponPurchase(player: Player,budget: Int): Pair<dev.l2j.autobots.population.economy.Shop,net.sf.l2j.gameserver.model.buylist.Product>? =
+             weaponPurchaseAt(player,budget,player.location())
