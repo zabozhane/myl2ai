@@ -1,0 +1,843 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index fda071b..83a0091 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -102,6 +102,16 @@
+   <opportunistPercent>10</opportunistPercent>
+   <loanMaxDays>3</loanMaxDays>
+   <tradeLog>true</tradeLog>
++  <!-- Server news (docs/news.md): raid bosses killed, rare drops (base chance at most newsRareDropChance of 1000000,
++       gear, jewels, recipes, enchant scrolls, spellbooks), PKs and clan wars, by bots and players. The community board
++       (Alt+B) shows them; where a live player is, a bot of the region retells fresh news in shout at most every
++       newsRumorMinutes per region and newsRumorsPerHour in total, and bots answer "что нового". -->
++  <newsEnabled>true</newsEnabled>
++  <newsRumorsEnabled>true</newsRumorsEnabled>
++  <newsRumorMinutes>5</newsRumorMinutes>
++  <newsRumorsPerHour>12</newsRumorsPerHour>
++  <newsRareDropChance>3000</newsRareDropChance>
++  <newsLog>true</newsLog>
+   <!-- Language models (stage 5), two tiers. Bots a real player can see (llmNearRange), shares a party with or
+        talked to in the last 10 minutes use the near model; all other bots use the far model. A tier that is off,
+        paused after 3 failed calls in a row (10 minutes) or over its limits gives no answer, and its bots decide and
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 86c59a2..558227f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -99,6 +99,39 @@ object AutobotsManager {
+         runCatching { OfflineFarmManager.onOwnerAction(player, action) }
+     }
+ 
++    /** Core hooks for the server news (docs/news.md): raid kills, drops, PKs, clan wars, the news board. Never break the core. */
++    fun onRaidKilled(boss: net.sf.l2j.gameserver.model.actor.Npc, killer: net.sf.l2j.gameserver.model.actor.Creature?) {
++        runCatching { dev.l2j.autobots.population.news.ServerNews.onRaidKilled(boss, killer) }.onFailure { it.printStackTrace() }
++    }
++
++    fun onMonsterDrop(monster: net.sf.l2j.gameserver.model.actor.instance.Monster, player: Player, itemId: Int, count: Int) {
++        runCatching { dev.l2j.autobots.population.news.ServerNews.onMonsterDrop(monster, player, itemId, count) }.onFailure { it.printStackTrace() }
++    }
++
++    fun onPk(killer: Player, victim: Player) {
++        runCatching { dev.l2j.autobots.population.news.ServerNews.onPk(killer, victim) }.onFailure { it.printStackTrace() }
++    }
++
++    fun onPvpKill(killer: Player, victim: Player) {
++        runCatching { dev.l2j.autobots.population.news.ServerNews.onPvpKill(killer, victim) }.onFailure { it.printStackTrace() }
++    }
++
++    fun onClanWarDeclared(attacker: net.sf.l2j.gameserver.model.pledge.Clan, attacked: net.sf.l2j.gameserver.model.pledge.Clan) {
++        runCatching { dev.l2j.autobots.population.news.ServerNews.onWarDeclared(attacker, attacked) }.onFailure { it.printStackTrace() }
++    }
++
++    fun onClanWarEnded(clan: net.sf.l2j.gameserver.model.pledge.Clan, enemy: net.sf.l2j.gameserver.model.pledge.Clan) {
++        runCatching { dev.l2j.autobots.population.news.ServerNews.onWarEnded(clan, enemy) }.onFailure { it.printStackTrace() }
++    }
++
++    fun onClanWarSurrender(loser: net.sf.l2j.gameserver.model.pledge.Clan, winner: net.sf.l2j.gameserver.model.pledge.Clan) {
++        runCatching { dev.l2j.autobots.population.news.ServerNews.onWarSurrender(loser, winner) }.onFailure { it.printStackTrace() }
++    }
++
++    fun onCommunityBoard(player: Player, command: String) {
++        runCatching { dev.l2j.autobots.population.news.NewsBoard.show(player, command) }.onFailure { it.printStackTrace() }
++    }
++
+     fun onChat(type: Int, chatter: Player, target: String?, text: String, handler : IChatHandler) : Boolean{
+         if(AutofarmCommandHandler.onChat(chatter, text)) return true
+         if(OfflineFarmCommandHandler.onChat(chatter, text)) return true
+@@ -114,9 +147,11 @@ object AutobotsManager {
+         when(type){
+             0, 1, 8 -> GroupChat.onPublicChat(chatter, text, activeBots.values)
+         }
++        // A question about the server's news gets its answer from the news; the usual chat answers stay quiet.
++        val askedNews = (type == 0 || type == 1) && dev.l2j.autobots.population.news.Rumors.onPublicChat(type, chatter, text, activeBots.values)
+         when(type){
+             0 -> { // chat all
+-                BotTalk.onNearbyChat(chatter, text, activeBots.values.filter { MathUtil.checkIfInRange(1250, it, chatter, true) && !BlockList.isBlocked(it, chatter) })
++                if (!askedNews) BotTalk.onNearbyChat(chatter, text, activeBots.values.filter { MathUtil.checkIfInRange(1250, it, chatter, true) && !BlockList.isBlocked(it, chatter) })
+                 activeBots.forEach {
+                     if(MathUtil.checkIfInRange(1250, it.value, chatter, true) && !BlockList.isBlocked(it.value, chatter)) {
+                         it.value.addChat(BotChat(ChatType.All, chatter.name, text))
+@@ -126,7 +161,7 @@ object AutobotsManager {
+             1 -> { // shout !
+                 val chatterRegion = MapRegionData.getInstance().getMapRegion(chatter.x, chatter.y)
+                 dev.l2j.autobots.population.group.ClanChat.onShout(chatter, text, activeBots.values)
+-                BotTalk.onShout(chatter, text, activeBots.values.filter {
++                if (!askedNews) BotTalk.onShout(chatter, text, activeBots.values.filter {
+                     MapRegionData.getInstance().getMapRegion(it.x, it.y) == chatterRegion && !BlockList.isBlocked(it, chatter) })
+                 activeBots.forEach {
+                     val region = MapRegionData.getInstance().getMapRegion(it.value.x, it.value.y)
+@@ -138,7 +173,8 @@ object AutobotsManager {
+             2 -> { // pm "
+                 if(target == null) return false
+                 val bot = activeBots.getOrElse(target) {null} ?: return false
+-                if (!dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
++                if (!dev.l2j.autobots.population.news.Rumors.onWhisper(chatter, bot, text) &&
++                        !dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
+                         !dev.l2j.autobots.population.llm.Persuasion.onWhisper(chatter, bot, text) &&
+                         !PlayerTrade.onWhisper(chatter, bot, text) && !GroupChat.onWhisper(chatter, bot, text)) BotTalk.onWhisper(chatter, bot, text)
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index a346dff..145d5cc 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -73,6 +73,12 @@ internal data class AutobotSettings(
+         @JsonProperty("opportunistPercent") var opportunistPercent: Int = 10,
+         @JsonProperty("loanMaxDays") var loanMaxDays: Int = 3,
+         @JsonProperty("tradeLog") var tradeLog: Boolean = true,
++        @JsonProperty("newsEnabled") var newsEnabled: Boolean = true,
++        @JsonProperty("newsRumorsEnabled") var newsRumorsEnabled: Boolean = true,
++        @JsonProperty("newsRumorMinutes") var newsRumorMinutes: Int = 5,
++        @JsonProperty("newsRumorsPerHour") var newsRumorsPerHour: Int = 12,
++        @JsonProperty("newsRareDropChance") var newsRareDropChance: Int = 3000,
++        @JsonProperty("newsLog") var newsLog: Boolean = true,
+         @JsonProperty("llmNearProvider") var llmNearProvider: String = "openai",
+         @JsonProperty("llmNearModel") var llmNearModel: String = "gpt-5.4-mini",
+         @JsonProperty("llmNearBaseUrl") var llmNearBaseUrl: String = "",
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index a07b859..606b246 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -113,6 +113,7 @@ internal object PopulationManager {
+                 RaidLog.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 dev.l2j.autobots.population.group.StaticParties.summary()
+                 dev.l2j.autobots.population.llm.Llm.summary()
++                dev.l2j.autobots.population.news.ServerNews.summary()
+             }
+             val online = members.values.mapNotNull { active(it) }.distinctBy { it.objectId }
+             if(ticks % 4 == 0) dev.l2j.autobots.movement.MovementStatus.sample(online)
+@@ -120,6 +121,8 @@ internal object PopulationManager {
+             if (ticks % GROUPS_EVERY_TICKS == 1) SocialTrade.tick(online)
+             if (ticks % CLANS_EVERY_TICKS == 3) dev.l2j.autobots.population.group.Clans.tick(online)
+             if (ticks % GROUPS_EVERY_TICKS == 0) dev.l2j.autobots.population.llm.BotChatter.tick(online)
++            dev.l2j.autobots.population.news.ServerNews.tick()
++            if (ticks % GROUPS_EVERY_TICKS == 1) dev.l2j.autobots.population.news.Rumors.tick(online)
+             dev.l2j.autobots.population.llm.ChatMemory.tick()
+             if (++ticks % SAVE_EVERY_TICKS == 0) {
+                 online.forEach {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/news/NewsBoard.kt b/src/main/kotlin/dev/l2j/autobots/population/news/NewsBoard.kt
+new file mode 100644
+index 0000000..bc3828b
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/news/NewsBoard.kt
+@@ -0,0 +1,154 @@
++package dev.l2j.autobots.population.news
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.population.news.ServerNews.Kind
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.communitybbs.Manager.BaseBBSManager
++import net.sf.l2j.gameserver.data.sql.ClanTable
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Player
++import java.time.Instant
++import java.time.LocalDate
++import java.time.ZoneId
++import java.time.format.DateTimeFormatter
++
++/**
++ * The news board on the community board (Alt+B opens `_bbsnews`): the feed with tabs and pages, the clan wars going
++ * on with their score, and PKs online. `_bbsnews;<tab>;<page>`.
++ */
++internal object NewsBoard {
++    private const val PAGE = 12
++    private const val WARS_CACHE_MS = 60_000L
++
++    private enum class Tab(val code: String, val title: String, val filter: (ServerNews.Entry) -> Boolean) {
++        All("all", "Все", { true }),
++        Raid("raid", "РБ", { it.kind == Kind.Raid }),
++        Drop("drop", "Дроп", { it.kind == Kind.Drop }),
++        Pk("pk", "ПК", { it.kind == Kind.Pk }),
++        War("war", "Войны", { it.kind.isWar });
++    }
++
++    private val TIME = DateTimeFormatter.ofPattern("HH:mm")
++    private val DAY_TIME = DateTimeFormatter.ofPattern("dd.MM HH:mm")
++
++    @Volatile private var scores: Map<Pair<Int, Int>, Pair<Int, Int>> = emptyMap()
++    @Volatile private var scoresAt = 0L
++
++    fun show(player: Player, command: String) {
++        val parts = command.split(';')
++        val tab = Tab.values().firstOrNull { it.code == parts.getOrNull(1) } ?: Tab.All
++        val page = (parts.getOrNull(2)?.toIntOrNull() ?: 0).coerceAtLeast(0)
++        // The board takes at most three packets of 4090 characters.
++        var html = html(tab, page, PAGE)
++        if (html.length >= 12_200) html = html(tab, page, PAGE / 2)
++        BaseBBSManager.separateAndSend(html, player)
++    }
++
++    private fun html(tab: Tab, page: Int, perPage: Int): String {
++        val all = ServerNews.latest(200, tab.filter)
++        val rows = all.drop(page * perPage).take(perPage)
++        val sb = StringBuilder(8000)
++        sb.append("<html><body><br><center>")
++        sb.append("<table width=610><tr><td width=400><font color=LEVEL>Новости сервера</font></td>")
++        sb.append("<td width=210 align=right><a action=\"bypass _bbshome\">Главная</a></td></tr></table><br>")
++        sb.append("<table width=610 bgcolor=333333><tr>")
++        for (t in Tab.values()) {
++            if (t == tab) sb.append("<td width=122 align=center><font color=LEVEL>").append(t.title).append("</font></td>")
++            else sb.append("<td width=122 align=center><a action=\"bypass _bbsnews;").append(t.code).append(";0\">").append(t.title).append("</a></td>")
++        }
++        sb.append("</tr></table><br>")
++        if (!ServerNews.enabled) sb.append("<table width=610><tr><td>Новости выключены.</td></tr></table>")
++        else if (rows.isEmpty()) sb.append("<table width=610><tr><td><font color=AAAAAA>Пока тихо. Здесь будут убитые РБ, редкий дроп, ПК и войны кланов.</font></td></tr></table>")
++        else {
++            sb.append("<table width=610>")
++            for ((i, e) in rows.withIndex()) {
++                sb.append("<tr><td width=80 valign=top><font color=AAAAAA>").append(time(e.at)).append("</font></td><td width=530>")
++                sb.append("<font color=").append(color(e.kind)).append(">").append(esc(NewsText.board(e))).append("</font></td></tr>")
++                if (i < rows.size - 1) sb.append("<tr><td height=4></td></tr>")
++            }
++            sb.append("</table>")
++        }
++        if (page > 0 || all.size > (page + 1) * perPage) {
++            sb.append("<br><table width=610><tr><td width=305 align=left>")
++            if (page > 0) sb.append("<a action=\"bypass _bbsnews;").append(tab.code).append(';').append(page - 1).append("\">&lt; Новее</a>")
++            sb.append("</td><td width=305 align=right>")
++            if (all.size > (page + 1) * perPage) sb.append("<a action=\"bypass _bbsnews;").append(tab.code).append(';').append(page + 1).append("\">Старше &gt;</a>")
++            sb.append("</td></tr></table>")
++        }
++        if (page == 0) {
++            wars(sb)
++            wanted(sb)
++        }
++        sb.append("</center></body></html>")
++        return sb.toString()
++    }
++
++    /** Wars going on: mutual or declared, with the score bot clans keep. */
++    private fun wars(sb: StringBuilder) {
++        val clans = ClanTable.getInstance().clans
++        val lines = ArrayList<String>()
++        for (clan in clans) {
++            for (enemyId in clan.warList) {
++                val enemy = ClanTable.getInstance().getClan(enemyId) ?: continue
++                val mutual = enemy.isAtWarWith(clan.clanId)
++                if (mutual && clan.clanId > enemyId) continue
++                val score = score(clan.clanId, enemyId)
++                lines += if (mutual) "${esc(clan.name)} <font color=FF6666>vs</font> ${esc(enemy.name)}" + (score?.let { " — ${it.first}:${it.second}" } ?: "")
++                else "${esc(clan.name)} объявил войну ${esc(enemy.name)}" + (score?.let { " — ${it.first}:${it.second}" } ?: "")
++            }
++        }
++        if (lines.isEmpty()) return
++        sb.append("<br><table width=610 bgcolor=333333><tr><td><font color=LEVEL>Войны кланов</font></td></tr></table><table width=610>")
++        lines.take(8).forEach { sb.append("<tr><td>").append(it).append("</td></tr>") }
++        if (lines.size > 8) sb.append("<tr><td><font color=AAAAAA>и ещё ").append(lines.size - 8).append("</font></td></tr>")
++        sb.append("</table>")
++    }
++
++    /** PKs online now. */
++    private fun wanted(sb: StringBuilder) {
++        val pks = World.getInstance().players.filter { it.karma > 0 && it.isOnline }.sortedByDescending { it.karma }.take(5)
++        if (pks.isEmpty()) return
++        sb.append("<br><table width=610 bgcolor=333333><tr><td><font color=LEVEL>ПК онлайн</font></td></tr></table><table width=610>")
++        for (p in pks) {
++            sb.append("<tr><td><font color=FF6666>").append(esc(p.name)).append("</font> ").append(p.level).append(" ур., ПК ").append(p.pkKills)
++            p.clan?.let { sb.append(", ").append(esc(it.name)) }
++            sb.append(", у ").append(esc(NewsText.placeOf(p))).append("</td></tr>")
++        }
++        sb.append("</table>")
++    }
++
++    /** Kills and deaths of [clan] in its war on [enemy] as bot clans count them (autobot_clan_wars), if known. */
++    private fun score(clan: Int, enemy: Int): Pair<Int, Int>? {
++        val now = System.currentTimeMillis()
++        if (now - scoresAt > WARS_CACHE_MS) {
++            scoresAt = now
++            val map = HashMap<Pair<Int, Int>, Pair<Int, Int>>()
++            try {
++                L2DatabaseFactory.getInstance().connection.use { con ->
++                    con.prepareStatement("SELECT clan_id, enemy_id, kills, deaths FROM autobot_clan_wars").use { ps ->
++                        ps.executeQuery().use { rs -> while (rs.next()) map[rs.getInt(1) to rs.getInt(2)] = rs.getInt(3) to rs.getInt(4) }
++                    }
++                }
++            } catch (e: Exception) {
++                // No table yet: clan wars of bots have never run.
++            }
++            scores = map
++        }
++        return scores[clan to enemy] ?: scores[enemy to clan]?.let { it.second to it.first }
++    }
++
++    private fun time(at: Long): String {
++        val zone = runCatching { ZoneId.of(AutobotData.settings.populationTimeZone) }.getOrDefault(ZoneId.systemDefault())
++        val t = Instant.ofEpochMilli(at).atZone(zone)
++        return if (t.toLocalDate() == LocalDate.now(zone)) t.format(TIME) else t.format(DAY_TIME)
++    }
++
++    private fun color(kind: Kind) = when (kind) {
++        Kind.Raid -> "FFCC33"
++        Kind.Drop -> "66CCFF"
++        Kind.Pk -> "FF6666"
++        else -> "FF9966"
++    }
++
++    private fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/news/NewsText.kt b/src/main/kotlin/dev/l2j/autobots/population/news/NewsText.kt
+new file mode 100644
+index 0000000..9b1f2ff
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/news/NewsText.kt
+@@ -0,0 +1,125 @@
++package dev.l2j.autobots.population.news
++
++import dev.l2j.autobots.population.news.ServerNews.Entry
++import dev.l2j.autobots.population.news.ServerNews.Kind
++import net.sf.l2j.commons.random.Rnd
++
++/**
++ * How news reads: a full line for the board, and chat lines for rumors and answers, Russian or English. Lines are
++ * code templates, no model: a rumor is a few words a player would shout, not an article.
++ */
++internal object NewsText {
++    /** "у X" for a map region (genitive), the way players name places in chat. */
++    private val PLACE_RU = arrayOf("Говорящего острова", "эльфийской деревни", "деревни тёмных эльфов", "деревни орков",
++            "деревни гномов", "Глудио", "Глудина", "Диона", "Гирана", "Орена", "Адена", "Деревни охотников", "гавани Гирана",
++            "Хейна", "Руны", "Годдарда", "Шутгарта", "Флорана", "Первобытного острова")
++    private val PLACE_EN = arrayOf("TI", "Elven Village", "DE Village", "Orc Village", "Dwarf Village", "Gludio", "Gludin",
++            "Dion", "Giran", "Oren", "Aden", "Hunters", "Giran Harbor", "Heine", "Rune", "Goddard", "Schuttgart", "Floran", "Primeval Isle")
++
++    fun place(e: Entry, ru: Boolean): String {
++        val names = if (ru) PLACE_RU else PLACE_EN
++        return names.getOrNull(e.region) ?: e.place
++    }
++
++    fun placeOf(p: net.sf.l2j.gameserver.model.actor.Player): String =
++            PLACE_RU.getOrNull(net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getMapRegion(p.x, p.y)) ?: ""
++
++    private fun who(e: Entry) = if (e.actorClan.isNotEmpty()) "${e.actor} (${e.actorClan})" else e.actor
++
++    /** The board's line: who, what, where, in full. */
++    fun board(e: Entry): String = when (e.kind) {
++        Kind.Raid -> "${if (e.count > 1) "Пати ${who(e)}, ${e.count} чел.," else who(e)} ${if (e.count > 1) "убила" else "убил(а)"} ${e.subject} у ${place(e, true)}" +
++                (if (e.extra.isNotEmpty()) ". Упало: ${e.extra}" else "")
++        Kind.Drop -> "${who(e)} выбил(а) ${e.subject}${if (e.count > 1) " x${e.count}" else ""} с ${e.other} у ${place(e, true)}"
++        Kind.Pk -> "${who(e)} убил(а) ${e.other}${if (e.otherClan.isNotEmpty()) " (${e.otherClan})" else ""}, ${e.extra} ур., у ${place(e, true)}. На счету ПК: ${e.count}"
++        Kind.WarDeclared -> "Клан ${e.actorClan} объявил войну клану ${e.otherClan}"
++        Kind.WarMutual -> "Клан ${e.actorClan} ответил на войну клана ${e.otherClan}: война взаимная"
++        Kind.WarSurrender -> "Клан ${e.actorClan} сдался клану ${e.otherClan}"
++        Kind.WarStopped -> "Война ${e.actorClan} с ${e.otherClan} окончена"
++        Kind.WarBattle -> "Бои ${e.actorClan} против ${e.otherClan} за полчаса: ${e.count}:${e.extra}"
++    }
++
++    private fun boss(e: Entry) = e.subject.substringBefore(" (")
++
++    /**
++     * A rumor about [e] in shout. [old]: retold later, so it sounds like hearsay and may grow in the telling.
++     * [self]: the teller took part (the raid killer brags, the PK victim complains).
++     */
++    fun rumor(e: Entry, ru: Boolean, old: Boolean, self: Boolean): String {
++        val at = place(e, ru)
++        val pick = { ruLines: List<String>, enLines: List<String> -> (if (ru) ruLines else enLines).random() }
++        return when (e.kind) {
++            Kind.Raid -> {
++                // A party grows in the retelling.
++                val size = if (old && e.count > 1 && Rnd.get(100) < 25) e.count + Rnd.get(1, 3) else e.count
++                val drop = if (e.extra.isNotEmpty() && Rnd.get(100) < 60) (if (ru) ", упало: ${e.extra}" else ", drop: ${e.extra}") else ""
++                when {
++                    self -> pick(listOf("мы только что положили ${boss(e)}!", "${boss(e)} наш, гг", "убили ${boss(e)} у $at$drop"),
++                            listOf("we just killed ${boss(e)}!", "${boss(e)} down, gg", "killed ${boss(e)} near $at$drop"))
++                    old -> pick(listOf("говорят, ${e.actor} с пати в $size чел. убили ${boss(e)} у $at", "слышал, ${boss(e)} уже убит, ${e.actorClan.ifEmpty { e.actor }} постарались",
++                            "${boss(e)} у $at уже лёг, ${e.actor} забрали"),
++                            listOf("heard ${e.actor} and $size more killed ${boss(e)} near $at", "${boss(e)} is dead already, ${e.actorClan.ifEmpty { e.actor }} got it"))
++                    else -> pick(listOf("${boss(e)} лёг! ${e.actorClan.ifEmpty { e.actor }} забрали, у $at$drop", "${e.actor} с пати только что убили ${boss(e)} у $at$drop",
++                            "слышали? ${e.actor} и ко положили ${boss(e)}$drop"),
++                            listOf("${boss(e)} is down! ${e.actorClan.ifEmpty { e.actor }} took it near $at$drop", "${e.actor} and co just killed ${boss(e)}$drop"))
++                }
++            }
++            Kind.Drop -> when {
++                self -> pick(listOf("выбил ${e.subject}!!!", "ура, ${e.subject} упал с ${e.other}", "кто бы мог подумать, ${e.subject} с ${e.other}"),
++                        listOf("got ${e.subject}!!!", "${e.subject} dropped from ${e.other}, finally"))
++                old -> pick(listOf("говорят, кто-то у $at выбил ${e.subject}", "слышал, ${e.actor} выбил ${e.subject} с ${e.other}"),
++                        listOf("heard someone got ${e.subject} near $at", "${e.actor} got ${e.subject}, they say"))
++                else -> pick(listOf("${e.actor} выбил ${e.subject} с ${e.other}, везёт же", "у $at ${e.subject} упал! ${e.actor}, кажется"),
++                        listOf("${e.actor} got ${e.subject} from ${e.other}, lucky", "${e.subject} dropped near $at! ${e.actor} i think"))
++            }
++            Kind.Pk -> when {
++                self -> pick(listOf("меня ${e.actor} убил у $at, гад", "${e.actor} пкшит у $at, меня положил", "осторожно, у $at ПК ${e.actor}, только что меня слил"),
++                        listOf("${e.actor} pked me near $at", "careful, ${e.actor} is pking near $at"))
++                old -> pick(listOf("говорят, у $at бегает ПК ${e.actor}", "слышал, ${e.actor} красный, ${e.count} пк уже"),
++                        listOf("heard there's a pk near $at, ${e.actor}", "${e.actor} is red, ${e.count} pks they say"))
++                else -> pick(listOf("${e.actor} опять ПКшит у $at, убил ${e.other}", "осторожно у $at: ${e.actor} красный, положил ${e.other}"),
++                        listOf("${e.actor} is pking near $at, killed ${e.other}", "careful near $at, ${e.actor} is red"))
++            }
++            Kind.WarDeclared -> pick(listOf("${e.actorClan} объявили войну ${e.otherClan}", "слыхали? ${e.actorClan} против ${e.otherClan}, война", "${e.otherClan} получили войну от ${e.actorClan}"),
++                    listOf("${e.actorClan} declared war on ${e.otherClan}", "${e.actorClan} vs ${e.otherClan}, war"))
++            Kind.WarMutual -> pick(listOf("${e.actorClan} ответили ${e.otherClan}, теперь война по-настоящему", "${e.actorClan} и ${e.otherClan} воюют, оба объявили"),
++                    listOf("${e.actorClan} answered ${e.otherClan}, it's a real war now", "${e.actorClan} and ${e.otherClan} are at war"))
++            Kind.WarSurrender -> pick(listOf("${e.actorClan} сдались ${e.otherClan}", "${e.actorClan} слились, сдались ${e.otherClan}"),
++                    listOf("${e.actorClan} surrendered to ${e.otherClan}", "${e.actorClan} gave up, ${e.otherClan} won"))
++            Kind.WarStopped -> pick(listOf("${e.actorClan} и ${e.otherClan} больше не воюют", "война ${e.actorClan} с ${e.otherClan} всё"),
++                    listOf("${e.actorClan} and ${e.otherClan} stopped the war", "war ${e.actorClan} vs ${e.otherClan} is over"))
++            Kind.WarBattle -> pick(listOf("${e.actorClan} против ${e.otherClan}: ${e.count}:${e.extra} за полчаса", "${e.actorClan} гоняют ${e.otherClan}, ${e.count}:${e.extra}"),
++                    listOf("${e.actorClan} vs ${e.otherClan}: ${e.count}:${e.extra} in half an hour", "${e.actorClan} are beating ${e.otherClan}, ${e.count}:${e.extra}"))
++        }
++    }
++
++    /** Another bot's reaction to a rumor. */
++    fun reply(e: Entry, ru: Boolean): String = when (e.kind) {
++        Kind.Raid -> (if (ru) listOf("гц", "грац", "а что упало?", "опять без нас", "кто там был?", "мы тоже туда шли(", "ну наконец-то")
++                else listOf("gz", "grats", "what dropped?", "without us again", "who was there?"))
++        Kind.Drop -> (if (ru) listOf("везёт", "продаёшь?", "гц с дропом", "сколько хочешь за него?", "а я его неделю выбиваю")
++                else listOf("lucky", "wts?", "gz on the drop", "how much?", "been farming it for a week"))
++        Kind.Pk -> (if (ru) listOf("опять он", "кто-нибудь его уже прибьёт?", "не ходите туда", "карму отмывать будет долго", "сколько можно")
++                else listOf("him again", "someone kill him already", "stay away from there", "again?"))
++        Kind.WarDeclared, Kind.WarMutual, Kind.WarBattle -> (if (ru) listOf("попкорн", "кто кого?", "давно пора", "ну всё, на споте будет жарко", "держусь подальше")
++                else listOf("popcorn", "who wins?", "about time", "stay away from them"))
++        Kind.WarSurrender, Kind.WarStopped -> (if (ru) listOf("слились", "гг", "быстро они", "мир, дружба, жвачка")
++                else listOf("gg", "that was quick", "peace at last"))
++    }.random()
++
++    /** A short answer to "what's new": one or two items, freshest first. */
++    fun answer(items: List<Entry>, ru: Boolean): String {
++        if (items.isEmpty()) return (if (ru) listOf("тихо пока", "да ничего особенного", "ничего не слышал") else listOf("quiet so far", "nothing much", "haven't heard anything")).random()
++        val lines = items.take(2).map { shortLine(it, ru) }
++        val text = lines.joinToString(if (ru) "; ещё " else "; also ")
++        val hint = if (Rnd.get(100) < 40) (if (ru) " (всё на доске, Alt+B)" else " (all on the board, Alt+B)") else ""
++        return (text + hint).take(200)
++    }
++
++    private fun shortLine(e: Entry, ru: Boolean): String = when (e.kind) {
++        Kind.Raid -> if (ru) "${e.actorClan.ifEmpty { e.actor }} убили ${boss(e)}" else "${e.actorClan.ifEmpty { e.actor }} killed ${boss(e)}"
++        Kind.Drop -> if (ru) "${e.actor} выбил ${e.subject}" else "${e.actor} got ${e.subject}"
++        Kind.Pk -> if (ru) "${e.actor} пкшит у ${place(e, true)}" else "${e.actor} is pking near ${place(e, false)}"
++        else -> rumor(e, ru, old = false, self = false)
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/news/Rumors.kt b/src/main/kotlin/dev/l2j/autobots/population/news/Rumors.kt
+new file mode 100644
+index 0000000..ee04166
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/news/Rumors.kt
+@@ -0,0 +1,148 @@
++package dev.l2j.autobots.population.news
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.population.group.GroupChat
++import dev.l2j.autobots.population.group.Sociability
++import dev.l2j.autobots.population.group.launchSafely
++import dev.l2j.autobots.population.llm.Attention.isLiveAudience
++import dev.l2j.autobots.population.news.ServerNews.Kind
++import kotlinx.coroutines.delay
++import net.sf.l2j.commons.math.MathUtil
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Player
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
++
++/**
++ * Rumors (docs/news.md): where a live player is, a bot of the region retells fresh news in shout and others react;
++ * a player asking "what's new" gets the last news from a bot. Code templates only, so it costs nothing.
++ */
++internal object Rumors {
++    private const val MAX_AGE_MS = 60 * 60_000L
++    private const val HEARSAY_MS = 15 * 60_000L
++    private const val ASK_COOLDOWN_MS = 30_000L
++    private const val ANSWER_NEWS_MS = 3 * 3_600_000L
++
++    private val QUESTION = Regex("(что нового|что новенького|какие новости|\\bновост|что слышно|кто убил|что случилось|что происходит|" +
++            "what'?s new|\\bany news\\b|\\bnews\\b|what happened)", RegexOption.IGNORE_CASE)
++
++    private val settings get() = AutobotData.settings
++    private val enabled get() = ServerNews.enabled && settings.newsRumorsEnabled
++
++    private val lastInRegion = ConcurrentHashMap<Int, Long>()
++    /** region -> ids of news already told there. */
++    private val told = ConcurrentHashMap<Int, MutableSet<Long>>()
++    private val asked = ConcurrentHashMap<Int, Long>()
++    private var hourStarted = System.currentTimeMillis()
++    private val hour = AtomicInteger()
++    private val rumors = AtomicInteger()
++    private val replies = AtomicInteger()
++    private val answers = AtomicInteger()
++
++    private fun region(p: Player) = MapRegionData.getInstance().getMapRegion(p.x, p.y)
++
++    private fun canTalk(bot: Autobot) = bot.life != null && !bot.isDead && bot.isOnline
++
++    /** Every 30 seconds: one rumor at most per region with a live player and a quiet shout. */
++    fun tick(online: List<Autobot>) {
++        if (!enabled) return
++        val now = System.currentTimeMillis()
++        synchronized(this) {
++            if (now - hourStarted > 3_600_000L) { hourStarted = now; hour.set(0) }
++        }
++        val regions = World.getInstance().players.filter { it.isLiveAudience() }.map { region(it) }.distinct().shuffled()
++        if (regions.isEmpty()) return
++        val fresh = ServerNews.latest(30) { now - it.at < MAX_AGE_MS }
++        if (fresh.isEmpty()) return
++        val byRegion = online.filter { canTalk(it) }.groupBy { region(it) }
++        for (region in regions) {
++            if (hour.get() >= settings.newsRumorsPerHour) return
++            if (now - (lastInRegion[region] ?: 0L) < settings.newsRumorMinutes * 60_000L) continue
++            val bots = byRegion[region] ?: continue
++            val done = told.getOrPut(region) { ConcurrentHashMap.newKeySet() }
++            val candidates = fresh.filter { it.id !in done && (it.region == region || it.kind == Kind.Raid || it.kind.isWar) }
++            // News from here first, then the loudest from elsewhere.
++            val entry = candidates.firstOrNull { it.region == region } ?: candidates.firstOrNull() ?: continue
++            val self = bots.firstOrNull { it.name == entry.actor && entry.kind in setOf(Kind.Raid, Kind.Drop) }
++                    ?: bots.firstOrNull { it.name == entry.other && entry.kind == Kind.Pk }
++            val teller = self?.takeIf { Rnd.get(100) < 60 }
++                    ?: bots.filter { it.name != entry.actor && Sociability.of(it) != Sociability.Loner }.randomOrNull()
++                    ?: continue
++            done += entry.id
++            lastInRegion[region] = now
++            hour.incrementAndGet()
++            tell(teller, entry, self === teller, now - entry.at > HEARSAY_MS, bots - teller)
++        }
++        if (told.values.sumOf { it.size } > 2000) told.clear()
++    }
++
++    private fun tell(teller: Autobot, entry: ServerNews.Entry, self: Boolean, old: Boolean, others: List<Autobot>) {
++        val ru = Rnd.get(100) < 70
++        val line = NewsText.rumor(entry, ru, old, self)
++        rumors.incrementAndGet()
++        if (settings.newsLog) println("Autobots news: rumor ${entry.kind.code} by ${teller.name} in region ${region(teller)}: $line")
++        launchSafely {
++            delay(Rnd.get(1000, 5000).toLong())
++            if (!canTalk(teller)) return@launchSafely
++            teller.shout(line)
++            val repliers = others.filter { it.name != entry.actor && Rnd.get(100) < if (Sociability.of(it) == Sociability.Loner) 10 else 35 }
++                    .shuffled().take(Rnd.get(0, 3))
++            for (bot in repliers) {
++                delay(Rnd.get(4000, 10000).toLong())
++                if (!canTalk(bot)) continue
++                bot.shout(NewsText.reply(entry, ru))
++                replies.incrementAndGet()
++            }
++        }
++    }
++
++    /**
++     * A player's line in general chat (type 0) or shout (1) asking what's new: a bot nearby or in the region answers.
++     * @return true if it was such a question, so the usual chat answers stay quiet.
++     */
++    fun onPublicChat(type: Int, player: Player, text: String, online: Collection<Autobot>): Boolean {
++        if (!enabled || player is Autobot || !QUESTION.containsMatchIn(text) || !mayAsk(player)) return false
++        val bots = online.filter { canTalk(it) && Sociability.of(it) != Sociability.Loner }
++        val bot = when (type) {
++            0 -> bots.filter { MathUtil.checkIfInRange(1250, it, player, true) }.randomOrNull()
++            1 -> bots.filter { region(it) == region(player) }.randomOrNull()
++            else -> null
++        } ?: return false
++        val ru = GroupChat.isRussian(text) || !text.any { it in 'a'..'z' || it in 'A'..'Z' }
++        val reply = NewsText.answer(ServerNews.latest(2) { System.currentTimeMillis() - it.at < ANSWER_NEWS_MS }, ru)
++        answers.incrementAndGet()
++        if (settings.newsLog) println("Autobots news: ${bot.name} answers ${player.name}: $reply")
++        launchSafely {
++            delay(Rnd.get(3000, 7000).toLong())
++            if (!canTalk(bot)) return@launchSafely
++            if (type == 1) bot.shout(reply) else bot.say(reply)
++        }
++        return true
++    }
++
++    /** A whisper to a bot asking what's new. @return true if handled. */
++    fun onWhisper(player: Player, bot: Autobot, text: String): Boolean {
++        if (!enabled || player is Autobot || !QUESTION.containsMatchIn(text) || !mayAsk(player)) return false
++        val ru = GroupChat.isRussian(text) || !text.any { it in 'a'..'z' || it in 'A'..'Z' }
++        val reply = NewsText.answer(ServerNews.latest(2) { System.currentTimeMillis() - it.at < ANSWER_NEWS_MS }, ru)
++        answers.incrementAndGet()
++        if (settings.newsLog) println("Autobots news: ${bot.name} whispers ${player.name}: $reply")
++        launchSafely {
++            delay(Rnd.get(2000, 6000).toLong())
++            if (bot.isOnline && player.isOnline) bot.tell(player.name, reply)
++        }
++        return true
++    }
++
++    private fun mayAsk(player: Player): Boolean {
++        val now = System.currentTimeMillis()
++        if (now - (asked[player.objectId] ?: 0L) < ASK_COOLDOWN_MS) return false
++        asked[player.objectId] = now
++        return true
++    }
++
++    fun summary() = "rumors=${rumors.getAndSet(0)} replies=${replies.getAndSet(0)} answers=${answers.getAndSet(0)}"
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/news/ServerNews.kt b/src/main/kotlin/dev/l2j/autobots/population/news/ServerNews.kt
+new file mode 100644
+index 0000000..2957bc8
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/news/ServerNews.kt
+@@ -0,0 +1,257 @@
++package dev.l2j.autobots.population.news
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.population.group.launchSafely
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.enums.items.EtcItemType
++import net.sf.l2j.gameserver.model.WorldObject
++import net.sf.l2j.gameserver.model.actor.Creature
++import net.sf.l2j.gameserver.model.actor.Npc
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
++import net.sf.l2j.gameserver.model.item.kind.Armor
++import net.sf.l2j.gameserver.model.item.kind.EtcItem
++import net.sf.l2j.gameserver.model.item.kind.Item
++import net.sf.l2j.gameserver.model.item.kind.Weapon
++import net.sf.l2j.gameserver.model.pledge.Clan
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
++import java.util.concurrent.atomic.AtomicLong
++
++/**
++ * The server's news feed (docs/news.md): raid bosses killed, rare drops, PKs and clan wars, by bots and players
++ * alike. The core reports events through AutobotsManager; the feed keeps the last [KEEP] items in memory and in
++ * `autobot_news` for a week. [NewsBoard] shows it on the community board, [Rumors] retells it in shout.
++ */
++internal object ServerNews {
++    enum class Kind(val code: String) {
++        Raid("raid"), Drop("drop"), Pk("pk"),
++        WarDeclared("war_declared"), WarMutual("war_mutual"), WarSurrender("war_surrender"), WarStopped("war_stopped"), WarBattle("war_battle");
++
++        val isWar get() = name.startsWith("War")
++
++        companion object {
++            fun of(code: String) = values().firstOrNull { it.code == code }
++        }
++    }
++
++    /**
++     * One event. Raid: [actor] killed [subject] with a party of [count], [extra] lists notable drops. Drop: [actor]
++     * got [count] [subject] from [other]. Pk: [actor] killed [other] (level [extra]), [count] is the killer's PK count.
++     * Wars: [actorClan] did it to [otherClan]; a battle is [count] kills of [actorClan] against [extra] of [otherClan].
++     * [region] is the map region for rumors, -1 when the news is not tied to a place.
++     */
++    class Entry(val id: Long, val at: Long, val kind: Kind, val actor: String, val actorClan: String, val other: String,
++                val otherClan: String, val subject: String, val place: String, val region: Int, val count: Int, val extra: String)
++
++    private const val KEEP = 200
++    private const val WEEK_MS = 7 * 24 * 3_600_000L
++    private const val BATTLE_WINDOW_MS = 30 * 60_000L
++    private const val BATTLE_MIN_KILLS = 3
++
++    private val settings get() = AutobotData.settings
++    val enabled get() = settings.newsEnabled
++
++    private val feed = ArrayDeque<Entry>()
++    private val nextId = AtomicLong(1)
++    @Volatile private var loaded = false
++
++    /** Notable drops of a raid boss that is dying right now: the core drops before it reports the kill. */
++    private val raidDrops = ConcurrentHashMap<Int, MutableList<String>>()
++    /** Surrenders of the last seconds, so the war's end that follows is not a second item. */
++    private val surrendered = ConcurrentHashMap<Long, Long>()
++
++    private class Battle(var kills: Int = 0, var deaths: Int = 0)
++    /** (clan, enemy) with the lower id first -> kills of the first and the second in the current window. */
++    private val battles = ConcurrentHashMap<Long, Battle>()
++    private var battleWindow = System.currentTimeMillis()
++
++    private val counts = ConcurrentHashMap<Kind, AtomicInteger>()
++
++    // ---------------------------------------------------------------- core events
++
++    fun onRaidKilled(boss: Npc, killer: Creature?) {
++        val drops = raidDrops.remove(boss.objectId)
++        if (!enabled) return
++        val player = killer?.actingPlayer ?: return
++        val head = player.party?.leader ?: player
++        val size = player.party?.membersCount ?: 1
++        add(Kind.Raid, head.name, clanName(head), "", "", "${boss.name} (${boss.level})", boss, size, drops?.distinct()?.take(3)?.joinToString(", ") ?: "")
++    }
++
++    fun onMonsterDrop(monster: Monster, player: Player, itemId: Int, count: Int) {
++        if (!enabled) return
++        val item = ItemTable.getInstance().getTemplate(itemId) ?: return
++        if (!notable(item)) return
++        if (monster.isRaidRelated) {
++            raidDrops.getOrPut(monster.objectId) { java.util.Collections.synchronizedList(ArrayList()) }.add(item.name)
++            return
++        }
++        val chance = monster.template.dropData.filter { !it.isSweep }.flatMap { it.allDrops }.filter { it.itemId == itemId }.minOfOrNull { it.chance } ?: return
++        if (chance > settings.newsRareDropChance) return
++        add(Kind.Drop, player.name, clanName(player), monster.name, "", item.name, monster, count, "")
++    }
++
++    fun onPk(killer: Player, victim: Player) {
++        if (!enabled) return
++        add(Kind.Pk, killer.name, clanName(killer), victim.name, clanName(victim), "", victim, killer.pkKills, victim.level.toString())
++    }
++
++    /** A PvP kill: counted when the two clans are at war with each other, and told as a battle every 30 minutes. */
++    fun onPvpKill(killer: Player, victim: Player) {
++        if (!enabled) return
++        val a = killer.clan ?: return
++        val b = victim.clan ?: return
++        if (!a.isAtWarWith(b.clanId) || !b.isAtWarWith(a.clanId)) return
++        val battle = battles.getOrPut(key(minOf(a.clanId, b.clanId), maxOf(a.clanId, b.clanId))) { Battle() }
++        synchronized(battle) { if (a.clanId < b.clanId) battle.kills++ else battle.deaths++ }
++    }
++
++    fun onWarDeclared(attacker: Clan, attacked: Clan) {
++        if (!enabled) return
++        add(if (attacked.isAtWarWith(attacker.clanId)) Kind.WarMutual else Kind.WarDeclared, "", attacker.name, "", attacked.name, "", null, 0, "")
++    }
++
++    fun onWarSurrender(loser: Clan, winner: Clan) {
++        surrendered[key(loser.clanId, winner.clanId)] = System.currentTimeMillis()
++        if (!enabled) return
++        add(Kind.WarSurrender, "", loser.name, "", winner.name, "", null, 0, "")
++    }
++
++    fun onWarEnded(clan: Clan, enemy: Clan) {
++        val surrender = surrendered.remove(key(clan.clanId, enemy.clanId))
++        if (surrender != null && System.currentTimeMillis() - surrender < 10_000L) return
++        if (!enabled) return
++        add(Kind.WarStopped, "", clan.name, "", enemy.name, "", null, 0, "")
++    }
++
++    // ---------------------------------------------------------------- feed
++
++    /** Every population tick: closes the battle window and forgets stale raid drops. */
++    fun tick() {
++        if (!enabled) return
++        load()
++        val now = System.currentTimeMillis()
++        if (now - battleWindow < BATTLE_WINDOW_MS) return
++        battleWindow = now
++        for ((k, battle) in battles.entries.toList()) {
++            battles.remove(k)
++            if (battle.kills + battle.deaths < BATTLE_MIN_KILLS) continue
++            val a = net.sf.l2j.gameserver.data.sql.ClanTable.getInstance().getClan(first(k)) ?: continue
++            val b = net.sf.l2j.gameserver.data.sql.ClanTable.getInstance().getClan(second(k)) ?: continue
++            val (winner, loser, wk, lk) = if (battle.kills >= battle.deaths) Quad(a, b, battle.kills, battle.deaths) else Quad(b, a, battle.deaths, battle.kills)
++            add(Kind.WarBattle, "", winner.name, "", loser.name, "", null, wk, lk.toString())
++        }
++        if (raidDrops.size > 50) raidDrops.clear()
++        surrendered.entries.removeIf { now - it.value > 60_000L }
++    }
++
++    private data class Quad(val a: Clan, val b: Clan, val x: Int, val y: Int)
++
++    /** Newest first, at most [limit], optionally of some kinds only. */
++    fun latest(limit: Int, filter: (Entry) -> Boolean = { true }): List<Entry> {
++        load()
++        synchronized(feed) { return feed.asReversed().asSequence().filter(filter).take(limit).toList() }
++    }
++
++    private fun add(kind: Kind, actor: String, actorClan: String, other: String, otherClan: String, subject: String,
++                    where: WorldObject?, count: Int, extra: String) {
++        load()
++        val place = where?.let { MapRegionData.getInstance().getClosestTownName(it.x, it.y) } ?: ""
++        val region = where?.let { MapRegionData.getInstance().getMapRegion(it.x, it.y) } ?: -1
++        val entry = Entry(nextId.getAndIncrement(), System.currentTimeMillis(), kind, actor, actorClan, other, otherClan, subject, place, region, count, extra)
++        synchronized(feed) {
++            feed.addLast(entry)
++            while (feed.size > KEEP) feed.removeFirst()
++        }
++        counts.getOrPut(kind) { AtomicInteger() }.incrementAndGet()
++        if (settings.newsLog) println("Autobots news: ${kind.code} ${NewsText.board(entry)}")
++        launchSafely { store(entry) }
++    }
++
++    fun summary() {
++        if (!enabled || !settings.newsLog) return
++        println("Autobots news summary: " + Kind.values().joinToString(" ") { "${it.code}=${counts[it]?.getAndSet(0) ?: 0}" } +
++                " feed=${synchronized(feed) { feed.size }} " + Rumors.summary())
++    }
++
++    // ---------------------------------------------------------------- helpers
++
++    /** Gear, jewels, recipes, enchant scrolls and spellbooks: what players brag about. Materials and potions are not news. */
++    fun notable(item: Item): Boolean = when {
++        item.itemId == 57 -> false
++        item is Weapon || item is Armor -> true
++        (item as? EtcItem)?.itemType in setOf(EtcItemType.RECIPE, EtcItemType.SCRL_ENCHANT_WP, EtcItemType.SCRL_ENCHANT_AM,
++                EtcItemType.BLESS_SCRL_ENCHANT_WP, EtcItemType.BLESS_SCRL_ENCHANT_AM) -> true
++        item.name.startsWith("Spellbook") || item.name.startsWith("Amulet:") -> true
++        else -> false
++    }
++
++    private fun clanName(player: Player) = player.clan?.name ?: ""
++
++    private fun key(a: Int, b: Int) = (a.toLong() shl 32) or (b.toLong() and 0xffffffffL)
++    private fun first(k: Long) = (k shr 32).toInt()
++    private fun second(k: Long) = k.toInt()
++
++    // ---------------------------------------------------------------- storage
++
++    @Synchronized
++    private fun load() {
++        if (loaded) return
++        loaded = true
++        try {
++            val stored = ArrayList<Entry>()
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.createStatement().use {
++                    it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_news (id BIGINT NOT NULL, at BIGINT NOT NULL, kind VARCHAR(16) NOT NULL, " +
++                            "actor VARCHAR(35) NOT NULL, actor_clan VARCHAR(45) NOT NULL, other VARCHAR(45) NOT NULL, other_clan VARCHAR(45) NOT NULL, " +
++                            "subject VARCHAR(120) NOT NULL, place VARCHAR(60) NOT NULL, region INT NOT NULL, count INT NOT NULL, extra VARCHAR(200) NOT NULL, " +
++                            "PRIMARY KEY(id), KEY(at))")
++                }
++                con.prepareStatement("DELETE FROM autobot_news WHERE at < ?").use { it.setLong(1, System.currentTimeMillis() - WEEK_MS); it.executeUpdate() }
++                con.prepareStatement("SELECT id, at, kind, actor, actor_clan, other, other_clan, subject, place, region, count, extra FROM autobot_news ORDER BY id DESC LIMIT $KEEP").use { ps ->
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) {
++                            val kind = Kind.of(rs.getString(3)) ?: continue
++                            stored += Entry(rs.getLong(1), rs.getLong(2), kind, rs.getString(4), rs.getString(5), rs.getString(6), rs.getString(7),
++                                    rs.getString(8), rs.getString(9), rs.getInt(10), rs.getInt(11), rs.getString(12))
++                        }
++                    }
++                }
++                con.prepareStatement("SELECT COALESCE(MAX(id), 0) FROM autobot_news").use { ps ->
++                    ps.executeQuery().use { rs -> if (rs.next()) nextId.updateAndGet { maxOf(it, rs.getLong(1) + 1) } }
++                }
++            }
++            synchronized(feed) {
++                // Items reported before the table was read are newer than anything stored.
++                val early = feed.toList()
++                feed.clear()
++                stored.asReversed().forEach { feed.addLast(it) }
++                early.forEach { feed.addLast(it) }
++                while (feed.size > KEEP) feed.removeFirst()
++            }
++            if (settings.newsLog) println("Autobots news: loaded ${stored.size} items")
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    private fun store(e: Entry) {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("REPLACE INTO autobot_news (id, at, kind, actor, actor_clan, other, other_clan, subject, place, region, count, extra) " +
++                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").use { ps ->
++                    ps.setLong(1, e.id); ps.setLong(2, e.at); ps.setString(3, e.kind.code); ps.setString(4, e.actor.take(35))
++                    ps.setString(5, e.actorClan.take(45)); ps.setString(6, e.other.take(45)); ps.setString(7, e.otherClan.take(45))
++                    ps.setString(8, e.subject.take(120)); ps.setString(9, e.place.take(60)); ps.setInt(10, e.region); ps.setInt(11, e.count)
++                    ps.setString(12, e.extra.take(200))
++                    ps.executeUpdate()
++                }
++            }
++        } catch (ex: Exception) {
++            ex.printStackTrace()
++        }
++    }
++}
