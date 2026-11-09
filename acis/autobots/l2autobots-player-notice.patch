@@ -1,0 +1,682 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index fda071b..f0e2eef 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -157,4 +157,15 @@
+   <llmBotSmallTalkPercent>15</llmBotSmallTalkPercent>
+   <llmPartyAnswerPercent>60</llmPartyAnswerPercent>
+   <llmLog>true</llmLog>
++  <!-- Bots notice a real player within playerNoticeRange and come up to them first: a party leader with room or a bot
++       looking for a group asks them along, a bot asks a buffer or healer for a buff, a bot in town offers a spare item
++       of their grade and haggles over it, a bot that just met them says hi. One approach per player every
++       playerNoticeEverySeconds, at most playerNoticePerHour; a "no" keeps that bot away for 2 hours. Without a model
++       a whisper nothing else answers gets a short line. playerNoticeLog prints every approach and answer
++       (Autobots notice:). Spec: docs/player-notice.md. -->
++  <playerNoticeEnabled>true</playerNoticeEnabled>
++  <playerNoticeRange>900</playerNoticeRange>
++  <playerNoticeEverySeconds>90</playerNoticeEverySeconds>
++  <playerNoticePerHour>12</playerNoticePerHour>
++  <playerNoticeLog>true</playerNoticeLog>
+ </settings>
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 86c59a2..58a01d9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -138,7 +138,8 @@ object AutobotsManager {
+             2 -> { // pm "
+                 if(target == null) return false
+                 val bot = activeBots.getOrElse(target) {null} ?: return false
+-                if (!dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
++                if (!dev.l2j.autobots.population.notice.PlayerNotice.onWhisper(chatter, bot, text) &&
++                        !dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
+                         !dev.l2j.autobots.population.llm.Persuasion.onWhisper(chatter, bot, text) &&
+                         !PlayerTrade.onWhisper(chatter, bot, text) && !GroupChat.onWhisper(chatter, bot, text)) BotTalk.onWhisper(chatter, bot, text)
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index a346dff..72d5f1a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -103,7 +103,12 @@ internal data class AutobotSettings(
+         @JsonProperty("llmBotChatPerHour") var llmBotChatPerHour: Int = 40,
+         @JsonProperty("llmBotSmallTalkPercent") var llmBotSmallTalkPercent: Int = 15,
+         @JsonProperty("llmPartyAnswerPercent") var llmPartyAnswerPercent: Int = 60,
+-        @JsonProperty("llmLog") var llmLog: Boolean = true
++        @JsonProperty("llmLog") var llmLog: Boolean = true,
++        @JsonProperty("playerNoticeEnabled") var playerNoticeEnabled: Boolean = true,
++        @JsonProperty("playerNoticeRange") var playerNoticeRange: Int = 900,
++        @JsonProperty("playerNoticeEverySeconds") var playerNoticeEverySeconds: Int = 90,
++        @JsonProperty("playerNoticePerHour") var playerNoticePerHour: Int = 12,
++        @JsonProperty("playerNoticeLog") var playerNoticeLog: Boolean = true
+ ){
+     @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
+         setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index a07b859..2539157 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -113,6 +113,7 @@ internal object PopulationManager {
+                 RaidLog.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 dev.l2j.autobots.population.group.StaticParties.summary()
+                 dev.l2j.autobots.population.llm.Llm.summary()
++                dev.l2j.autobots.population.notice.PlayerNotice.summary()
+             }
+             val online = members.values.mapNotNull { active(it) }.distinctBy { it.objectId }
+             if(ticks % 4 == 0) dev.l2j.autobots.movement.MovementStatus.sample(online)
+@@ -121,6 +122,7 @@ internal object PopulationManager {
+             if (ticks % CLANS_EVERY_TICKS == 3) dev.l2j.autobots.population.group.Clans.tick(online)
+             if (ticks % GROUPS_EVERY_TICKS == 0) dev.l2j.autobots.population.llm.BotChatter.tick(online)
+             dev.l2j.autobots.population.llm.ChatMemory.tick()
++            dev.l2j.autobots.population.notice.PlayerNotice.tick()
+             if (++ticks % SAVE_EVERY_TICKS == 0) {
+                 online.forEach {
+                     AutobotsDao.saveAutobot(it)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
+index 4ec9797..8b7c55f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupChat.kt
+@@ -75,6 +75,13 @@ internal object GroupChat {
+ 
+     fun isRussian(player: Player) = playerLanguage[player] ?: false
+ 
++    /** The player's language if they ever wrote to a bot, else null. */
++    fun knownRussian(player: Player): Boolean? = playerLanguage[player]
++
++    fun rememberLanguage(player: Player, russian: Boolean) {
++        if (player !is Autobot) playerLanguage[player] = russian
++    }
++
+     fun line(line: Line, russian: Boolean): String = (if (russian) line.ru else line.en).random()
+ 
+     /** The leader's shout for members: what the party lacks, its levels and where it is. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+index 09af49f..e36398e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+@@ -118,6 +118,11 @@ internal object GroupFinder {
+         offers[leader.objectId] = player.objectId to System.currentTimeMillis() + OFFER_VALID_MS
+     }
+ 
++    /** The player said no to the leader's offer: their next whisper is no request to join. */
++    fun withdrawOffer(leader: Autobot) {
++        offers.remove(leader.objectId)
++    }
++
+     fun wasOffered(leader: Autobot, player: Player) =
+             offers[leader.objectId]?.let { it.first == player.objectId && it.second > System.currentTimeMillis() } ?: false
+ 
+@@ -459,8 +464,11 @@ internal object GroupFinder {
+             party.setPendingInvitation(true)
+         }
+         pendingPlayer[leader.objectId] = player.objectId to System.currentTimeMillis() + PLAYER_INVITE_EXPIRY_MS
++        // A bot that never led a party has no loot rule yet; RequestJoinParty sets the requestor's from the dialog.
++        val rule = party?.lootRule ?: leader.lootRule ?: net.sf.l2j.gameserver.enums.LootRule.ITEM_LOOTER
++        if (party == null) leader.lootRule = rule
+         leader.onTransactionRequest(player)
+-        player.sendPacket(AskJoinParty(leader.name, leader.lootRule.ordinal))
++        player.sendPacket(AskJoinParty(leader.name, rule.ordinal))
+     }
+ 
+     /** Answers a player's request to join after a short pause, inviting them or saying why not. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
+index d1702e3..87aa5ad 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/PartyInvites.kt
+@@ -43,7 +43,7 @@ internal object PartyInvites {
+         CoScopes.generalScope.launch {
+             val started = System.currentTimeMillis()
+             // Hard rules (busy, PK, level gap) stay with the code; the mood part may go to the language model.
+-            if (accept || reason == GroupChat.Line.NotNow) {
++            if ((accept || reason == GroupChat.Line.NotNow) && !dev.l2j.autobots.population.notice.PlayerNotice.askedToJoin(bot, requestor)) {
+                 val eager = bot.needsGroup || Role.of(bot.classId) == Role.Healer || bot.fistsOnlyMystic()
+                 val usual = if (eager) 98 else Sociability.of(bot).acceptPercent
+                 val relation = dev.l2j.autobots.population.llm.Persona.relationText(bot, requestor)
+@@ -77,6 +77,7 @@ internal object PartyInvites {
+         if (partyLevel - bot.level > MAX_LEVEL_GAP) return false to GroupChat.Line.TooHigh
+         if (bot.level - partyLevel > MAX_LEVEL_GAP) return false to GroupChat.Line.TooLow
+ 
++        if (dev.l2j.autobots.population.notice.PlayerNotice.askedToJoin(bot, requestor)) return true to null
+         if(StaticParties.reserved(bot.objectId)) {
+             if(!StaticParties.same(bot.objectId,requestor.objectId)) return false to GroupChat.Line.Busy
+             return true to null
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
+index d70beed..b38bef7 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
+@@ -52,7 +52,7 @@ internal object BotTalk {
+     fun onWhisper(player: Player, bot: Autobot, text: String) {
+         if (player is Autobot) return
+         Attention.talked(bot, player)
+-        if (!Llm.near.available) return
++        if (!Llm.near.available) return dev.l2j.autobots.population.notice.PlayerNotice.cannedReply(player, bot, text)
+         CoScopes.generalScope.launch {
+             val russian = GroupChat.isRussian(text)
+             val command = Understand.command(text, Understand.Channel.Whisper)
+@@ -61,12 +61,21 @@ internal object BotTalk {
+                 Llm.log("understood ${player.name} -> ${bot.name}: '$command'")
+                 return@launch
+             }
+-            if (!enabled) return@launch
++            if (!enabled) return@launch dev.l2j.autobots.population.notice.PlayerNotice.cannedReply(player, bot, text)
+             val situation = "${player.name} whispers to you in private messages, you are ${activity(bot)}"
+             respond(bot, player, "pm:${bot.objectId}:${player.objectId}", "${player.name}: $text", situation) { bot.tell(player.name, it) }
+         }
+     }
+ 
++    /**
++     * The bot wrote to the player first (a greeting, a party, a buff or a trade offer, see PlayerNotice): the line goes
++     * into the whisper conversation, so the model knows what the player's answer is about.
++     */
++    fun opened(bot: Autobot, player: Player, line: String) {
++        Attention.talked(bot, player)
++        remember("pm:${bot.objectId}:${player.objectId}", LlmMessage("user", "(you wrote to ${player.name} first: $line)"))
++    }
++
+     /** Party chat that was no suggestion by keywords: maybe one in other words, else one bot answers. */
+     fun onPartyChat(player: Player, party: Party, bots: List<Autobot>, text: String) {
+         if (player is Autobot || bots.isEmpty() || !Llm.near.available) return
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/notice/PlayerNotice.kt b/src/main/kotlin/dev/l2j/autobots/population/notice/PlayerNotice.kt
+new file mode 100644
+index 0000000..af35675
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/notice/PlayerNotice.kt
+@@ -0,0 +1,376 @@
++package dev.l2j.autobots.population.notice
++
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.group.GroupChat
++import dev.l2j.autobots.population.group.GroupFinder
++import dev.l2j.autobots.population.group.PartySize
++import dev.l2j.autobots.population.group.Relations
++import dev.l2j.autobots.population.group.Role
++import dev.l2j.autobots.population.group.Sociability
++import dev.l2j.autobots.population.llm.Attention.isLiveAudience
++import dev.l2j.autobots.population.llm.BotTalk
++import dev.l2j.autobots.population.llm.Llm
++import dev.l2j.autobots.population.llm.LlmMessage
++import dev.l2j.autobots.population.llm.Persona
++import dev.l2j.autobots.population.trade.PlayerTrade
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.enums.skills.L2EffectType
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.player.BlockList
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
++
++/**
++ * Bots notice a real player around them and come up to them first, the way people on a live server do: a party leader
++ * with room or a bot looking for a group asks them along, a bot asks a buffer for a buff, a bot in town offers a spare
++ * item that fits them and haggles over it, a bot that just met them says hi. Each approach is one whisper or line
++ * from one bot; what follows (the party window, the trade window, a buff) goes through the same code a player's own
++ * request would. Spec: `docs/player-notice.md`.
++ */
++internal object PlayerNotice {
++    enum class Kind { Party, Buff, Trade, Greet }
++
++    private const val PAIR_COOLDOWN_MS = 30 * 60_000L
++    private const val GREET_COOLDOWN_MS = 6 * 3_600_000L
++    private const val REBUFFED_MS = 2 * 3_600_000L
++    private const val JUST_MET_MS = 45_000L
++    private const val OPEN_MS = 3 * 60_000L
++    private const val BUFF_WAIT_MS = 2 * 60_000L
++    private const val LOOKER_LEVEL_GAP = 5
++    private const val GREET_ACQUAINTED = 10
++    private const val CANNED_EVERY_MS = 20_000L
++
++    private val YES = Regex("^\\s*(\\+|да\\b|ага|угу|го\\b|гоу|давай|ок\\b|окей|ok\\b|okay|yes|yep|ye\\b|sure|конечно|можно|беру|бери|надо|нужно|нужен|нужна|хочу|кидай|кинь|инвайт|инв\\b|inv\\b|invite|щас|сейчас|sec\\b)", RegexOption.IGNORE_CASE)
++    private val NO = Regex("(^\\s*(нет|неа|не\\b|no\\b|nope|nah|-\\s*$)|не надо|не нужно|не хочу|не сейчас|не буду|отстань|отвали|потом|no thanks|not now|go away)", RegexOption.IGNORE_CASE)
++    private val HELLO = Regex("(привет|прив\\b|здравств|здаров|хай\\b|ку\\b|qq\\b|\\bhi\\b|hello|hey\\b|yo\\b)", RegexOption.IGNORE_CASE)
++
++    /** A question a bot asked a player and waits an answer to: the party it offers or the buff it asked for. */
++    private class Open(val kind: Kind, val expires: Long)
++
++    private val settings get() = AutobotData.settings
++    private val enabled get() = settings.playerNoticeEnabled
++
++    private val lastApproach = ConcurrentHashMap<Int, Long>()
++    private val approaches = ConcurrentHashMap<Int, ArrayDeque<Long>>()
++    private val pairDone = ConcurrentHashMap<String, Long>()
++    private val rebuffed = ConcurrentHashMap<Long, Long>()
++    private val open = ConcurrentHashMap<Long, Open>()
++    private val nearSince = ConcurrentHashMap<Long, Long>()
++    private val lastCanned = ConcurrentHashMap<Long, Long>()
++
++    private val counts = ConcurrentHashMap<String, AtomicInteger>()
++    private fun count(what: String) = counts.computeIfAbsent(what) { AtomicInteger() }.incrementAndGet()
++
++    private fun pair(bot: Player, player: Player): Long = (bot.objectId.toLong() shl 32) or (player.objectId.toLong() and 0xffffffffL)
++
++    fun log(text: String) {
++        if (settings.playerNoticeLog) println("Autobots notice: $text")
++    }
++
++    /** The player's language as bots know it; Russian until they wrote something. */
++    private fun russian(player: Player) = GroupChat.knownRussian(player) ?: true
++
++    // ---- The tick ----
++
++    /** Every population tick (15 s): each player at the keyboard may be approached by one bot around. */
++    fun tick() {
++        if (!enabled) return
++        val now = System.currentTimeMillis()
++        open.entries.removeIf { it.value.expires < now }
++        rebuffed.entries.removeIf { it.value < now }
++        if (pairDone.size > 5000) pairDone.entries.removeIf { now - it.value > GREET_COOLDOWN_MS }
++        val players = World.getInstance().players.filter { it.isLiveAudience() }
++        val seen = HashSet<Long>()
++        for (player in players) {
++            try {
++                val bots = player.getKnownTypeInRadius(Autobot::class.java, settings.playerNoticeRange).filter { free(it, player) }
++                bots.forEach { seen += pair(it, player).also { key -> nearSince.putIfAbsent(key, now) } }
++                if (!playerFree(player) || !allowed(player, now)) continue
++                approach(player, bots, now)
++            } catch (e: Exception) {
++                e.printStackTrace()
++            }
++        }
++        nearSince.keys.retainAll(seen)
++    }
++
++    private fun playerFree(player: Player) = !player.isDead && !player.isInStoreMode && player.activeTradeList == null &&
++            !player.isInCombat && !player.isProcessingRequest && !player.isProcessingTransaction
++
++    /**
++     * Busy bots don't look around: fighting, in a trade, on a trip or a quest walk, being someone's puppet. A bot behind
++     * its store still sees who passes by: it may say hi or point at its goods, see [tryKind].
++     */
++    private fun free(bot: Autobot, player: Player) = bot.life != null && !bot.isDead && !bot.isInCombat &&
++            bot.activeSequence == null && bot.controller == null && bot.activeTradeList == null && !bot.isProcessingRequest &&
++            !bot.isProcessingTransaction && bot.karma == 0 && !BlockList.isBlocked(player, bot)
++
++    /** At most one approach per player every `playerNoticeEverySeconds` and `playerNoticePerHour` an hour. */
++    private fun allowed(player: Player, now: Long): Boolean {
++        if (now - (lastApproach[player.objectId] ?: 0L) < settings.playerNoticeEverySeconds * 1000L) return false
++        val times = approaches.getOrPut(player.objectId) { ArrayDeque() }
++        synchronized(times) {
++            while (times.isNotEmpty() && now - times.first() > 3_600_000L) times.removeFirst()
++            return times.size < settings.playerNoticePerHour
++        }
++    }
++
++    private fun approached(player: Player, now: Long) {
++        lastApproach[player.objectId] = now
++        val times = approaches.getOrPut(player.objectId) { ArrayDeque() }
++        synchronized(times) { times.addLast(now) }
++    }
++
++    private fun mood(bot: Autobot) = Rnd.get(100) < when (Sociability.of(bot)) {
++        Sociability.Loner -> 20
++        Sociability.Regular -> 50
++        Sociability.TeamPlayer -> 80
++    }
++
++    private fun done(bot: Autobot, player: Player, kind: Kind, now: Long) {
++        pairDone["${bot.objectId}:${player.objectId}:$kind"] = now
++    }
++
++    private fun cooled(bot: Autobot, player: Player, kind: Kind, now: Long): Boolean =
++            now - (pairDone["${bot.objectId}:${player.objectId}:$kind"] ?: 0L) >= if (kind == Kind.Greet) GREET_COOLDOWN_MS else PAIR_COOLDOWN_MS
++
++    private fun approach(player: Player, bots: List<Autobot>, now: Long) {
++        for (bot in bots.shuffled()) {
++            val key = pair(bot, player)
++            if (rebuffed.containsKey(key) || open.containsKey(key)) continue
++            if (Relations.affinity(bot, player) < Relations.AVOID || !mood(bot)) continue
++            val kind = Kind.values().firstOrNull { cooled(bot, player, it, now) && tryKind(it, bot, player, now) } ?: continue
++            done(bot, player, kind, now)
++            // A bot that already wrote to the player doesn't say hi to them afterwards.
++            done(bot, player, Kind.Greet, now)
++            approached(player, now)
++            count(kind.name)
++            return
++        }
++    }
++
++    private fun tryKind(kind: Kind, bot: Autobot, player: Player, now: Long): Boolean = when (kind) {
++        Kind.Party -> !bot.isInStoreMode && offerParty(bot, player, now)
++        Kind.Buff -> !bot.isInStoreMode && askBuff(bot, player, now)
++        Kind.Trade -> (if (bot.isInStoreMode) storeAd(bot, player) else if (bot.isInsideZone(ZoneId.TOWN)) PlayerTrade.offerTo(bot, player, russian(player)) else null)
++                ?.also { whisper(bot, player, Kind.Trade, it) } != null
++        Kind.Greet -> greet(bot, player, now)
++    }
++
++    /** A bot selling in a store calls a passer-by over to the piece that fits them best, the way sellers in town do. */
++    private fun storeAd(bot: Autobot, player: Player): String? {
++        if (bot.storeType != net.sf.l2j.gameserver.enums.actors.StoreType.SELL && bot.storeType != net.sf.l2j.gameserver.enums.actors.StoreType.PACKAGE_SELL) return null
++        val grade = dev.l2j.autobots.population.economy.Gear.gradeFor(player.level)
++        val item = bot.sellList.items.filter { it.item.crystalType == grade && (it.item is net.sf.l2j.gameserver.model.item.kind.Weapon || it.item is net.sf.l2j.gameserver.model.item.kind.Armor) || it.price.toLong() * it.count >= 20_000 }
++                .maxByOrNull { it.price.toLong() * it.count } ?: return null
++        val price = dev.l2j.autobots.population.economy.MarketHaggle.short(item.price)
++        val name = item.item.name + if (item.enchant > 0) " +${item.enchant}" else ""
++        return if (russian(player)) listOf("загляни в лавку, есть $name за $price", "$name за $price в лавке, глянь", "эй, $name не нужен? в лавке за $price").random()
++        else listOf("check my shop, $name for $price", "wts $name $price, in my store").random()
++    }
++
++    // ---- Party ----
++
++    private fun offerParty(bot: Autobot, player: Player, now: Long): Boolean {
++        if (player.isInParty || player.karma > 0) return false
++        val ru = russian(player)
++        val party = bot.party
++        if (party != null) {
++            // A leader with room whose party the player fits, the same judgement as for a player asking to join.
++            if (party.leader !== bot || party.membersCount >= (PartySize.target(party) + 2).coerceAtMost(PartySize.MAX)) return false
++            if (GroupFinder.judge(party, player) != null || GroupFinder.wasOffered(bot, player)) return false
++            val levels = "${party.members.minOf { it.level }}-${party.members.maxOf { it.level }}"
++            val place = GroupFinder.placeName(bot)
++            whisper(bot, player, Kind.Party, if (ru) listOf("привет, нас ${party.membersCount}, $levels ур., качаемся у $place. пойдёшь к нам?",
++                    "го к нам в пати? $levels ур., у $place", "нужен ещё человек в пати, $levels ур. пойдёшь?").random()
++                    else "hi, we are ${party.membersCount} lvl $levels near $place, want to join?")
++            GroupFinder.offered(bot, player)
++            return true
++        }
++        // A bot looking for a group asks the player it ran into.
++        if (!GroupFinder.isLooking(bot) || kotlin.math.abs(bot.level - player.level) > LOOKER_LEVEL_GAP) return false
++        open[pair(bot, player)] = Open(Kind.Party, now + OPEN_MS)
++        whisper(bot, player, Kind.Party, if (ru) listOf("го в пати? одному тяжко", "привет, пати ищешь? я тоже", "давай вместе покачаемся?").random()
++                else listOf("party? solo is hard", "hi, lf party? me too", "wanna hunt together?").random())
++        return true
++    }
++
++    /** The bot asked this player to group up: an invite from them is accepted, see PartyInvites. */
++    fun askedToJoin(bot: Autobot, player: Player): Boolean = open[pair(bot, player)]?.let { it.kind == Kind.Party && it.expires > System.currentTimeMillis() } == true
++
++    // ---- Buff ----
++
++    private fun askBuff(bot: Autobot, player: Player, now: Long): Boolean {
++        val role = Role.of(player.classId)
++        if (role != Role.Buffer && role != Role.Healer) return false
++        if (bot.party != null && bot.party === player.party) return false
++        if (bot.level > player.level + 10 || bot.isInsideZone(ZoneId.TOWN) && Rnd.get(100) < 50) return false
++        // Somebody's buffs already on it: no need to beg.
++        if (bot.allEffects.any { it.effectType == L2EffectType.BUFF && it.effector !== bot }) return false
++        val key = pair(bot, player)
++        open[key] = Open(Kind.Buff, now + BUFF_WAIT_MS)
++        val ru = russian(player)
++        whisper(bot, player, Kind.Buff, if (ru) listOf("бафни плиз)", "можешь бафнуть? спасибо заранее", "баф не кинешь?", "бб плз").random()
++                else listOf("buff pls?", "can u buff me pls", "bb pls :)").random())
++        CoScopes.generalScope.launch {
++            val until = now + BUFF_WAIT_MS
++            while (System.currentTimeMillis() < until && open[key]?.kind == Kind.Buff) {
++                delay(2000)
++                if (!bot.isOnline || !player.isOnline) return@launch
++                if (bot.allEffects.any { it.effector === player }) {
++                    open.remove(key)
++                    count("buffed")
++                    Relations.adjust(bot, player.objectId, 2, 3)
++                    delay(Rnd.get(1000L, 3000L))
++                    val thanks = if (ru) listOf("спс!", "спасибо)", "о, спс", "благодарю)").random() else listOf("ty!", "thx :)", "thanks").random()
++                    if (Rnd.get(100) < 50) bot.say(thanks) else bot.tell(player.name, thanks)
++                    log("${bot.name} got a buff from ${player.name}")
++                    return@launch
++                }
++            }
++        }
++        return true
++    }
++
++    // ---- Greeting ----
++
++    private fun greet(bot: Autobot, player: Player, now: Long): Boolean {
++        val since = nearSince[pair(bot, player)] ?: return false
++        if (now - since > JUST_MET_MS) return false
++        val affinity = Relations.affinity(bot, player)
++        val friend = affinity >= Relations.FRIEND
++        if (affinity < GREET_ACQUAINTED && Sociability.of(bot) == Sociability.Loner) return false
++        val ru = russian(player)
++        val canned = when {
++            friend -> if (ru) listOf("о, ${player.name}! привет)", "${player.name}, здарова!", "привет, ${player.name}, давно не виделись")
++                      else listOf("hey ${player.name}!", "${player.name}! long time no see")
++            affinity >= GREET_ACQUAINTED -> if (ru) listOf("привет, ${player.name}", "о, привет", "${player.name} хай") else listOf("hi ${player.name}", "oh hi")
++            else -> if (ru) listOf("привет", "всем привет", "хай", "прив)") else listOf("hi", "hey", "hello")
++        }.random()
++        val whisperIt = friend && Rnd.get(100) < 50
++        val llm = settings.llmChat && Llm.near.available
++        CoScopes.generalScope.launch {
++            delay(Rnd.get(1500L, 5000L))
++            val line = (if (llm) llmGreeting(bot, player, ru, whisperIt) else null) ?: canned
++            if (line == "-" || !bot.isOnline || !player.isOnline) return@launch
++            if (whisperIt) { bot.tell(player.name, line); BotTalk.opened(bot, player, line) } else bot.say(line)
++            log("${bot.name} -> ${player.name} greet${if (whisperIt) " (whisper)" else ""}: $line")
++        }
++        return true
++    }
++
++    private suspend fun llmGreeting(bot: Autobot, player: Player, ru: Boolean, whisper: Boolean): String? {
++        val where = if (bot.isInsideZone(ZoneId.TOWN)) "in town" else "while hunting"
++        val situation = "you just noticed ${player.name} (${player.race.name.lowercase()} ${player.template.className}, level ${player.level}) " +
++                "coming up next to you $where near ${GroupFinder.placeName(bot)}. Greet them the way a player would " +
++                (if (whisper) "in a private message" else "in general chat") + ", one short line; " +
++                "if a player like you would not greet a stranger, reply with exactly -"
++        val reply = Llm.near.chat(Persona.system(bot, player, situation) + (if (ru) " Write in Russian." else " Write in English."),
++                listOf(LlmMessage("user", "(${player.name} is next to you)")), settings.llmMaxReplyTokens, Llm.Purpose.Talk) ?: return null
++        val line = reply.text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }?.removePrefix("${bot.name}:")?.trim()?.trim('"', '«', '»')?.take(100)
++        return line?.ifBlank { null }
++    }
++
++    // ---- Answers ----
++
++    /**
++     * A whisper from a player to a bot that asked them something: yes or no to its party or buff, or anything about its
++     * trade offer. @return true when it was such an answer.
++     */
++    fun onWhisper(player: Player, bot: Autobot, text: String): Boolean {
++        if (!enabled || player is Autobot || bot.life == null) return false
++        val ru = GroupChat.isRussian(text)
++        GroupChat.rememberLanguage(player, ru)
++        val key = pair(bot, player)
++        if (PlayerTrade.onOfferReply(player, bot, text, ru)?.also { reply ->
++                    log("${player.name} -> ${bot.name} about the offer: '$text' -> $reply")
++                    count("trade_$reply")
++                    if (reply == "no") rebuffed[key] = System.currentTimeMillis() + REBUFFED_MS
++                } != null) return true
++        val asked = open[key]
++        val leaderOffer = GroupFinder.wasOffered(bot, player)
++        if (asked == null && !leaderOffer) return false
++        val no = NO.containsMatchIn(text)
++        val yes = !no && YES.containsMatchIn(text)
++        if (!no && !yes) return false
++        open.remove(key)
++        val kind = asked?.kind ?: Kind.Party
++        log("${player.name} -> ${bot.name} ${if (yes) "yes" else "no"} to ${kind.name.lowercase()}: '$text'")
++        count("${kind.name.lowercase()}_${if (yes) "yes" else "no"}")
++        if (no) {
++            if (leaderOffer) GroupFinder.withdrawOffer(bot)
++            rebuffed[key] = System.currentTimeMillis() + REBUFFED_MS
++            reply(bot, player, if (ru) listOf("ок", "ладно", "ну ок", "понял").random() else listOf("ok", "np", "k").random())
++            return true
++        }
++        when {
++            kind == Kind.Buff -> reply(bot, player, if (ru) listOf("спс)", "жду)", "ок, спасибо").random() else listOf("ty", "thx").random())
++            leaderOffer -> GroupFinder.considerPlayer(bot, player, ru)
++            else -> CoScopes.generalScope.launch {
++                // A bot that asked first sends the invite itself; it is the leader of the new party.
++                delay(Rnd.get(1500L, 4000L))
++                if (bot.isInParty || player.isInParty || !bot.isOnline) return@launch
++                bot.tell(player.name, GroupChat.line(GroupChat.Line.Inviting, ru))
++                delay(Rnd.get(1000L, 2500L))
++                GroupFinder.invitePlayer(bot, player)
++                log("${bot.name} invited ${player.name}")
++            }
++        }
++        return true
++    }
++
++    /**
++     * A whisper nothing else answered and no model to talk: a short line by what the bot is doing, so a player who
++     * writes to a bot is not left hanging. A loner sometimes doesn't bother.
++     */
++    fun cannedReply(player: Player, bot: Autobot, text: String) {
++        if (!enabled || player is Autobot || bot.life == null) return
++        val key = pair(bot, player)
++        val now = System.currentTimeMillis()
++        if (now - (lastCanned[key] ?: 0L) < CANNED_EVERY_MS) return
++        lastCanned[key] = now
++        if (Sociability.of(bot) == Sociability.Loner && Rnd.get(100) < 30) return
++        val ru = GroupChat.isRussian(text) || GroupChat.knownRussian(player) != false && text.none { it.isLetter() }
++        val line = when {
++            bot.isInCombat -> if (ru) listOf("щас, моба добью", "сек, бой", "погоди, дерусь").random() else listOf("sec, fighting", "brb, mob").random()
++            bot.isInStoreMode -> if (ru) listOf("я в лавке, смотри что есть", "торгую, глянь лавку").random() else listOf("in store, check it out", "trading, look at my shop").random()
++            HELLO.containsMatchIn(text) -> if (ru) listOf("привет", "прив)", "хай", "здаров").random() else listOf("hi", "hey", "hello").random()
++            else -> if (ru) listOf("?", "а?", "чего?", "не понял", "ну?").random() else listOf("?", "what?", "huh?").random()
++        }
++        reply(bot, player, line)
++        count("canned")
++        log("${bot.name} -> ${player.name} canned: $line")
++    }
++
++    private fun whisper(bot: Autobot, player: Player, kind: Kind, line: String) {
++        CoScopes.generalScope.launch {
++            delay(Rnd.get(1000L, 4000L))
++            if (!bot.isOnline || !player.isOnline) return@launch
++            bot.tell(player.name, line)
++            BotTalk.opened(bot, player, line)
++            log("${bot.name} -> ${player.name} ${kind.name.lowercase()}: $line")
++        }
++    }
++
++    private fun reply(bot: Autobot, player: Player, line: String) {
++        CoScopes.generalScope.launch {
++            delay(Rnd.get(1000L, 3000L))
++            if (bot.isOnline && player.isOnline) bot.tell(player.name, line)
++        }
++    }
++
++    /** `Autobots notice summary:` every 10 minutes: approaches by kind, answers, deals and buffs. */
++    fun summary() {
++        if (!enabled) return
++        val players = World.getInstance().players.count { it.isLiveAudience() }
++        val parts = counts.entries.sortedBy { it.key }.joinToString(" ") { "${it.key.lowercase()}=${it.value.getAndSet(0)}" }
++        println("Autobots notice summary: players=$players open=${open.size} $parts")
++    }
++
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
+index 11056cb..8b66cf1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/trade/PlayerTrade.kt
+@@ -6,6 +6,7 @@ import dev.l2j.autobots.population.economy.Errands
+ import dev.l2j.autobots.population.economy.Gear
+ import dev.l2j.autobots.population.economy.Market
+ import dev.l2j.autobots.population.economy.MarketBook
++import dev.l2j.autobots.population.economy.MarketHaggle
+ import dev.l2j.autobots.population.economy.StoreKeeper
+ import dev.l2j.autobots.population.group.Relations
+ import dev.l2j.autobots.utils.distance
+@@ -174,6 +175,103 @@ internal object PlayerTrade {
+         return null
+     }
+ 
++    // ---- Offers a bot makes first (PlayerNotice) ----
++
++    private val YES = Regex("^\\s*(\\+|да\\b|ага|го\\b|давай|ок\\b|окей|ok\\b|okay|yes|yep|sure|беру|бери|надо|нужно|хочу|кидаю|кидай|deal|идёт|идет|по рукам)", RegexOption.IGNORE_CASE)
++    private val NO = Regex("(^\\s*(нет|неа|не\\b|no\\b|nope|nah)|не надо|не нужно|не хочу|не интересно|not interested|no thanks)", RegexOption.IGNORE_CASE)
++    private val CHEAPER = Regex("(дорого|скин(ь|ешь|уть)|дешевле|подешевле|уступи|скидк|cheaper|discount|too much|expensive|lower)", RegexOption.IGNORE_CASE)
++    private const val MIN_OFFER_VALUE = 20_000L
++    private const val HAGGLE_ROUNDS = 2
++
++    /** A bot's own offer to a player: what it asked first and how many times it went down since. */
++    private class Offer(val asked: Long, var rounds: Int = 0)
++    private val offers = ConcurrentHashMap<Int, Offer>()
++
++    /**
++     * A spare item that fits [player] (weapon or armor of the grade of their level, or anything worth 20k+), offered at the
++     * bot's store price with the trust discount; the deal is the usual trade window afterwards.
++     * @return the line the bot whispers, or null when it has nothing to offer.
++     */
++    fun offerTo(bot: Autobot, player: Player, russian: Boolean): String? {
++        if (!SocialTrade.enabled || !SocialTrade.isPopulation(bot) || bot.isInStoreMode || !SocialTrade.free(bot)) return null
++        if (SocialTrade.refusesDeals(bot, player) || pending[player.objectId] != null) return null
++        val grade = Gear.gradeFor(player.level).id
++        val item = Gear.surplus(bot)
++                .filter { it.isTradable && !Loans.isBorrowed(bot, it) && Market.fairValue(it.itemId) > 0 }
++                .filter { (it.isWeapon || it.isArmor) && it.item.crystalType.id == grade || Worth.asking(bot, it, it.count) >= MIN_OFFER_VALUE }
++                .maxByOrNull { Worth.asking(bot, it, it.count) } ?: return null
++        val count = item.count
++        val price = (Worth.asking(bot, item, count) * trustFactor(bot, player)).toLong().coerceAtLeast(1)
++        language[player.objectId] = russian
++        pending[player.objectId] = Pending.Sell(bot.objectId, item, count, price, item.enchantLevel)
++        offers[player.objectId] = Offer(price)
++        TradeLog.note(bot, "offers ${count} ${item.itemName} to ${player.name} for $price")
++        val label = "${if (count > 1) "$count " else ""}${item.itemName}${if (item.enchantLevel > 0) " +${item.enchantLevel}" else ""}"
++        val short = MarketHaggle.short(price.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
++        return if (russian) listOf("есть $label за $short, надо?", "продам $label за $short, интересно?", "тебе $label не нужен? отдам за $short").random()
++        else listOf("got $label for $short, need it?", "wts $label $short, interested?").random()
++    }
++
++    /**
++     * The player's answer to [bot]'s offer: yes (trade me), no, or haggling (a price or "cheaper"). The bot goes down to
++     * its floor (`MarketHaggle.floor`) at most twice. @return "yes", "no", "deal", "counter", "refused", or null when
++     * the whisper is not about the offer.
++     */
++    fun onOfferReply(player: Player, bot: Autobot, text: String, russian: Boolean): String? {
++        val sale = pending[player.objectId] as? Pending.Sell ?: return null
++        val offer = offers[player.objectId]
++        if (offer == null || sale.botId != bot.objectId || sale.expires < System.currentTimeMillis()) return null
++        language[player.objectId] = russian
++        val short = { p: Long -> MarketHaggle.short(p.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()) }
++        val bid = amount(text)?.toLong()
++        val unitAsked = (offer.asked / sale.count).coerceIn(1, Int.MAX_VALUE.toLong()).toInt()
++        val floor = MarketHaggle.floor(bot, player, sale.item.itemId, unitAsked).toLong() * sale.count
++        fun reprice(price: Long) {
++            pending[player.objectId] = Pending.Sell(bot.objectId, sale.item, sale.count, price, sale.claimedEnchant)
++        }
++        return when {
++            bid == null && NO.containsMatchIn(text) -> {
++                pending.remove(player.objectId)
++                offers.remove(player.objectId)
++                say(bot, player, listOf("ок", "ну ладно", "как хочешь").random(), "ok")
++                "no"
++            }
++            bid != null && bid >= sale.price -> {
++                reprice(bid.coerceAtMost(sale.price))
++                say(bot, player, "ок, кидай трейд", "ok, trade me")
++                "yes"
++            }
++            bid != null && bid >= floor -> {
++                reprice(bid)
++                TradeLog.note(bot, "agrees to ${sale.item.itemName} for $bid with ${player.name} (asked ${offer.asked})")
++                say(bot, player, listOf("ладно, за ${short(bid)} отдам, кидай трейд", "ок, ${short(bid)}, кидай трейд").random(), "ok, ${short(bid)}, trade me")
++                "deal"
++            }
++            bid != null || CHEAPER.containsMatchIn(text) -> {
++                if (offer.rounds >= HAGGLE_ROUNDS || sale.price <= floor) {
++                    say(bot, player, listOf("дешевле не отдам, ${short(sale.price)} последняя цена", "нет, ${short(sale.price)} и так недорого").random(),
++                            "no, ${short(sale.price)} is my last price")
++                    "refused"
++                } else {
++                    offer.rounds++
++                    // A greedy seller gives up less of the gap each time, an easy-going one meets the buyer.
++                    val greed = dev.l2j.autobots.population.economy.TradeTemper.greed(bot)
++                    val counter = (floor + (sale.price - floor) * (0.35 + 0.4 * greed)).toLong().coerceIn(floor, sale.price)
++                    reprice(counter)
++                    say(bot, player, listOf("давай за ${short(counter)}", "${short(counter)} и забирай", "могу за ${short(counter)}").random(),
++                            "${short(counter)} and its yours")
++                    "counter"
++                }
++            }
++            YES.containsMatchIn(text) -> {
++                reprice(sale.price)
++                say(bot, player, listOf("ок, кидай трейд", "кидай трейд", "давай, кидай трейд").random(), "ok, trade me")
++                "yes"
++            }
++            else -> null
++        }
++    }
++
+     // ---- The trade window ----
+ 
+     /** Called when a player asks a population bot to trade (the request packet). */
+@@ -218,6 +316,7 @@ internal object PlayerTrade {
+     private suspend fun session(bot: Autobot, player: Player) {
+         val agreed = pending[player.objectId]?.takeIf { it.botId == bot.objectId && it.expires > System.currentTimeMillis() }
+         pending.remove(player.objectId)
++        offers.remove(player.objectId)
+         val owed = Loans.between(player, bot).filter { !SocialTrade.keeps(bot, it, player) }
+         val lent = Loans.between(bot, player)
+         val start = System.currentTimeMillis()

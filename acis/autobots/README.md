@@ -506,3 +506,24 @@ actual link rather than requiring an unrelated straight line to the destination 
   - End: the losing side of a mutual war (10+ deaths, kills at most half) surrenders; the declarer stops a war
     without fights for 3 days or older than 7 (a cautious leader 1 and 4). Kills, deaths and dates in
     `autobot_clan_wars`. `Autobots wars summary` every clan tick.
+- `l2autobots-player-notice.patch` — bots notice a real player and come up to them first (`population/notice/`, spec
+  `docs/player-notice.md`, `playerNoticeEnabled`, `playerNoticeRange` 900, `playerNoticeEverySeconds` 90,
+  `playerNoticePerHour` 12, `playerNoticeLog`). Every population tick each player at the keyboard
+  (`Attention.isLiveAudience`) may be approached by one free bot around (not fighting, in a store, a trade or a
+  sequence), chance by sociability, in this order:
+  - Party: a bot leader with room the player fits (`GroupFinder.judge`) whispers an offer; a bot looking for a group
+    (±5 levels) asks "го в пати?" and on "да" sends the invite itself, and takes the player's invite.
+  - Buff: a player of a buffer or healer class is asked for a buff by a bot with no one else's buffs; a buff from
+    them within 2 minutes gets a thanks and +3 liking.
+  - Trade: a bot in town offers a spare item of the player's grade (or anything worth 20k+) at its store price
+    (`PlayerTrade.offerTo`); "да" — trade me, "дорого / скинь / за 30к" — down to `MarketHaggle.floor` at most twice,
+    "нет" — ok. The deal is the usual trade window.
+  - A bot behind a store points a passer-by at its best piece of their grade (or worth 20k+) instead.
+  - Greeting: a bot that met the player in the last 45 s says hi in general chat (a friend by name, sometimes in a
+    whisper; a loner only to an acquaintance), through the near model when there is one.
+  Limits: one approach per player per `playerNoticeEverySeconds`, `playerNoticePerHour`; per bot and player a greeting
+  every 6 h, the rest every 30 min; a "no" keeps the bot away for 2 h. The bot's own lines go into the `BotTalk`
+  whisper history. Without a model a whisper nothing else takes gets a short line by what the bot is doing
+  (`PlayerNotice.cannedReply`). `Autobots notice:` per approach and answer, `Autobots notice summary:` every 10 min.
+  `GroupFinder.invitePlayer` gives a bot without a party a loot rule first (it was null: NPE, and the player was left
+  "processing a request" for good).
