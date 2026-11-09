@@ -506,3 +506,21 @@ actual link rather than requiring an unrelated straight line to the destination 
   - End: the losing side of a mutual war (10+ deaths, kills at most half) surrenders; the declarer stops a war
     without fights for 3 days or older than 7 (a cautious leader 1 and 4). Kills, deaths and dates in
     `autobot_clan_wars`. `Autobots wars summary` every clan tick.
+- `acis-382-news.patch` — core hooks for the server news: `RaidBoss`/`GrandBoss.doDie` (raid killed), the
+  categorized drop in `Monster.doItemDrop`, the PK and war-PvP branches of `Player.onKillUpdatePvPKarma`,
+  `ClanTable.storeClansWars`/`deleteClansWars` and `RequestSurrenderPledgeWar.surrender`, `_bbsnews` in
+  `CommunityBoard`. The community board is on (`EnableCommunityBoard = True`) and opens on `_bbsnews`.
+- `l2autobots-news.patch` — server news and rumors (`population/news/`, spec `docs/news.md`, `newsEnabled`,
+  `newsRumorsEnabled`, `newsRumorMinutes`, `newsRumorsPerHour`, `newsRareDropChance`, `newsLog`):
+  - `ServerNews`: raid bosses killed (with the party, clan and notable drops), rare drops from monsters (base chance
+    at most `newsRareDropChance` of 1000000, gear, jewels, recipes, enchant scrolls, spellbooks), PKs, wars
+    declared / mutual / surrendered / stopped and a battle score every 30 minutes (3+ kills in a mutual war). Bots
+    and players alike. The last 200 in memory, a week in `autobot_news`.
+  - `NewsBoard` (Alt+B): the feed with tabs (all, raids, drops, PK, wars) and pages, wars going on with the score
+    from `autobot_clan_wars`, PKs online.
+  - `Rumors`: every 30 s, in each region with a live player, one bot shouts fresh news (this region's first, raids
+    and wars from anywhere), as hearsay after 15 minutes; the raid killer or the PK victim online tells it
+    themselves; 0-3 others react. "что нового" / "новости" / "what's new" in shout, general chat or a whisper is
+    answered with the last news.
+  - `Autobots news:` lines and `Autobots news summary` every 10 minutes.
+
