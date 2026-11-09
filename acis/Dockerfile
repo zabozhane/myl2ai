@@ -190,6 +190,9 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git -C /autobots apply /patches/l2autobots-quest-evil-eye-basin.patch \
  && git -C /autobots apply /patches/l2autobots-quest-init-order.patch \
  && git -C /autobots apply /patches/l2autobots-clan-life.patch \
+ && git -C /autobots apply /patches/l2autobots-respawn-watchdog.patch \
+ && git -C /autobots apply /patches/l2autobots-gear-no-downgrade.patch \
+ && git -C /autobots apply /patches/l2autobots-healer-self-target.patch \
  && git -C /autobots apply /patches/l2autobots-clan-wars.patch
 
 # The Kotlin module is compiled against the aCis Java sources and dropped into aCis_gameserver/lib,

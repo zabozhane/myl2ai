@@ -1,0 +1,17 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index 4191b0c..6e1d848 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -275,8 +275,11 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+             }            
+         }
+         
+-        if(player.target != null && (player.target as Creature).target == player && !(player.target as Creature).isDead && (player.target as Creature).isInCombat && player.isInCombat)
++        // Not the bot itself: after a self-heal its own target is itself, so this "fighting me" check held a Bishop 40
++        // on itself for 12 minutes while a Wyrm beat it to death (40-76 stand).
++        if(player.target != null && player.target !== player && (player.target as Creature).target == player && !(player.target as Creature).isDead && (player.target as Creature).isInCombat && player.isInCombat)
+             return
++        if(player.target === player) resetTarget()
+         
+         if(player.target != null && combatPreferences.attackPlayerType == AttackPlayerType.Flagged && (player.target is Player && (player.target as Player).pvpFlag.toInt() == 0 && (player.target as Player).karma == 0)) {
+             resetTarget()
