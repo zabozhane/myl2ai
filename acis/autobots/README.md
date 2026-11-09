@@ -506,3 +506,22 @@ actual link rather than requiring an unrelated straight line to the destination 
   - End: the losing side of a mutual war (10+ deaths, kills at most half) surrenders; the declarer stops a war
     without fights for 3 days or older than 7 (a cautious leader 1 and 4). Kills, deaths and dates in
     `autobot_clan_wars`. `Autobots wars summary` every clan tick.
+
+- `l2autobots-mentors.patch` — mentors for newbies (`population/group/Mentors.kt`, spec `docs/mentors.md`,
+  `mentorsEnabled`, `mentorMinLevel`, `mentorWardMaxLevel`, `mentorLevelGap`, `mentorPercent`, `mentorMaxBonds`,
+  `mentorBotChancePercent`, `mentorMinutes`, `mentorLog`):
+  - A population bot of 20+ (no party, no karma, hunting or AFK, not wrapping up; sociable, polite, honest and
+    `mentorPercent` of those) takes a newbie of up to 15 and 10+ levels below under its wing for about 30 minutes:
+    players first (within 40000, or one who whispers "помоги"/"help" to it), a newbie bot without a party at
+    `mentorBotChancePercent` per 30 s (within 15000). One mentor per ward, an hour's pause after a bond for both.
+  - `Mentors.update` runs in `LifeBehavior` right after self-defense: walks over (gatekeeper from town, a scroll from
+    far away, on foot), kills the adds on the ward and anything on it below 40% HP (a lone monster the ward pulled
+    stays its own), stays within 350 and sits for mana. Never in their party: the newbie keeps the experience.
+  - Support classes count the ward as a party member (`SupportBehavior.membersAround`): buffs, heals, raising. Mentor
+    and ward are never each other's attacker (`CombatBehavior.areInTheSameClanOrParty`): a buff left the mentor
+    targeting the newbie, who fought back, got flagged and was killed by its cleric on the stand.
+  - A player ward is whispered to in their language: "квест"/"quest" picks the profession quest at 18+ without one
+    (`PathQuests`) or a repeatable quest of their level and race (`RepeatQuests`) and walks them to the giver within
+    15000, waiting when they fall behind; "баф" and "пока"/"спасибо" are answered. A newbie bot gets a greeting
+    and +5 liking for its mentor at the end.
+  - `Autobots mentors:` lines for bonds, ends and leads, `Autobots mentors summary` every 10 minutes.

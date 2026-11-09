@@ -1,0 +1,633 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index fda071b..de3ee70 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -55,6 +55,20 @@
+   <clanWarsEnabled>true</clanWarsEnabled>
+   <clanWarPkEnabled>true</clanWarPkEnabled>
+   <clanWarLog>true</clanWarLog>
++  <!-- Mentors (docs/mentors.md): now and then a kind bot of mentorMinLevel+ looks after a newbie (a player of up to
++       mentorWardMaxLevel first, a newbie bot with mentorBotChancePercent per 30 s) at least mentorLevelGap levels below
++       for about mentorMinutes: walks over, buffs and heals (support classes), kills adds and whatever hits a ward low on
++       HP, and walks a player to a quest giver when asked ("квест"). Never in a party with them. mentorPercent of the
++       kind, honest, sociable bots mentor; at most mentorMaxBonds at once. mentorLog prints bonds and a summary. -->
++  <mentorsEnabled>true</mentorsEnabled>
++  <mentorLog>true</mentorLog>
++  <mentorMinLevel>20</mentorMinLevel>
++  <mentorWardMaxLevel>15</mentorWardMaxLevel>
++  <mentorLevelGap>10</mentorLevelGap>
++  <mentorPercent>50</mentorPercent>
++  <mentorMaxBonds>10</mentorMaxBonds>
++  <mentorBotChancePercent>10</mentorBotChancePercent>
++  <mentorMinutes>30</mentorMinutes>
+   <!-- Bots gather parties on their own (a healer from level 25, then tank, buffer, spoiler and damage dealers),
+        shout for missing members and answer players who look for a group in chat. At most this percent of the
+        online population plays in parties; the rest hunt alone. groupLog prints every formed party. -->
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 86c59a2..1d5d4fb 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -138,7 +138,8 @@ object AutobotsManager {
+             2 -> { // pm "
+                 if(target == null) return false
+                 val bot = activeBots.getOrElse(target) {null} ?: return false
+-                if (!dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
++                if (!dev.l2j.autobots.population.group.Mentors.onWhisper(chatter, bot, text) &&
++                        !dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
+                         !dev.l2j.autobots.population.llm.Persuasion.onWhisper(chatter, bot, text) &&
+                         !PlayerTrade.onWhisper(chatter, bot, text) && !GroupChat.onWhisper(chatter, bot, text)) BotTalk.onWhisper(chatter, bot, text)
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index 2798910..bd77c32 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -482,7 +482,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+ 
+     private fun areInTheSameClanOrParty(it: Creature) : Boolean {
+         return (it is Player && it.isInParty && player.isInParty && player.party == it.party) ||
+-                (it is Player && it.clan != null && player.clan != null && player.clanId == it.clanId)
++                (it is Player && it.clan != null && player.clan != null && player.clanId == it.clanId) ||
++                // A mentor and its newbie: the mentor's target stays on the newbie after a buff, which is no attack.
++                (it is Player && dev.l2j.autobots.population.group.Mentors.bound(player, it))
+     }
+ 
+     /** Turns on auto use of shots the bot actually owns; shots are no longer created from nothing. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt
+index 64d5932..5fa1373 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/classes/support/SupportBehavior.kt
+@@ -69,8 +69,12 @@ internal abstract class SupportBehavior(player: Player, combatPreferences: Comba
+ 
+     /** Living and dead party members in reach, the bot itself included; just the bot when it has no party. */
+     protected fun membersAround(): List<Player> {
+-        val party = player.party ?: return listOf(player)
+-        return party.members.filter { it === player || (distance(player, it) <= SUPPORT_RANGE && GeoEngine.getInstance().canSeeTarget(player, it)) }
++        // A mentor's newbie (docs/mentors.md) is looked after like a party member, without being in the party.
++        val ward = dev.l2j.autobots.population.group.Mentors.wardOf(player)
++                ?.takeIf { distance(player, it) <= SUPPORT_RANGE && GeoEngine.getInstance().canSeeTarget(player, it) }
++        val party = player.party ?: return listOfNotNull(player, ward)
++        return party.members.filter { it === player || (distance(player, it) <= SUPPORT_RANGE && GeoEngine.getInstance().canSeeTarget(player, it)) } +
++                listOfNotNull(ward)
+     }
+ 
+     private fun resurrect(members: List<Player>): Boolean {
+@@ -155,6 +159,7 @@ internal abstract class SupportBehavior(player: Player, combatPreferences: Comba
+             return false
+         }
+         player.useMagicSkill(skill)
++        dev.l2j.autobots.population.group.Mentors.supported(player, target)
+         return true
+     }
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index a346dff..eae25ef 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -51,6 +51,15 @@ internal data class AutobotSettings(
+         @JsonProperty("clanWarsEnabled") var clanWarsEnabled: Boolean = true,
+         @JsonProperty("clanWarPkEnabled") var clanWarPkEnabled: Boolean = true,
+         @JsonProperty("clanWarLog") var clanWarLog: Boolean = true,
++        @JsonProperty("mentorsEnabled") var mentorsEnabled: Boolean = true,
++        @JsonProperty("mentorLog") var mentorLog: Boolean = true,
++        @JsonProperty("mentorMinLevel") var mentorMinLevel: Int = 20,
++        @JsonProperty("mentorWardMaxLevel") var mentorWardMaxLevel: Int = 15,
++        @JsonProperty("mentorLevelGap") var mentorLevelGap: Int = 10,
++        @JsonProperty("mentorPercent") var mentorPercent: Int = 50,
++        @JsonProperty("mentorMaxBonds") var mentorMaxBonds: Int = 10,
++        @JsonProperty("mentorBotChancePercent") var mentorBotChancePercent: Int = 10,
++        @JsonProperty("mentorMinutes") var mentorMinutes: Int = 30,
+         @JsonProperty("groupFinderEnabled") var groupFinderEnabled: Boolean = true,
+         @JsonProperty("groupFinderMinLevel") var groupFinderMinLevel: Int = 10,
+         @JsonProperty("groupMaxPopulationPercent") var groupMaxPopulationPercent: Int = 40,
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 334f05e..f612a73 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -219,6 +219,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+             return
+         }
+         underAttackSince = 0L
++        // Looking after a newbie (docs/mentors.md): the own life waits until the bond ends.
++        if (dev.l2j.autobots.population.group.Mentors.update(bot)) return
+ 
+         if (!bot.isInsideZone(ZoneId.TOWN)) tripDoneInTown = false
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index a07b859..d60d25e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -113,12 +113,14 @@ internal object PopulationManager {
+                 RaidLog.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 dev.l2j.autobots.population.group.StaticParties.summary()
+                 dev.l2j.autobots.population.llm.Llm.summary()
++                dev.l2j.autobots.population.group.Mentors.summary()
+             }
+             val online = members.values.mapNotNull { active(it) }.distinctBy { it.objectId }
+             if(ticks % 4 == 0) dev.l2j.autobots.movement.MovementStatus.sample(online)
+             if (ticks % GROUPS_EVERY_TICKS == 0) { dev.l2j.autobots.population.group.StaticParties.tick(online,now);GroupFinder.tick(online) }
+             if (ticks % GROUPS_EVERY_TICKS == 1) SocialTrade.tick(online)
+             if (ticks % CLANS_EVERY_TICKS == 3) dev.l2j.autobots.population.group.Clans.tick(online)
++            if (ticks % GROUPS_EVERY_TICKS == 1) dev.l2j.autobots.population.group.Mentors.tick(online)
+             if (ticks % GROUPS_EVERY_TICKS == 0) dev.l2j.autobots.population.llm.BotChatter.tick(online)
+             dev.l2j.autobots.population.llm.ChatMemory.tick()
+             if (++ticks % SAVE_EVERY_TICKS == 0) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+index 09af49f..71a1525 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+@@ -214,7 +214,7 @@ internal object GroupFinder {
+     }
+ 
+     // A bot away from the keyboard or about to log out does not answer party searches.
+-    private fun isFree(bot: Autobot) = !StaticParties.reserved(bot.objectId) && !bot.isInParty && bot.karma == 0 && !bot.isDead && !bot.isInStoreMode && bot.life != null && bot.controller == null &&
++    private fun isFree(bot: Autobot) = !StaticParties.reserved(bot.objectId) && !Mentors.isMentoring(bot.objectId) && !bot.isInParty && bot.karma == 0 && !bot.isDead && !bot.isInStoreMode && bot.life != null && bot.controller == null &&
+             bot.life?.activity.let { it != SessionPlan.Activity.Afk && it != SessionPlan.Activity.Home }
+ 
+     /** Lookers around the leader's level it doesn't avoid, the ones it likes best first; clan mates count as liked. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Mentors.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Mentors.kt
+new file mode 100644
+index 0000000..06e6478
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Mentors.kt
+@@ -0,0 +1,461 @@
++package dev.l2j.autobots.population.group
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.AutobotsManager
++import dev.l2j.autobots.behaviors.sequences.TravelByGatekeeperSequence
++import dev.l2j.autobots.behaviors.sequences.WalkToSequence
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.offlinelife.OfflineFarmManager
++import dev.l2j.autobots.population.PopulationManager
++import dev.l2j.autobots.population.SessionPlan
++import dev.l2j.autobots.population.economy.GatekeeperTravel
++import dev.l2j.autobots.population.economy.GoToTownSequence
++import dev.l2j.autobots.population.quests.PathQuests
++import dev.l2j.autobots.population.quests.QuestWorld
++import dev.l2j.autobots.population.quests.RepeatQuests
++import dev.l2j.autobots.population.raid.Manners
++import dev.l2j.autobots.population.trade.Honesty
++import dev.l2j.autobots.utils.distance
++import dev.l2j.autobots.utils.getHealthPercentage
++import dev.l2j.autobots.utils.getManaPercentage
++import kotlinx.coroutines.delay
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.enums.IntentionType
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
++import net.sf.l2j.gameserver.model.location.Location
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
++
++/**
++ * Mentors (docs/mentors.md): now and then a high level bot of a kind character takes a newbie, bot or player, under
++ * its wing for half an hour. It walks over, stays close, buffs and heals them (support classes, see
++ * [dev.l2j.autobots.behaviors.classes.support.SupportBehavior]), kills the extra monsters on them and whatever hits
++ * them once they bleed, and walks a player to a quest giver on request. Never in their party: a high level member
++ * would take the newbie's experience.
++ */
++internal object Mentors {
++    private val settings get() = AutobotData.settings
++    private val enabled get() = settings.mentorsEnabled && settings.populationSize > 0
++
++    private const val FAR = 2500.0
++    private const val KEEP = 350.0
++    private const val BOT_WARD_RANGE = 15000.0
++    private const val PLAYER_WARD_RANGE = 40000.0
++    private const val LOST_RANGE = 15000.0
++    private const val DEFEND_RADIUS = 900
++    private const val DEFEND_BELOW_HP = 40.0
++    private const val SIT_BELOW_MP = 30.0
++    private const val MENTOR_COOLDOWN_MS = 60 * 60_000L
++    private const val WARD_COOLDOWN_MS = 60 * 60_000L
++    private const val TRAVEL_RETRY_MS = 30_000L
++    private const val REPLAN_DISTANCE = 3000.0
++    private const val MIN_TRAVEL_PROGRESS = 300.0
++    private const val MAX_TRAVEL_FAILURES = 3
++    private const val LEAD_MS = 10 * 60_000L
++    private const val LEAD_MAX_DISTANCE = 15000.0
++    private const val LEAD_WAIT_GAP = 1500.0
++    private const val AT_NPC = 400.0
++    private const val MAX_LEAD_FAILURES = 3
++
++    /** A player's quest destination: the giver to walk to. */
++    private class Lead(val npcName: String, val loc: Location, val until: Long) {
++        var waiting = false
++        var failures = 0
++    }
++
++    private class Bond(val mentor: Autobot, val ward: Player, val until: Long) {
++        @Volatile var russian = true
++        @Volatile var lead: Lead? = null
++        var met = false
++        var travelFailedAt = 0L
++        var travelFailures = 0
++        var defending: Monster? = null
++    }
++
++    private val bonds = ConcurrentHashMap<Int, Bond>()
++    private val mentorOfWard = ConcurrentHashMap<Int, Int>()
++    private val mentorRestUntil = ConcurrentHashMap<Int, Long>()
++    private val wardRestUntil = ConcurrentHashMap<Int, Long>()
++
++    private val started = AtomicInteger()
++    private val support = AtomicInteger()
++    private val defended = AtomicInteger()
++    private val led = AtomicInteger()
++    private val endings = ConcurrentHashMap<String, AtomicInteger>()
++
++    private val ASKS_MENTOR = Regex("(помоги|помощь|наставни|научи|подскажи|mentor|help me|\\bhelp\\b)", RegexOption.IGNORE_CASE)
++    private val ASKS_QUEST = Regex("(квест|куда|что делать|чем заняться|quest|where|what (do|should) i do)", RegexOption.IGNORE_CASE)
++    private val ASKS_BUFF = Regex("(баф|бафф|buff|\\bbb\\b)", RegexOption.IGNORE_CASE)
++    private val SAYS_BYE = Regex("(пока|спасибо|спс|не надо|отстань|сам справлюсь|\\bthx\\b|thanks|thank you|\\bty\\b|\\bbye\\b|no need|leave me)", RegexOption.IGNORE_CASE)
++    private val RUSSIAN = Regex("[а-яА-ЯёЁ]")
++
++    // ---- who ----------------------------------------------------------------------------------------------------
++
++    /** Kind enough to spend an evening on strangers: fixed for life like the other traits. */
++    fun isMentorType(bot: Player): Boolean =
++            Sociability.of(bot) != Sociability.Loner && Manners.of(bot) != Manners.Rude && Honesty.of(bot) == Honesty.Honest &&
++                    Math.floorMod(bot.objectId * 6151 + 17, 100) < settings.mentorPercent
++
++    fun isMentoring(objectId: Int) = bonds.containsKey(objectId)
++
++    /** The newbie [player] looks after, for the support classes' buffs and heals. */
++    fun wardOf(player: Player): Player? = bonds[player.objectId]?.ward
++
++    /** A mentor and its ward, either way round: they never take each other for an attacker. */
++    fun bound(a: Player, b: Player): Boolean = bonds[a.objectId]?.ward === b || bonds[b.objectId]?.ward === a
++
++    /** For the bot's talk: what it is busy with. */
++    fun describe(bot: Player): String? = bonds[bot.objectId]?.let {
++        "looking after the newbie ${it.ward.name} (level ${it.ward.level}): you buff and protect them for a while"
++    }
++
++    private fun canMentor(bot: Autobot, now: Long): Boolean {
++        val life = bot.life ?: return false
++        return PopulationManager.isMember(bot.objectId) && bot.level >= settings.mentorMinLevel && !bot.isInParty &&
++                bot.karma == 0 && bot.pvpFlag.toInt() == 0 && !bot.isDead && !bot.isInStoreMode && bot.controller == null &&
++                !isMentoring(bot.objectId) && (mentorRestUntil[bot.objectId] ?: 0L) < now && !life.isWrappingUp() &&
++                (life.activity == SessionPlan.Activity.Hunt || life.activity == SessionPlan.Activity.Afk) &&
++                !GroupFinder.isLooking(bot) && isMentorType(bot)
++    }
++
++    private fun isWard(player: Player, now: Long): Boolean {
++        if (player.isDead || !player.isOnline || player.level > settings.mentorWardMaxLevel || player.karma > 0) return false
++        if (mentorOfWard.containsKey(player.objectId) || (wardRestUntil[player.objectId] ?: 0L) >= now) return false
++        if (player is Autobot) return player.life != null && !player.isInParty && !player.isInStoreMode && PopulationManager.isMember(player.objectId)
++        return !OfflineFarmManager.isFarming(player) && !player.isInStoreMode && !player.isInOlympiadMode
++    }
++
++    private fun fits(mentor: Player, ward: Player) = mentor.level >= ward.level + settings.mentorLevelGap
++
++    // ---- pairing ------------------------------------------------------------------------------------------------
++
++    /** Every 30 seconds: bonds that are over end, players without a mentor get one, now and then a newbie bot too. */
++    fun tick(online: Collection<Autobot>) {
++        if (!enabled) {
++            if (bonds.isNotEmpty()) bonds.values.toList().forEach { end(it, "mentors off") }
++            return
++        }
++        val now = System.currentTimeMillis()
++        bonds.values.toList().forEach { bond -> invalid(bond, now)?.let { end(bond, it) } }
++        if (bonds.size >= settings.mentorMaxBonds) return
++
++        val free = online.filter { canMentor(it, now) }.toMutableList()
++        if (free.isEmpty()) return
++        val players = World.getInstance().players.filter { it !is Autobot && isWard(it, now) }
++        val newbies = online.filter { isWard(it, now) && Rnd.get(100) < settings.mentorBotChancePercent }.shuffled()
++        for (ward in players + newbies) {
++            if (bonds.size >= settings.mentorMaxBonds || free.isEmpty()) return
++            val range = if (ward is Autobot) BOT_WARD_RANGE else PLAYER_WARD_RANGE
++            val mentor = free.filter { fits(it, ward) && distance(it, ward) <= range }.minByOrNull { distance(it, ward) } ?: continue
++            free.remove(mentor)
++            start(mentor, ward, if (ward is Autobot) "newbie bot nearby" else "player newbie")
++        }
++    }
++
++    private fun start(mentor: Autobot, ward: Player, why: String) {
++        val minutes = settings.mentorMinutes
++        val bond = Bond(mentor, ward, System.currentTimeMillis() + Rnd.get(minutes * 3 / 4, minutes * 5 / 4).coerceAtLeast(1) * 60_000L)
++        bond.russian = ward is Autobot || (GroupChat.isRussian(ward) || !spokeEnglish.contains(ward.objectId))
++        bonds[mentor.objectId] = bond
++        mentorOfWard[ward.objectId] = mentor.objectId
++        started.incrementAndGet()
++        if (!mentor.isInCombat) mentor.cancelSequence()
++        log("${mentor.name} (${mentor.level} ${mentor.classId}) mentors ${ward.name} (${ward.level}${if (ward is Autobot) " bot" else " player"})" +
++                " gap=${distance(mentor, ward).toInt()} why=$why")
++        if (ward !is Autobot) whisper(bond, if (bond.russian) listOf(
++                "привет) я ${mentor.level} ${className(mentor)}, могу побыть рядом: ${if (buffer(mentor)) "бафну, полечу" else "прикрою от мобов"}. " +
++                        "напиши \"квест\" - отведу к квесту, \"пока\" - отстану") else listOf(
++                "hi) i'm ${mentor.level} ${className(mentor)}, can look after you a bit: ${if (buffer(mentor)) "buffs and heals" else "i'll cover you"}. " +
++                        "say \"quest\" and i'll take you to one, \"bye\" when you're fine"))
++    }
++
++    private fun invalid(bond: Bond, now: Long): String? {
++        val mentor = bond.mentor
++        val ward = bond.ward
++        return when {
++            AutobotsManager.activeBots[mentor.name] !== mentor || !mentor.isOnline -> "mentor left"
++            mentor.isDead -> "mentor died"
++            mentor.isInParty -> "mentor joined a party"
++            mentor.karma > 0 -> "mentor got karma"
++            mentor.life?.isWrappingUp() == true -> "mentor's session ends"
++            !ward.isOnline || World.getInstance().getPlayer(ward.objectId) !== ward -> "ward left"
++            ward is Autobot && ward.isInParty -> "ward joined a party"
++            ward.level > settings.mentorWardMaxLevel || !fits(mentor, ward) -> "ward grew up"
++            now > bond.until && bond.lead == null -> "time is up"
++            bond.met && distance(mentor, ward) > LOST_RANGE -> "ward went far away"
++            bond.travelFailures >= MAX_TRAVEL_FAILURES -> "can't reach the ward"
++            else -> null
++        }
++    }
++
++    private fun end(bond: Bond, reason: String) {
++        if (bonds.remove(bond.mentor.objectId, bond).not()) return
++        mentorOfWard.remove(bond.ward.objectId, bond.mentor.objectId)
++        val now = System.currentTimeMillis()
++        mentorRestUntil[bond.mentor.objectId] = now + MENTOR_COOLDOWN_MS
++        wardRestUntil[bond.ward.objectId] = now + WARD_COOLDOWN_MS
++        endings.getOrPut(reason) { AtomicInteger() }.incrementAndGet()
++        val mentor = bond.mentor
++        if (mentor.target === bond.ward) mentor.target = null
++        if (mentor.isOnline && !mentor.isDead && bond.ward.isOnline && distance(mentor, bond.ward) < FAR && reason != "ward said bye") {
++            if (bond.ward is Autobot) mentor.say(if (bond.russian) listOf("ну всё, дальше сам) удачи", "мне пора, гл", "давай, не умирай)").random()
++                    else listOf("ok you're on your own now, gl", "gotta go, gl", "take care)").random())
++            else whisper(bond, if (bond.russian) listOf("мне пора, дальше сам) удачи", "всё, я побежал, гл") else listOf("gotta go, good luck)", "that's it from me, gl"))
++        }
++        (bond.ward as? Autobot)?.let { Relations.adjust(it, mentor.objectId, trust = 3, affinity = 5) }
++        log("${mentor.name} ends mentoring ${bond.ward.name}: $reason")
++    }
++
++    // ---- the mentor's tick ----------------------------------------------------------------------------------------
++
++    /** Called by the mentor's life after self-defense. @return true while the bond took the tick. */
++    suspend fun update(bot: Autobot): Boolean {
++        val bond = bonds[bot.objectId] ?: return false
++        invalid(bond, System.currentTimeMillis())?.let { end(bond, it); return false }
++        val ward = bond.ward
++        val gap = distance(bot, ward)
++
++        if (gap > FAR) {
++            travel(bond, gap)
++            return true
++        }
++        if (!bond.met) {
++            bond.met = true
++            bond.travelFailures = 0
++            if (ward is Autobot) greetBot(bot, ward, bond.russian)
++        }
++        if (defend(bond)) return true
++        if (bond.lead != null && lead(bond)) return true
++
++        val combat = bot.combatBehavior
++        if (gap > KEEP && (ward.isMoving || gap > KEEP * 2)) {
++            if (bot.isSitting) bot.standUp()
++            val angle = Math.toRadians(Rnd.get(360).toDouble())
++            val offset = Rnd.get(80, 200)
++            bot.ai.setIntention(IntentionType.MOVE_TO, Location(ward.x + (offset * Math.cos(angle)).toInt(), ward.y + (offset * Math.sin(angle)).toInt(), ward.z))
++            return true
++        }
++        if (bot.isSitting && (ward.isInCombat || bot.getManaPercentage() >= 95.0)) bot.standUp()
++        // A buff or heal leaves the ward as the target: dropped once the cast is over, like a player pressing Esc.
++        if (bot.target === ward && !bot.isCastingNow) bot.target = null
++        combat.idleUpdate()
++        if (!bot.isSitting && !bot.isMoving && !bot.isCastingNow && bot.getManaPercentage() < SIT_BELOW_MP && !ward.isInCombat) bot.sitDown()
++        return true
++    }
++
++    /**
++     * Monsters on the ward: the extra ones (adds) always, any of them once the ward is low. A lone monster the ward
++     * pulled itself stays the ward's: the experience is theirs.
++     */
++    private suspend fun defend(bond: Bond): Boolean {
++        val bot = bond.mentor
++        val ward = bond.ward
++        val attackers = ward.getKnownTypeInRadius(Monster::class.java, DEFEND_RADIUS).filter { !it.isDead && it.target === ward }
++        val current = bond.defending?.takeIf { !it.isDead && it.target === ward && it in attackers }
++        val pick = current ?: when {
++            attackers.isEmpty() -> null
++            ward.isDead -> null
++            ward.getHealthPercentage() < DEFEND_BELOW_HP -> attackers.minByOrNull { distance(bot, it) }
++            attackers.size >= 2 -> attackers.filter { it !== ward.target }.minByOrNull { distance(bot, it) }
++            else -> null
++        }
++        if (pick == null) {
++            bond.defending = null
++            return false
++        }
++        if (pick !== bond.defending) {
++            defended.incrementAndGet()
++            if (Rnd.get(100) < 30) { if (ward is Autobot) bot.say(listOf("держись", "i got this one", "сейчас").random()) }
++        }
++        bond.defending = pick
++        if (bot.isSitting) bot.standUp()
++        if (bot.target !== pick) bot.target = pick
++        bot.combatBehavior.committedTarget = pick
++        bot.combatBehavior.onUpdate()
++        return true
++    }
++
++    /** Far from the ward: to it by a gatekeeper from town, by a scroll to town from far away, on foot otherwise. */
++    private suspend fun travel(bond: Bond, gap: Double) {
++        val bot = bond.mentor
++        val ward = bond.ward
++        val now = System.currentTimeMillis()
++        if (now - bond.travelFailedAt < TRAVEL_RETRY_MS) {
++            bot.combatBehavior.idleUpdate()
++            return
++        }
++        if (bot.isSitting) bot.standUp()
++        var failed = false
++        val from = bot.location()
++        val inTown = bot.isInsideZone(ZoneId.TOWN)
++        val exit = if (inTown && gap > 8000) GatekeeperTravel.toward(bot, ward.location(), 8000.0)?.exit else null
++        when {
++            exit != null -> TravelByGatekeeperSequence(bot, exit) { failed = true }.execute()
++            !inTown && gap > LOST_RANGE -> GoToTownSequence(bot, purpose = "mentor") { failed = true }.execute()
++            else -> {
++                val destination = ward.location()
++                WalkToSequence(bot, destination, KEEP.toInt()) { failed = true }.whileGoalIsCurrent {
++                    bonds[bot.objectId] === bond && ward.isOnline && distance(destination, ward.location()) <= REPLAN_DISTANCE && distance(bot, ward) > KEEP
++                }.execute()
++            }
++        }
++        // A walk cut short because the ward moved on is no failure; one that went nowhere is (live: a town walk
++        // that returns at once restarted three times a second for half an hour, see PartyBehavior.followFar).
++        if (!failed && !bot.isDead && !bot.isInsideZone(ZoneId.TOWN) && distance(from, bot.location()) < MIN_TRAVEL_PROGRESS) failed = true
++        if (failed) {
++            bond.travelFailedAt = now
++            bond.travelFailures++
++        } else bond.travelFailures = 0
++    }
++
++    private suspend fun greetBot(bot: Autobot, ward: Autobot, russian: Boolean) {
++        bot.say((if (russian) listOf("${ward.name}, привет) побафаю тебя немного", "о, нуб) давай прикрою", "привет, я рядом побуду, бей мобов")
++                else listOf("hey ${ward.name}, i'll buff you a bit", "need help? i'll cover you", "hi, i'll stick around, go kill stuff")).random())
++        launchSafely {
++            delay(Rnd.get(2000, 5000).toLong())
++            if (ward.isOnline && !ward.isDead) ward.say(if (russian) listOf("спасибо!", "о, спс)", "ура, ty").random() else listOf("ty!", "thanks)", "wow ty").random())
++        }
++    }
++
++    // ---- leading a player to a quest --------------------------------------------------------------------------------
++
++    private suspend fun lead(bond: Bond): Boolean {
++        val bot = bond.mentor
++        val ward = bond.ward
++        val lead = bond.lead ?: return false
++        val now = System.currentTimeMillis()
++        if (now > lead.until || lead.failures >= MAX_LEAD_FAILURES) {
++            bond.lead = null
++            whisper(bond, if (bond.russian) listOf("не дошли( ${lead.npcName} у ${town(lead.loc)}, найдёшь сам") else listOf("we didn't make it, ${lead.npcName} is near ${town(lead.loc)}"))
++            return false
++        }
++        if (distance(ward.location(), lead.loc) <= AT_NPC) {
++            bond.lead = null
++            led.incrementAndGet()
++            log("${bot.name} led ${ward.name} to ${lead.npcName}")
++            whisper(bond, if (bond.russian) listOf("вот ${lead.npcName}, поговори с ним и возьми квест. я рядом") else listOf("here's ${lead.npcName}, talk to them and take the quest. i'm around"))
++            return false
++        }
++        if (distance(bot, ward) > LEAD_WAIT_GAP) {
++            if (!lead.waiting) whisper(bond, if (bond.russian) listOf("иди за мной", "не отставай)", "я тут, догоняй") else listOf("follow me", "this way)", "over here, keep up"))
++            lead.waiting = true
++            if (bot.isMoving) bot.stopMove(null)
++            bot.combatBehavior.idleUpdate()
++            return true
++        }
++        lead.waiting = false
++        if (distance(bot.location(), lead.loc) <= AT_NPC / 2) {
++            bot.combatBehavior.idleUpdate()
++            return true
++        }
++        if (bot.isSitting) bot.standUp()
++        var failed = false
++        WalkToSequence(bot, lead.loc, (AT_NPC / 2).toInt()) { failed = true }.whileGoalIsCurrent {
++            bonds[bot.objectId] === bond && bond.lead === lead && ward.isOnline && distance(bot, ward) <= LEAD_WAIT_GAP + 300
++        }.execute()
++        if (failed) lead.failures++
++        return true
++    }
++
++    /** A quest for the ward: the profession at 18+ without one, else a repeatable one of their level and race. */
++    private fun questFor(ward: Player): Pair<String, Pair<Int, String>>? {
++        if (ward.classId.level() == 0 && ward.level >= 18) {
++            PathQuests.forBaseClass(ward.classId).shuffled().firstOrNull()?.let { quest ->
++                return quest.questName to (quest.startNpc to "${pretty(quest.questName)} (${quest.to.name.lowercase().replace('_', ' ')})")
++            }
++        }
++        val npc = RepeatQuests.all.filter { ward.level in it.minLevel..it.maxLevel && (it.race == null || it.race == ward.race) }
++                .mapNotNull { q -> QuestWorld.closestNpc(ward, setOf(q.giver))?.let { q to it } }
++                .minByOrNull { distance(ward, it.second) } ?: return null
++        return npc.first.questName to (npc.first.giver to "${pretty(npc.first.questName)}: ${npc.first.rewardNote}")
++    }
++
++    private fun startLead(bond: Bond) {
++        val ward = bond.ward
++        val quest = questFor(ward)
++        val npc = quest?.let { QuestWorld.closestNpc(ward, setOf(it.second.first)) }
++        if (quest == null || npc == null) {
++            whisper(bond, if (bond.russian) listOf("для твоего уровня квестов не знаю, просто качайся рядом, я прикрою") else listOf("don't know a quest for your level, just hunt here, i'll cover you"))
++            return
++        }
++        val far = distance(ward, npc) > LEAD_MAX_DISTANCE
++        val where = town(Location(npc.x, npc.y, npc.z))
++        val line = if (bond.russian) "${quest.second.second} - бери у ${npc.name} в $where." + (if (far) " далеко, через гк" else " пошли, отведу")
++                else "${quest.second.second} - from ${npc.name} in $where." + (if (far) " it's far, use the gatekeeper" else " come, i'll show you")
++        whisper(bond, listOf(line))
++        if (far) return
++        bond.lead = Lead(npc.name, Location(npc.x, npc.y, npc.z), System.currentTimeMillis() + LEAD_MS)
++        log("${bond.mentor.name} leads ${ward.name} to ${npc.name} for ${quest.first}")
++    }
++
++    // ---- whispers -------------------------------------------------------------------------------------------------
++
++    private val spokeEnglish = ConcurrentHashMap.newKeySet<Int>()
++
++    /** A player's whisper to a bot: asking for a mentor, or talking to theirs. @return true if handled here. */
++    fun onWhisper(player: Player, bot: Autobot, text: String): Boolean {
++        if (!enabled || player is Autobot) return false
++        val russian = RUSSIAN.containsMatchIn(text)
++        if (russian) spokeEnglish.remove(player.objectId) else spokeEnglish.add(player.objectId)
++        val bond = bonds[bot.objectId]?.takeIf { it.ward === player }
++        if (bond == null) {
++            if (!ASKS_MENTOR.containsMatchIn(text)) return false
++            val now = System.currentTimeMillis()
++            wardRestUntil.remove(player.objectId)
++            if (!isWard(player, now) || !fits(bot, player) || !canMentor(bot, now)) return false
++            start(bot, player, "asked")
++            bonds[bot.objectId]?.russian = russian
++            return true
++        }
++        bond.russian = russian
++        when {
++            SAYS_BYE.containsMatchIn(text) -> {
++                whisper(bond, if (russian) listOf("давай, удачи)", "обращайся)") else listOf("np, good luck)", "anytime)"))
++                end(bond, "ward said bye")
++            }
++            ASKS_QUEST.containsMatchIn(text) -> startLead(bond)
++            ASKS_BUFF.containsMatchIn(text) -> whisper(bond, if (buffer(bot)) (if (russian) listOf("щас, стой рядом") else listOf("sec, stay close"))
++                    else (if (russian) listOf("бафов нет, я не бафер( но прикрою") else listOf("no buffs on my class, sorry, but i got your back")))
++            else -> return false
++        }
++        return true
++    }
++
++    private fun whisper(bond: Bond, lines: List<String>) {
++        val mentor = bond.mentor
++        val ward = bond.ward
++        if (ward is Autobot || !ward.isOnline) return
++        launchSafely {
++            delay(Rnd.get(1000, 3000).toLong())
++            if (mentor.isOnline) mentor.tell(ward.name, lines.random())
++        }
++    }
++
++    // ---- support bookkeeping ---------------------------------------------------------------------------------------
++
++    /** A heal, buff or raise cast on a ward. */
++    fun supported(mentor: Player, target: Player) {
++        if (bonds[mentor.objectId]?.ward === target) support.incrementAndGet()
++    }
++
++    fun summary() {
++        if (!enabled) return
++        val ends = endings.entries.joinToString { "${it.key}=${it.value.get()}" }
++        println("Autobots mentors summary: bonds=${bonds.size} started=${started.get()} support=${support.get()} defended=${defended.get()}" +
++                " led=${led.get()} ends=[$ends] now=[${bonds.values.joinToString { "${it.mentor.name}->${it.ward.name}" }}]")
++    }
++
++    private fun log(text: String) {
++        if (settings.mentorLog) println("Autobots mentors: $text")
++    }
++
++    private fun buffer(bot: Autobot) = bot.combatBehavior is dev.l2j.autobots.behaviors.classes.support.SupportBehavior
++    private fun className(bot: Player) = bot.template.className.lowercase()
++    private fun town(loc: Location) = MapRegionData.getInstance().getClosestTownName(loc.x, loc.y)
++    private fun pretty(questName: String) = questName.substringAfter('_').replace(Regex("([a-z])([A-Z])"), "$1 $2")
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
+index d70beed..0dd2cbb 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
+@@ -5,6 +5,7 @@ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.CoScopes
+ import dev.l2j.autobots.population.group.GroupChat
+ import dev.l2j.autobots.population.group.GroupFinder
++import dev.l2j.autobots.population.group.Mentors
+ import dev.l2j.autobots.population.group.Sociability
+ import dev.l2j.autobots.population.trade.PlayerTrade
+ import kotlinx.coroutines.delay
+@@ -167,6 +168,7 @@ internal object BotTalk {
+ 
+     private fun activity(bot: Autobot): String = when {
+         bot.isInStoreMode -> "sitting in your private store in ${GroupFinder.placeName(bot)}"
++        Mentors.isMentoring(bot.objectId) -> "${Mentors.describe(bot)}, near ${GroupFinder.placeName(bot)}"
+         bot.isInParty -> "hunting in a party near ${GroupFinder.placeName(bot)}"
+         bot.isInCombat -> "fighting monsters near ${GroupFinder.placeName(bot)}"
+         else -> "near ${GroupFinder.placeName(bot)}"
