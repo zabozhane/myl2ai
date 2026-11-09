@@ -32,6 +32,7 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git apply /patches/acis-382-owner-action.patch \
  && git apply /patches/acis-382-derby-off.patch \
  && git apply /patches/acis-382-clan-invite.patch \
+ && git apply /patches/acis-382-graded-shots.patch \
  && git -C /autobots apply /patches/l2autobots-fixes.patch \
  && git -C /autobots apply /patches/l2autobots-autofarm.patch \
  && git -C /autobots apply /patches/l2autobots-craft.patch \

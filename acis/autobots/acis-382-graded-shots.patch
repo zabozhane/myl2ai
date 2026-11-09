@@ -1,0 +1,598 @@
+diff --git a/aCis_datapack/data/xml/buyLists.xml b/aCis_datapack/data/xml/buyLists.xml
+index 4fa2260..a93e31a 100644
+--- a/aCis_datapack/data/xml/buyLists.xml
++++ b/aCis_datapack/data/xml/buyLists.xml
+@@ -374,6 +374,21 @@
+ 	</buyList>
+ 	<buyList id="14" npcId="30004">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="17"/>
+ 		<product id="3947" price="40"/>
+ 		<product id="5146" price="13282"/>
+@@ -546,6 +561,21 @@
+ 	</buyList>
+ 	<buyList id="20" npcId="30063">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="18"/>
+ 		<product id="3947" price="42"/>
+ 		<product id="5146" price="13860"/>
+@@ -598,6 +628,21 @@
+ 	</buyList>
+ 	<buyList id="21" npcId="30165">
+ 		<product id="1835" price="9"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="19"/>
+ 		<product id="3947" price="45"/>
+ 		<product id="5146" price="15015"/>
+@@ -642,6 +687,21 @@
+ 	</buyList>
+ 	<buyList id="22" npcId="30078">
+ 		<product id="1835" price="10"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="22"/>
+ 		<product id="3947" price="52"/>
+ 		<product id="5146" price="17325"/>
+@@ -694,6 +754,21 @@
+ 	</buyList>
+ 	<buyList id="23" npcId="30081">
+ 		<product id="1835" price="7"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="16"/>
+ 		<product id="3947" price="38"/>
+ 		<product id="5146" price="12705"/>
+@@ -1128,6 +1203,21 @@
+ 	</buyList>
+ 	<buyList id="35" npcId="30137">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="17"/>
+ 		<product id="3947" price="40"/>
+ 		<product id="5146" price="13282"/>
+@@ -1294,6 +1384,21 @@
+ 	</buyList>
+ 	<buyList id="42" npcId="30150">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="17"/>
+ 		<product id="3947" price="40"/>
+ 		<product id="5146" price="13282"/>
+@@ -1632,6 +1737,21 @@
+ 	</buyList>
+ 	<buyList id="51" npcId="30180">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="17"/>
+ 		<product id="3947" price="40"/>
+ 		<product id="5146" price="13282"/>
+@@ -2002,6 +2122,21 @@
+ 	</buyList>
+ 	<buyList id="63" npcId="30254">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="18"/>
+ 		<product id="3947" price="42"/>
+ 		<product id="5146" price="13860"/>
+@@ -2065,6 +2200,21 @@
+ 	</buyList>
+ 	<buyList id="65" npcId="30301">
+ 		<product id="1835" price="9"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="19"/>
+ 		<product id="3947" price="45"/>
+ 		<product id="5146" price="15015"/>
+@@ -2209,6 +2359,21 @@
+ 	</buyList>
+ 	<buyList id="68" npcId="30315">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="18"/>
+ 		<product id="3947" price="42"/>
+ 		<product id="5146" price="13860"/>
+@@ -2315,6 +2480,21 @@
+ 	</buyList>
+ 	<buyList id="71" npcId="30420">
+ 		<product id="1835" price="11"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="24"/>
+ 		<product id="3947" price="57"/>
+ 		<product id="5146" price="19057"/>
+@@ -2367,6 +2547,21 @@
+ 	</buyList>
+ 	<buyList id="72" npcId="30436">
+ 		<product id="1835" price="10"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="22"/>
+ 		<product id="3947" price="52"/>
+ 		<product id="5146" price="17325"/>
+@@ -2419,6 +2614,21 @@
+ 	</buyList>
+ 	<buyList id="73" npcId="30834">
+ 		<product id="1835" price="10"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="22"/>
+ 		<product id="3947" price="52"/>
+ 		<product id="5146" price="17325"/>
+@@ -2454,6 +2664,21 @@
+ 	</buyList>
+ 	<buyList id="74" npcId="30437">
+ 		<product id="1835" price="10"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="22"/>
+ 		<product id="3947" price="52"/>
+ 		<product id="5146" price="17325"/>
+@@ -2618,6 +2843,21 @@
+ 	</buyList>
+ 	<buyList id="80" npcId="30519">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="17"/>
+ 		<product id="3947" price="40"/>
+ 		<product id="5146" price="13282"/>
+@@ -2777,6 +3017,21 @@
+ 	</buyList>
+ 	<buyList id="86" npcId="30561">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="17"/>
+ 		<product id="3947" price="40"/>
+ 		<product id="5146" price="13282"/>
+@@ -3325,6 +3580,21 @@
+ 	</buyList>
+ 	<buyList id="100" npcId="30839">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="18"/>
+ 		<product id="3947" price="42"/>
+ 		<product id="5146" price="13860"/>
+@@ -4173,6 +4443,21 @@
+ 	</buyList>
+ 	<buyList id="117" npcId="31263">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="18"/>
+ 		<product id="3947" price="42"/>
+ 		<product id="5146" price="13860"/>
+@@ -5042,6 +5327,21 @@
+ 	</buyList>
+ 	<buyList id="135" npcId="31307">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="18"/>
+ 		<product id="3947" price="42"/>
+ 		<product id="5146" price="13860"/>
+@@ -5286,6 +5586,21 @@
+ 	</buyList>
+ 	<buyList id="147" npcId="31386">
+ 		<product id="1835" price="10"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="22"/>
+ 		<product id="3947" price="52"/>
+ 		<product id="5146" price="17325"/>
+@@ -6667,6 +6982,21 @@
+ 	</buyList>
+ 	<buyList id="191" npcId="31952">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="18"/>
+ 		<product id="3947" price="42"/>
+ 		<product id="5146" price="13860"/>
+@@ -8644,6 +8974,21 @@
+ 	</buyList>
+ 	<buyList id="382" npcId="31380">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="18"/>
+ 		<product id="3947" price="42"/>
+ 		<product id="5146" price="13860"/>
+@@ -8689,6 +9034,21 @@
+ 	</buyList>
+ 	<buyList id="383" npcId="31373">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="18"/>
+ 		<product id="3947" price="42"/>
+ 		<product id="5146" price="13860"/>
+@@ -10753,6 +11113,21 @@
+ 	</buyList>
+ 	<buyList id="5601" npcId="30893">
+ 		<product id="1835" price="8"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="18"/>
+ 		<product id="3947" price="42"/>
+ 		<product id="5146" price="13860"/>
+@@ -11501,6 +11876,21 @@
+ 	</buyList>
+ 	<buyList id="5804" npcId="31044">
+ 		<product id="1835" price="10"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="22"/>
+ 		<product id="3947" price="52"/>
+ 		<product id="5146" price="17325"/>
+@@ -11553,6 +11943,21 @@
+ 	</buyList>
+ 	<buyList id="5805" npcId="31045">
+ 		<product id="1835" price="10"/>
++		<product id="1463"/>
++		<product id="1464"/>
++		<product id="1465"/>
++		<product id="1466"/>
++		<product id="1467"/>
++		<product id="2510"/>
++		<product id="2511"/>
++		<product id="2512"/>
++		<product id="2513"/>
++		<product id="2514"/>
++		<product id="3948"/>
++		<product id="3949"/>
++		<product id="3950"/>
++		<product id="3951"/>
++		<product id="3952"/>
+ 		<product id="2509" price="22"/>
+ 		<product id="3947" price="52"/>
+ 		<product id="5146" price="17325"/>
