@@ -1,3 +1,11 @@
+## 2026-11-09 — c644ff9 не грузит SecondClassQuests
+
+- Стенд 40–76 на c644ff9 упал при старте: `REVENANT_NUKES`/`REFORMER_NUKES` объявлены ниже `val quests`, при
+  построении списка квестов они ещё null → NPE в `PathQuestBuilder.hunt` (параметр `nukes`) →
+  ExceptionInInitializerError, у всех ботов падает LifeBehavior. До #178 то же самое молча оставляло охоту на
+  оборотня и предателя Q227 без заклинаний (`spells` допускает null).
+- `l2autobots-reformer-spells-init.patch`: списки перенесены выше `quests`. Основной сервер (ab1e07a) не затронут.
+
 ## 2026-11-09 — квесты вторых профессий падали при запуске
 
 - После #178 `SecondClassQuests` не инициализировался: NPE «PathQuestBuilder.hunt, parameter nukes». В Kotlin object

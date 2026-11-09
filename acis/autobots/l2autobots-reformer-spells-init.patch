@@ -1,0 +1,25 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index da7a286..e0d4dff 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -105,6 +105,11 @@ internal object SecondClassQuests {
+         return DUEL_SUMMONS.firstOrNull { bot.getSkill(it) != null }
+     }
+ 
++    // Q227 spell lists. Here, above [quests]: declared after it, they were still null while it was built (the
++    // stand on c644ff9 failed to load this object, and before #178 the werewolf hunts silently had no spells).
++    private val REFORMER_NUKES = listOf(1184, 1177, 1147)
++    private val REVENANT_NUKES = listOf(1031, 1184, 1177)  // Disrupt Undead, Ice Bolt, Wind Strike
++
+     private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
+             path(questName, HUMAN_FIGHTER, HUMAN_FIGHTER, mark, "") { level(minLevel); body() }
+ 
+@@ -895,8 +900,6 @@ internal object SecondClassQuests {
+     // Q227: Disrupt Undead, and the spells the Crimson Werewolf allows that clerics and Shillien oracles own: Ice
+     // Bolt, Wind Strike, Vampiric Touch from their mystic days (Disrupt Undead only takes undead targets).
+     private const val DISRUPT_UNDEAD = 1031
+-    private val REFORMER_NUKES = listOf(1184, 1177, 1147)
+-    private val REVENANT_NUKES = listOf(DISRUPT_UNDEAD, 1184, 1177)
+     // Q229 items checked by the rules.
+     private const val IKER_LIST = 3310
+     private const val LARA_MEMO = 3314
