@@ -1,0 +1,1039 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index fda071b..7e34ac5 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -93,6 +93,16 @@
+   <derbyChancePercent>100</derbyChancePercent>
+   <derbyMaxBet>1000</derbyMaxBet>
+   <derbyLog>true</derbyLog>
++  <!-- Duels (docs/duels.md): now and then a population bot from duelMinLevel walks to the duel ground just outside its
++       town and fights up to 3 duels with other bots (level gap up to duelLevelGap) and the players there; a player's
++       /duel is answered anywhere. Every 1 vs 1 duel moves the Elo rating (table autobot_duel_ratings, chat command
++       .duels). duelChancePercent scales how often bots go to the ground (0 = never, but they still answer players);
++       duelLog prints every duel and a summary every 10 minutes. -->
++  <duelsEnabled>true</duelsEnabled>
++  <duelChancePercent>100</duelChancePercent>
++  <duelMinLevel>10</duelMinLevel>
++  <duelLevelGap>5</duelLevelGap>
++  <duelLog>true</duelLog>
+   <!-- Social trading (needs economyEnabled): bots swap and sell items to each other and to players through the trade
+        window, lend adena and spare gear to people they trust and get it back. scammerPercent of bots scam (keep loans,
+        sell lookalikes), opportunistPercent keep a valuable loan from someone they barely trust. A loan overdue by
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 86c59a2..890e632 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -103,6 +103,7 @@ object AutobotsManager {
+         if(AutofarmCommandHandler.onChat(chatter, text)) return true
+         if(OfflineFarmCommandHandler.onChat(chatter, text)) return true
+         if(dev.l2j.autobots.offlinelife.AutoLifeCommandHandler.onChat(chatter, text)) return true
++        if(dev.l2j.autobots.population.duel.Duels.onCommand(chatter, text)) return true
+         
+         if(chatter.isGM) {
+             if(chatter.isControllingBot()) {
+@@ -178,6 +179,16 @@ object AutobotsManager {
+         if (target is Autobot && target.life != null) dev.l2j.autobots.population.group.ClanChat.onInvite(requestor, target)
+     }
+ 
++    /** Called by RequestDuelStart once a player challenged a bot (or its party leader): the bot answers in code. */
++    fun onDuelChallenge(requestor: Player, target: Player, party: Boolean) {
++        if (target is Autobot) runCatching { dev.l2j.autobots.population.duel.Duels.onChallenge(requestor, target, party) }.onFailure { it.printStackTrace() }
++    }
++
++    /** Called by Duel.endDuel for every duel, before the players are restored: the duel rating. Never breaks the duel. */
++    fun onDuelEnd(playerA: Player, playerB: Player, party: Boolean, result: String) {
++        runCatching { dev.l2j.autobots.population.duel.Duels.onDuelEnd(playerA, playerB, party, result) }.onFailure { it.printStackTrace() }
++    }
++
+     /** Called by TradeRequest once a player asked a bot to trade: a bot never sees the request window. */
+     fun onTradeRequest(requestor: Player, target: Player) {
+         if(dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(target)) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index 2798910..f89b588 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -64,7 +64,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         }
+         deadSince = 0
+         dev.l2j.autobots.population.economy.Healing.use(player)
+-        // A clan war fight (docs/clan-wars.md) comes before monsters, rest and loot.
++        // A duel (docs/duels.md), then a clan war fight (docs/clan-wars.md) come before monsters, rest and loot.
++        if(player is Autobot && duelFight(player)) return
+         if(player is Autobot && warFight(player)) return
+         
+         ensureSummonPet()        
+@@ -235,6 +236,39 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         }
+     }
+ 
++    /** Fights the opponent of a 1 vs 1 duel: only it, from the countdown to the end. @return true while in a duel. */
++    private suspend fun duelFight(bot: Autobot): Boolean {
++        val enemy = dev.l2j.autobots.population.duel.Duels.opponent(bot) ?: return false
++        if(bot.isSitting) {
++            bot.standUp()
++            return true
++        }
++        if(bot.target !== enemy) {
++            bot.target = enemy
++            committedTarget = enemy
++            isMovingTowardsTarget = false
++        }
++        // The countdown, or the duel decided and about to close: no blow lands outside the fight.
++        if(bot.duelState != net.sf.l2j.gameserver.model.entity.Duel.DuelState.DUELLING) {
++            if(bot.ai.desire.intention == IntentionType.ATTACK || bot.ai.desire.intention == IntentionType.CAST) {
++                bot.abortAttack()
++                bot.abortCast()
++                bot.ai.setIntention(IntentionType.ACTIVE)
++            }
++            return true
++        }
++        if(dev.l2j.autobots.population.duel.Duels.maybeSurrender(bot)) return true
++        beforeAttack()
++        val skill = getNextAvailableSkill()
++        val desire = bot.ai.desire
++        when {
++            skill != null -> bot.useMagicSkill(skill, true)
++            desire.intention == IntentionType.ATTACK && desire.firstParameter === enemy -> {}
++            else -> bot.attack(true)
++        }
++        return true
++    }
++
+     /** Fights the enemy [dev.l2j.autobots.population.group.ClanWars] picks. @return true while there is one. */
+     private suspend fun warFight(bot: Autobot): Boolean {
+         val enemy = dev.l2j.autobots.population.group.ClanWars.fightTarget(bot)
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index a346dff..1d84ad7 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -68,6 +68,11 @@ internal data class AutobotSettings(
+         @JsonProperty("derbyChancePercent") var derbyChancePercent: Int = 100,
+         @JsonProperty("derbyMaxBet") var derbyMaxBet: Int = 1000,
+         @JsonProperty("derbyLog") var derbyLog: Boolean = true,
++        @JsonProperty("duelsEnabled") var duelsEnabled: Boolean = true,
++        @JsonProperty("duelChancePercent") var duelChancePercent: Int = 100,
++        @JsonProperty("duelMinLevel") var duelMinLevel: Int = 10,
++        @JsonProperty("duelLevelGap") var duelLevelGap: Int = 5,
++        @JsonProperty("duelLog") var duelLog: Boolean = true,
+         @JsonProperty("socialTradeEnabled") var socialTradeEnabled: Boolean = true,
+         @JsonProperty("scammerPercent") var scammerPercent: Int = 5,
+         @JsonProperty("opportunistPercent") var opportunistPercent: Int = 10,
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 334f05e..aeef07f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -71,6 +71,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+     private val party = PartyBehavior(bot)
+     internal val quests = QuestRunner(bot)
+     private val derby = DerbyVisit(bot)
++    private val duel = dev.l2j.autobots.population.duel.DuelVisit(bot)
+     private var derbyLeaveRetryAt = 0L
+     private var derbyLeaveFailures = 0
+     private var underAttackSince = 0L
+@@ -184,6 +185,11 @@ internal class LifeBehavior(private val bot: Autobot) {
+     val activity get() = session.activity
+ 
+     suspend fun onUpdate() {
++        // A duel in progress (docs/duels.md) comes before everything: the bot fights its opponent and nothing else.
++        if (dev.l2j.autobots.population.duel.Duels.inDuel(bot)) {
++            bot.combatBehavior.onUpdate()
++            return
++        }
+         if(bot.exp>lastHuntExp) huntJourney.reset()
+         if(bot.exp>lastHuntExp && !bot.isInsideZone(ZoneId.TOWN) && session.activity==SessionPlan.Activity.Hunt && productiveSince==0L)
+             productiveSince=System.currentTimeMillis()
+@@ -247,6 +253,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+         when (session.activity) {
+             SessionPlan.Activity.Derby -> if (derby.update { goToTown(HOME_MAX_WALK, "derby") }) nextSegment(reason = "derby visit over")
++            SessionPlan.Activity.Duel -> if (duel.update { goToTown(HOME_MAX_WALK, "duel") }) nextSegment(reason = "duel visit over")
+             SessionPlan.Activity.Afk -> afk()
+             SessionPlan.Activity.Trade -> trade()
+             SessionPlan.Activity.Home -> goHome()
+@@ -258,17 +265,23 @@ internal class LifeBehavior(private val bot: Autobot) {
+             hasGoal = quests.hasBusiness(),
+             canTrade = economy && StoreKeeper.hasBusiness(bot),
+             isCrafter = CraftBook.isCrafter(bot),
+-            canBet = DerbyVisit.canVisit(bot))
++            canBet = DerbyVisit.canVisit(bot),
++            canDuel = dev.l2j.autobots.population.duel.DuelVisit.canVisit(bot))
+ 
+     /** Ends the current segment and sets the bot up for the next one. */
+     private fun nextSegment(canTrade: Boolean? = null, reason: String = "segment over") {
+         val previous = session.activity
+-        val context = context().let { if (canTrade == null) it else SessionPlan.Context(it.hasGoal, canTrade, it.isCrafter, it.canBet) }
++        val context = context().let { if (canTrade == null) it else SessionPlan.Context(it.hasGoal, canTrade, it.isCrafter, it.canBet, it.canDuel) }
+         val next = session.next(context, reason)
+         if(previous!=next && next==SessionPlan.Activity.Hunt) huntJourney.reset()
+         if (next != SessionPlan.Activity.Trade) StoreKeeper.close(bot)
+         if ((previous == SessionPlan.Activity.Afk || previous == SessionPlan.Activity.Home) && bot.isSitting) bot.standUp()
+         afkRetreats = 0
++        if (previous == SessionPlan.Activity.Duel) duel.end()
++        if (next == SessionPlan.Activity.Duel) {
++            dropSpot()
++            duel.begin()
++        }
+         if (next == SessionPlan.Activity.Derby) {
+             dropSpot()
+             derby.begin()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index a07b859..8e65ef1 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -110,6 +110,7 @@ internal object PopulationManager {
+                 GroupFinder.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 SessionPlan.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 DerbyVisit.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
++                dev.l2j.autobots.population.duel.Duels.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 RaidLog.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+                 dev.l2j.autobots.population.group.StaticParties.summary()
+                 dev.l2j.autobots.population.llm.Llm.summary()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt b/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
+index 9b26881..238d2a5 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
+@@ -18,13 +18,13 @@ import java.util.Random
+  */
+ internal class SessionPlan(private val bot: Autobot) {
+ 
+-    enum class Activity { Hunt, Afk, Trade, Home, Derby }
++    enum class Activity { Hunt, Afk, Trade, Home, Derby, Duel }
+ 
+     /** How a player likes to spend a session. Crafters are traders; the others are fixed by the object id. */
+     enum class Style { Grinder, Casual, Trader }
+ 
+     /** What the bot knows when it picks the next segment. */
+-    class Context(val hasGoal: Boolean, val canTrade: Boolean, val isCrafter: Boolean, val canBet: Boolean = false)
++    class Context(val hasGoal: Boolean, val canTrade: Boolean, val isCrafter: Boolean, val canBet: Boolean = false, val canDuel: Boolean = false)
+ 
+     var activity: Activity? = null
+         private set
+@@ -35,6 +35,8 @@ internal class SessionPlan(private val bot: Autobot) {
+     private var cause: Cause? = null
+     // Derby visits this session: one is plenty for most players.
+     private var derbyVisits = 0
++    // Duel ground visits this session (docs/duels.md): one at most.
++    private var duelVisits = 0
+ 
+     private enum class Cause(val text: String) { Death("died"), LevelUp("new level"), TownTrip("goods to sell after a town trip") }
+ 
+@@ -107,6 +109,7 @@ internal class SessionPlan(private val bot: Autobot) {
+                 Activity.Trade -> "sit in a private store in town and sell your goods"
+                 Activity.Home -> "go home and log out"
+                 Activity.Derby -> "ride to the Monster Race Track and bet a little adena on a race"
++                Activity.Duel -> "go to the duel ground outside town and fight a few duels for the rating"
+             }, weight * 100 / total)
+         }
+         val huntedMinutes = if (current == Activity.Hunt) (System.currentTimeMillis() - huntingSince) / 60_000L else 0L
+@@ -138,6 +141,7 @@ internal class SessionPlan(private val bot: Autobot) {
+         }
+         if (next == Activity.Hunt && activity != Activity.Hunt) huntingSince = now
+         if (next == Activity.Derby) derbyVisits++
++        if (next == Activity.Duel) duelVisits++
+         activity = next
+         endsAt = now + minutes * 60_000L
+         cause = null
+@@ -147,13 +151,13 @@ internal class SessionPlan(private val bot: Autobot) {
+         val style = style(context)
+         val base: Map<Activity, Double> = when (previous) {
+             null -> mapOf(Activity.Hunt to 75.0, Activity.Trade to 15.0, Activity.Afk to 10.0)
+-            Activity.Afk -> mapOf(Activity.Hunt to 75.0, Activity.Trade to 25.0, Activity.Derby to DERBY_WEIGHT)
+-            Activity.Trade, Activity.Home, Activity.Derby -> mapOf(Activity.Hunt to 80.0, Activity.Afk to 20.0)
++            Activity.Afk -> mapOf(Activity.Hunt to 75.0, Activity.Trade to 25.0, Activity.Derby to DERBY_WEIGHT, Activity.Duel to DUEL_WEIGHT)
++            Activity.Trade, Activity.Home, Activity.Derby, Activity.Duel -> mapOf(Activity.Hunt to 80.0, Activity.Afk to 20.0)
+             Activity.Hunt -> when (cause) {
+                 Cause.TownTrip -> mapOf(Activity.Trade to 100.0)
+                 Cause.LevelUp -> mapOf(Activity.Afk to 100.0)
+                 Cause.Death -> mapOf(Activity.Hunt to 25.0, Activity.Afk to 45.0, Activity.Trade to 30.0, Activity.Derby to DERBY_WEIGHT)
+-                null -> mapOf(Activity.Hunt to 45.0, Activity.Afk to 35.0, Activity.Trade to 20.0, Activity.Derby to DERBY_WEIGHT)
++                null -> mapOf(Activity.Hunt to 45.0, Activity.Afk to 35.0, Activity.Trade to 20.0, Activity.Derby to DERBY_WEIGHT, Activity.Duel to DUEL_WEIGHT)
+             }
+         }
+         val fatigueHours = if (previous == Activity.Hunt) (System.currentTimeMillis() - huntingSince) / 3_600_000.0 else 0.0
+@@ -168,6 +172,13 @@ internal class SessionPlan(private val bot: Autobot) {
+                 Activity.Derby -> weight * AutobotData.settings.derbyChancePercent / 100.0 *
+                         (if (DerbyVisit.isGambler(bot)) 2.0 else 0.5) *
+                         when (style) { Style.Grinder -> 0.3; Style.Casual -> 1.3; Style.Trader -> 1.0 }
++                // Rare too: the bold go more often than the careful, grinders hardly ever.
++                Activity.Duel -> weight * AutobotData.settings.duelChancePercent / 100.0 *
++                        when (dev.l2j.autobots.population.economy.Temper.of(bot.objectId)) {
++                            dev.l2j.autobots.population.economy.Temper.Gambler -> 2.0
++                            dev.l2j.autobots.population.economy.Temper.Normal -> 1.0
++                            dev.l2j.autobots.population.economy.Temper.Cautious -> 0.4
++                        } * when (style) { Style.Grinder -> 0.3; Style.Casual -> 1.3; Style.Trader -> 0.8 }
+             }
+         }.filter { (activity, _) ->
+             when (activity) {
+@@ -175,6 +186,7 @@ internal class SessionPlan(private val bot: Autobot) {
+                 // At login or with a goal waiting, a break only comes after some hunting.
+                 Activity.Afk -> !context.hasGoal || previous == Activity.Hunt
+                 Activity.Derby -> context.canBet && !context.hasGoal && derbyVisits < MAX_DERBY_VISITS && !isNight()
++                Activity.Duel -> context.canDuel && !context.hasGoal && duelVisits < MAX_DUEL_VISITS && !isNight()
+                 else -> true
+             }
+         }.mapValues { it.value.toInt() }
+@@ -198,6 +210,8 @@ internal class SessionPlan(private val bot: Autobot) {
+             Activity.Home -> HOME_MINUTES
+             // An upper bound: the visit ends on its own once the ticket is cashed (see DerbyVisit).
+             Activity.Derby -> DERBY_MINUTES
++            // An upper bound as well: the visit ends after its duels or when nobody comes (see DuelVisit).
++            Activity.Duel -> DUEL_MINUTES
+         }
+     }
+ 
+@@ -216,13 +230,16 @@ internal class SessionPlan(private val bot: Autobot) {
+         private const val DERBY_WEIGHT = 3.0
+         private const val MAX_DERBY_VISITS = 1
+         private const val DERBY_MINUTES = 45
++        private const val DUEL_WEIGHT = 3.0
++        private const val MAX_DUEL_VISITS = 1
++        private const val DUEL_MINUTES = 45
+ 
+         /** One line for the every-10-minutes log: what the online population is busy with. */
+         fun summary(online: Collection<Autobot>) {
+             val solo = online.filter { !it.isInParty }.mapNotNull { it.life?.activity }
+             val counts = Activity.values().associateWith { activity -> solo.count { it == activity } }
+             println("Autobots session summary: online=${online.size} hunting=${counts[Activity.Hunt]} trading=${counts[Activity.Trade]} " +
+-                    "afk=${counts[Activity.Afk]} derby=${counts[Activity.Derby]} goingHome=${counts[Activity.Home]} inParty=${online.count { it.isInParty }} " +
++                    "afk=${counts[Activity.Afk]} derby=${counts[Activity.Derby]} duel=${counts[Activity.Duel]} goingHome=${counts[Activity.Home]} inParty=${online.count { it.isInParty }} " +
+                     "inStore=${online.count { it.isInStoreMode }}")
+         }
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/duel/DuelGrounds.kt b/src/main/kotlin/dev/l2j/autobots/population/duel/DuelGrounds.kt
+new file mode 100644
+index 0000000..b17740e
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/duel/DuelGrounds.kt
+@@ -0,0 +1,85 @@
++package dev.l2j.autobots.population.duel
++
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.gameserver.data.manager.ZoneManager
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.geoengine.GeoEngine
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
++import net.sf.l2j.gameserver.model.location.Location
++import net.sf.l2j.gameserver.model.zone.ZoneType
++import net.sf.l2j.gameserver.model.zone.type.*
++import java.util.Optional
++import java.util.concurrent.ConcurrentHashMap
++import kotlin.math.cos
++import kotlin.math.sin
++
++/**
++ * The duel ground of a town: the core forbids duels in peace, PvP and siege zones, so players meet just outside the
++ * town. For each town (its respawn point) the nearest point outside every such zone, with some margin and no aggressive
++ * monsters around, is searched once along 8 rays and kept. A town without one has no duels.
++ */
++internal object DuelGrounds {
++    private const val STEP = 150
++    private const val MAX_RAY = 5000
++    private const val MARGIN = 400
++    private const val AGGRO_RADIUS = 1500.0
++
++    /** Town name -> its ground. A town has many respawn points; the first one seen is where the search starts. */
++    private val grounds = ConcurrentHashMap<String, Optional<Location>>()
++
++    /** The duel ground of the town the bot would return to, or null when that town has none. */
++    fun of(bot: Player): Location? {
++        val town = MapRegionData.getInstance().getLocationToTeleport(bot, MapRegionData.TeleportType.TOWN) ?: return null
++        return of(town)
++    }
++
++    fun of(town: Location): Location? =
++            grounds.computeIfAbsent(MapRegionData.getInstance().getClosestTownName(town.x, town.y)) { Optional.ofNullable(find(it, town)) }.orElse(null)
++
++    /** The ground the bot stands at, if it is at one (within [radius]). */
++    fun near(bot: Player, radius: Int): Location? =
++            grounds.values.mapNotNull { it.orElse(null) }.firstOrNull { distance(bot.location(), it) <= radius && kotlin.math.abs(bot.z - it.z) < 400 }
++
++    private fun find(name: String, town: Location): Location? {
++        val geo = GeoEngine.getInstance()
++        val monsters = World.getInstance().objects.filterIsInstance<Monster>()
++                .filter { it.isAggressive && distance(it.spawnLocation(), town) < MAX_RAY + MARGIN + AGGRO_RADIUS }
++        var best: Location? = null
++        var bestDistance = Double.MAX_VALUE
++        for (dir in 0 until 8) {
++            val angle = dir * Math.PI / 4
++            var step = STEP
++            while (step <= MAX_RAY) {
++                val x = town.x + (cos(angle) * step).toInt()
++                val y = town.y + (sin(angle) * step).toInt()
++                if (allowed(x, y, geo.getHeight(x, y, town.z).toInt())) {
++                    val gx = town.x + (cos(angle) * (step + MARGIN)).toInt()
++                    val gy = town.y + (sin(angle) * (step + MARGIN)).toInt()
++                    val ground = Location(gx, gy, geo.getHeight(gx, gy, town.z).toInt())
++                    if (allowed(ground.x, ground.y, ground.z) && monsters.none { distance(it.spawnLocation(), ground) < AGGRO_RADIUS } &&
++                            step + MARGIN < bestDistance) {
++                        best = ground
++                        bestDistance = (step + MARGIN).toDouble()
++                    }
++                    break
++                }
++                step += STEP
++            }
++        }
++        println("Autobots duels: duel ground of $name (from ${town.x},${town.y},${town.z}): " +
++                (best?.let { "${it.x},${it.y},${it.z} (${bestDistance.toInt()} away)" } ?: "none"))
++        return best
++    }
++
++    private fun Monster.spawnLocation(): Location = spawn?.loc?.let { Location(it.x, it.y, it.z) } ?: Location(x, y, z)
++
++    /** Outside every zone where a duel is forbidden or cancelled, or where standing around is a bad idea. */
++    private fun allowed(x: Int, y: Int, z: Int): Boolean = ZoneManager.getInstance().getZones(x, y, z).none { forbidden(it) }
++
++    private fun forbidden(zone: ZoneType) = zone is TownZone || zone is PeaceZone || zone is ArenaZone || zone is OlympiadStadiumZone ||
++            zone is SiegeZone || zone is CastleZone || zone is ClanHallZone || zone is WaterZone || zone is BossZone ||
++            zone is DerbyTrackZone || zone is JailZone || zone is DamageZone || zone is SwampZone
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/duel/DuelRating.kt b/src/main/kotlin/dev/l2j/autobots/population/duel/DuelRating.kt
+new file mode 100644
+index 0000000..2d4101e
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/duel/DuelRating.kt
+@@ -0,0 +1,113 @@
++package dev.l2j.autobots.population.duel
++
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.model.actor.Player
++import java.util.concurrent.ConcurrentHashMap
++import kotlin.math.pow
++import kotlin.math.roundToInt
++
++/**
++ * The duel rating of bots and players (Elo): 1000 to start, a big step for the first duels, a smaller one after.
++ * A draw (the time ran out) is half a point each; a cancelled duel does not count. One small table, written after
++ * every duel and read once at the first use.
++ */
++internal object DuelRating {
++    const val START = 1000
++    private const val K_NEW = 40.0
++    private const val K = 24.0
++    private const val NEW_GAMES = 10
++
++    class Entry(val charId: Int, var name: String, var level: Int, var rating: Int = START,
++                var wins: Int = 0, var losses: Int = 0, var draws: Int = 0, var streak: Int = 0, var last: Long = 0L) {
++        val games get() = wins + losses + draws
++    }
++
++    private val entries = ConcurrentHashMap<Int, Entry>()
++    @Volatile private var loaded = false
++
++    fun of(player: Player): Entry {
++        load()
++        return entries.getOrPut(player.objectId) { Entry(player.objectId, player.name, player.level) }.also {
++            it.name = player.name
++            it.level = player.level
++        }
++    }
++
++    fun rating(player: Player): Int {
++        load()
++        return entries[player.objectId]?.rating ?: START
++    }
++
++    /** The top of the table, best first; only those who fought at least once. */
++    fun top(n: Int): List<Entry> {
++        load()
++        return entries.values.filter { it.games > 0 }.sortedWith(compareByDescending<Entry> { it.rating }.thenByDescending { it.wins }).take(n)
++    }
++
++    fun place(player: Player): Int? {
++        val me = entries[player.objectId]?.takeIf { it.games > 0 } ?: return null
++        return entries.values.count { it.games > 0 && it.rating > me.rating } + 1
++    }
++
++    /** Scores one duel: [score] is 1 when [a] won, 0 when it lost, 0.5 for a draw. @return the two rating changes. */
++    @Synchronized
++    fun record(a: Player, b: Player, score: Double): Pair<Int, Int> {
++        val ea = of(a)
++        val eb = of(b)
++        val expectedA = 1.0 / (1.0 + 10.0.pow((eb.rating - ea.rating) / 400.0))
++        val da = ((if (ea.games < NEW_GAMES) K_NEW else K) * (score - expectedA)).roundToInt()
++        val db = ((if (eb.games < NEW_GAMES) K_NEW else K) * ((1 - score) - (1 - expectedA))).roundToInt()
++        ea.rating += da
++        eb.rating += db
++        when {
++            score > 0.5 -> { ea.wins++; eb.losses++; ea.streak++; eb.streak = 0 }
++            score < 0.5 -> { eb.wins++; ea.losses++; eb.streak++; ea.streak = 0 }
++            else -> { ea.draws++; eb.draws++; ea.streak = 0; eb.streak = 0 }
++        }
++        val now = System.currentTimeMillis()
++        ea.last = now
++        eb.last = now
++        save(ea)
++        save(eb)
++        return da to db
++    }
++
++    @Synchronized
++    private fun load() {
++        if (loaded) return
++        loaded = true
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.createStatement().use {
++                    it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_duel_ratings (char_id INT UNSIGNED NOT NULL PRIMARY KEY, " +
++                            "name VARCHAR(35) NOT NULL, level TINYINT UNSIGNED NOT NULL, rating INT NOT NULL, wins INT NOT NULL, " +
++                            "losses INT NOT NULL, draws INT NOT NULL, streak INT NOT NULL, last_duel BIGINT NOT NULL)")
++                }
++                con.prepareStatement("SELECT char_id, name, level, rating, wins, losses, draws, streak, last_duel FROM autobot_duel_ratings").use { ps ->
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) entries[rs.getInt(1)] = Entry(rs.getInt(1), rs.getString(2), rs.getInt(3), rs.getInt(4),
++                                rs.getInt(5), rs.getInt(6), rs.getInt(7), rs.getInt(8), rs.getLong(9))
++                    }
++                }
++            }
++            println("Autobots duels: loaded ${entries.size} duel ratings")
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    private fun save(e: Entry) {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("REPLACE INTO autobot_duel_ratings (char_id, name, level, rating, wins, losses, draws, streak, last_duel) " +
++                        "VALUES (?,?,?,?,?,?,?,?,?)").use { ps ->
++                    ps.setInt(1, e.charId); ps.setString(2, e.name); ps.setInt(3, e.level.coerceIn(0, 255)); ps.setInt(4, e.rating)
++                    ps.setInt(5, e.wins); ps.setInt(6, e.losses); ps.setInt(7, e.draws); ps.setInt(8, e.streak); ps.setLong(9, e.last)
++                    ps.executeUpdate()
++                }
++            }
++        } catch (ex: Exception) {
++            ex.printStackTrace()
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/duel/DuelVisit.kt b/src/main/kotlin/dev/l2j/autobots/population/duel/DuelVisit.kt
+new file mode 100644
+index 0000000..c3b90d3
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/duel/DuelVisit.kt
+@@ -0,0 +1,125 @@
++package dev.l2j.autobots.population.duel
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.behaviors.sequences.WalkToSequence
++import dev.l2j.autobots.extensions.location
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.model.location.Location
++
++/**
++ * A visit to the duel ground of the bot's town, like a player who takes a break from hunting to test themselves: to
++ * town, out to the ground, a rest until healthy, then up to [MAX_DUELS] duels with whoever comes ([Duels.look]), and
++ * back to the usual life once done or when nobody turns up.
++ */
++internal class DuelVisit(private val bot: Autobot) {
++
++    private var startedAt = 0L
++    private var lastActionAt = 0L
++    private var spot: Location? = null
++    private var walkFailures = 0
++    private var arrived = false
++    private var duelsAtStart = 0
++    private var maxDuels = 1
++    private var lastDone = 0
++
++    fun begin() {
++        startedAt = System.currentTimeMillis()
++        lastActionAt = startedAt
++        spot = null
++        walkFailures = 0
++        arrived = false
++        duelsAtStart = Duels.finished(bot)
++        maxDuels = Rnd.get(1, MAX_DUELS)
++        lastDone = 0
++    }
++
++    /** Leaving the ground: no more challenges for this bot. */
++    fun end() = Duels.stopWaiting(bot)
++
++    /**
++     * One step of the visit. [goToTown] walks or reads a scroll to the nearest town, false when that failed.
++     * @return true when the visit is over and the next segment should start.
++     */
++    suspend fun update(goToTown: suspend () -> Boolean): Boolean {
++        if (bot.isDead || bot.isMoving || bot.isInDuel) return false
++        val now = System.currentTimeMillis()
++        val done = Duels.finished(bot) - duelsAtStart
++        if (done >= maxDuels) return over("fought $done duel(s)")
++        if (done != lastDone) {
++            lastDone = done
++            lastActionAt = now
++        }
++        if (now - startedAt > MAX_VISIT_MS) return over("visit took too long after $done duel(s)")
++        if (bot.karma > 0) return over("has karma")
++        val ground = DuelGrounds.of(bot) ?: return over("no duel ground near this town")
++        val target = spot ?: Location(ground.x + Rnd.get(-SPREAD, SPREAD), ground.y + Rnd.get(-SPREAD, SPREAD), ground.z).also { spot = it }
++
++        if (distance(bot.location(), target) > ARRIVAL_RADIUS * 2) {
++            if (arrived) {
++                // Moved off (a duel's end, a knock-back): back to the spot without the town trip.
++                walk(target)
++                return walkFailures >= MAX_WALK_FAILURES && over("can't get back to the duel ground")
++            }
++            // From the field: first to town, like any errand, then the short walk out.
++            if (!Errands.atTown(bot) && distance(bot.location(), ground) > FAR_FROM_GROUND) {
++                if (bot.isSitting) bot.standUp()
++                return !goToTown() && over("can't get to town for the duel ground")
++            }
++            walk(target)
++            return walkFailures >= MAX_WALK_FAILURES && over("can't walk to the duel ground ${ground.x},${ground.y},${ground.z}")
++        }
++        if (!arrived) {
++            arrived = true
++            lastActionAt = now
++            Duels.log("${bot.name} (lv ${bot.level}, ${DuelRating.rating(bot)}) came to the duel ground at ${bot.x},${bot.y},${bot.z}")
++        }
++        Duels.startWaiting(bot)
++        if (now - lastActionAt > WAIT_MS) return over("nobody to fight for ${WAIT_MS / 60_000} min")
++
++        // A player rests up before the next fight; the core wants half HP and MP, a fair fight wants more.
++        if (!Duels.ready(bot)) {
++            if (!bot.isSitting && bot.target == null) bot.sitDown()
++            return false
++        }
++        if (bot.isSitting) {
++            bot.standUp()
++            return false
++        }
++        Duels.look(bot)
++        if (bot.isInDuel) lastActionAt = now
++        return false
++    }
++
++    private suspend fun walk(target: Location) {
++        if (bot.isSitting) {
++            bot.standUp()
++            return
++        }
++        var failed = false
++        WalkToSequence(bot, target, ARRIVAL_RADIUS) { failed = true }.execute()
++        if (failed) walkFailures++
++    }
++
++    private fun over(why: String): Boolean {
++        end()
++        Duels.log("${bot.name} (lv ${bot.level}) leaves the duel ground: $why")
++        return true
++    }
++
++    companion object {
++        private const val MAX_DUELS = 3
++        private const val SPREAD = 150
++        private const val ARRIVAL_RADIUS = 150
++        private const val FAR_FROM_GROUND = 3000.0
++        private const val MAX_WALK_FAILURES = 3
++        private const val WAIT_MS = 15 * 60_000L
++        private const val MAX_VISIT_MS = 40 * 60_000L
++
++        /** Whether the session may offer a visit to the duel ground now. */
++        fun canVisit(bot: Autobot): Boolean = Duels.enabled && AutobotData.settings.duelChancePercent > 0 && !bot.isInParty &&
++                bot.level >= AutobotData.settings.duelMinLevel && bot.karma == 0 && DuelGrounds.of(bot) != null
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/duel/Duels.kt b/src/main/kotlin/dev/l2j/autobots/population/duel/Duels.kt
+new file mode 100644
+index 0000000..5fc5a42
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/duel/Duels.kt
+@@ -0,0 +1,391 @@
++package dev.l2j.autobots.population.duel
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.population.SessionPlan
++import dev.l2j.autobots.population.economy.Temper
++import dev.l2j.autobots.population.group.launchSafely
++import dev.l2j.autobots.population.llm.Attention.isLiveAudience
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.delay
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.manager.DuelManager
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.entity.Duel.DuelState
++import net.sf.l2j.gameserver.network.SystemMessageId
++import net.sf.l2j.gameserver.network.serverpackets.ExDuelAskStart
++import net.sf.l2j.gameserver.network.serverpackets.SystemMessage
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.atomic.AtomicInteger
++import kotlin.math.abs
++
++/**
++ * Duels of population bots (spec in docs/duels.md): bots waiting at a town's duel ground challenge each other and the
++ * players around, a player's `/duel` is answered like the client would, the duel itself is the core's ([DuelManager]),
++ * and every finished 1 vs 1 duel moves the Elo rating of both sides ([DuelRating]).
++ */
++internal object Duels {
++    private const val LOOK_EVERY_MS = 3000L
++    private const val LOOK_RADIUS = 1200
++    private const val PLAYER_RADIUS = 1000
++    private const val CORE_RANGE = 2000
++    private const val READY_SHARE = 0.9
++    private const val REMATCH_MS = 30 * 60_000L
++    private const val ASK_EVERY_MS = 10 * 60_000L
++    private const val ASK_AFTER_DECLINES_MS = 60 * 60_000L
++    private const val ANSWER_WAIT_MS = 20_000L
++    private const val PLAYER_LEVEL_GAP = 10
++    private const val STRONGER_PLAYER = 5
++    private const val STRONGER_PLAYER_GAMBLER = 10
++    private const val SURRENDER_HP = 0.15
++    private const val STREAK_SHOUT = 3
++    private const val UPSET_RATING = 100
++    private const val EXPLAIN_REFUSAL_PERCENT = 60
++
++    private val settings get() = AutobotData.settings
++    val enabled get() = settings.duelsEnabled
++
++    /** Bots standing at a duel ground and looking for an opponent -> since when. */
++    private val waiting = ConcurrentHashMap<Int, Long>()
++    /** (lower id, higher id) -> when they last fought: no rematch right away. */
++    private val lastPair = ConcurrentHashMap<Long, Long>()
++    private val nextLook = ConcurrentHashMap<Int, Long>()
++    /** Duels each bot finished, counted by the ground visit. */
++    private val fought = ConcurrentHashMap<Int, Int>()
++    /** Duel ids where a bot already thought about surrendering. */
++    private val surrenderThought: MutableSet<Long> = ConcurrentHashMap.newKeySet()
++
++    /** A bot's challenge to a player: when, by whom, whether it is still unanswered, and how often the player said no. */
++    private class Ask(val at: Long, val botId: Int, var pending: Boolean, var declines: Int)
++    private val asked = ConcurrentHashMap<Int, Ask>()
++
++    private val challenges = AtomicInteger()
++    private val playerChallenges = AtomicInteger()
++    private val accepted = AtomicInteger()
++    private val declined = AtomicInteger()
++    private val duels = AtomicInteger()
++    private val draws = AtomicInteger()
++    private val cancelled = AtomicInteger()
++    private val withPlayers = AtomicInteger()
++
++    private fun key(a: Int, b: Int) = (minOf(a, b).toLong() shl 32) or (maxOf(a, b).toLong() and 0xffffffffL)
++
++    fun log(message: String) {
++        if (settings.duelLog) println("Autobots duels: $message")
++    }
++
++    // ---------------------------------------------------------------- the duel itself
++
++    /** The other side of the bot's 1 vs 1 duel, or null when it is in none. */
++    fun opponent(bot: Player): Player? {
++        if (!bot.isInDuel) return null
++        val duel = DuelManager.getInstance().getDuel(bot.duelId) ?: return null
++        if (duel.isPartyDuel) return null
++        return if (duel.playerA === bot) duel.playerB else duel.playerA
++    }
++
++    fun inDuel(bot: Player) = opponent(bot) != null
++
++    /** A cautious bot about to lose may give up instead (once a duel, a coin flip). @return true when it surrendered. */
++    fun maybeSurrender(bot: Autobot): Boolean {
++        if (bot.duelState != DuelState.DUELLING || bot.currentHp > bot.maxHp * SURRENDER_HP) return false
++        if (Temper.of(bot.objectId) != Temper.Cautious || !surrenderThought.add((bot.duelId.toLong() shl 32) or bot.objectId.toLong())) return false
++        if (Rnd.get(100) >= 50) return false
++        DuelManager.getInstance().doSurrender(bot)
++        log("${bot.name} surrenders to ${opponent(bot)?.name} at hp ${bot.currentHp.toInt()}/${bot.maxHp}")
++        return true
++    }
++
++    /** Called by the core (Duel.endDuel) for every duel: rates a finished 1 vs 1 duel and lets the bots react. */
++    fun onDuelEnd(a: Player, b: Player, party: Boolean, result: String) {
++        if (party) return
++        val score = when (result) {
++            "TEAM_1_WIN", "TEAM_2_SURRENDER" -> 1.0
++            "TEAM_2_WIN", "TEAM_1_SURRENDER" -> 0.0
++            "TIMEOUT" -> 0.5
++            else -> {
++                cancelled.incrementAndGet()
++                log("${a.name} vs ${b.name}: cancelled")
++                finish(a, b)
++                return
++            }
++        }
++        val beforeA = DuelRating.rating(a)
++        val beforeB = DuelRating.rating(b)
++        val (da, db) = DuelRating.record(a, b, score)
++        duels.incrementAndGet()
++        if (score == 0.5) draws.incrementAndGet()
++        if (a !is Autobot || b !is Autobot) withPlayers.incrementAndGet()
++        finish(a, b)
++        val text = when (score) {
++            1.0 -> "${a.name} (lv ${a.level}) beat ${b.name} (lv ${b.level})"
++            0.0 -> "${b.name} (lv ${b.level}) beat ${a.name} (lv ${a.level})"
++            else -> "${a.name} (lv ${a.level}) and ${b.name} (lv ${b.level}) drew"
++        }
++        log("$text${if (result.endsWith("SURRENDER")) " by surrender" else ""}: " +
++                "${a.name} $beforeA${sign(da)} -> ${beforeA + da}, ${b.name} $beforeB${sign(db)} -> ${beforeB + db}")
++        react(a, b, score, beforeA, beforeB)
++        react(b, a, 1 - score, beforeB, beforeA)
++    }
++
++    private fun sign(d: Int) = if (d >= 0) "+$d" else "$d"
++
++    private fun finish(a: Player, b: Player) {
++        val now = System.currentTimeMillis()
++        lastPair[key(a.objectId, b.objectId)] = now
++        for ((me, other) in listOf(a to b, b to a)) {
++            if (me is Autobot) fought.merge(me.objectId, 1, Int::plus)
++            asked[me.objectId]?.takeIf { it.botId == other.objectId && it.pending }?.let {
++                it.pending = false
++                it.declines = 0
++                accepted.incrementAndGet()
++            }
++        }
++    }
++
++    /** A bot's word after the duel: a gg, a boast in shout after a streak, a line in clan chat after beating a stronger one. */
++    private fun react(me: Player, other: Player, score: Double, mine: Int, theirs: Int) {
++        if (me !is Autobot || me.life == null) return
++        val ru = russian(me, other)
++        launchSafely {
++            delay(Rnd.get(2000L, 5000L))
++            if (!me.isOnline) return@launchSafely
++            when {
++                score > 0.5 -> if (Rnd.get(100) < 70) me.say(line(Line.Won, ru))
++                score < 0.5 -> if (Rnd.get(100) < 80) me.say(line(Line.Lost, ru))
++                else -> if (Rnd.get(100) < 50) me.say(line(Line.Draw, ru))
++            }
++            if (score <= 0.5) return@launchSafely
++            val streak = DuelRating.of(me).streak
++            if (streak >= STREAK_SHOUT && streak % STREAK_SHOUT == 0) {
++                delay(Rnd.get(3000L, 8000L))
++                me.shout(line(Line.Streak, ru).format(streak))
++            } else if (theirs - mine >= UPSET_RATING && me.clan != null) {
++                delay(Rnd.get(3000L, 8000L))
++                me.clanSay(line(Line.Upset, ru).format(other.name, theirs))
++            }
++        }
++    }
++
++    // ---------------------------------------------------------------- at the duel ground
++
++    fun finished(bot: Player): Int = fought[bot.objectId] ?: 0
++
++    fun startWaiting(bot: Player) {
++        waiting.putIfAbsent(bot.objectId, System.currentTimeMillis())
++    }
++
++    fun stopWaiting(bot: Player) {
++        waiting.remove(bot.objectId)
++    }
++
++    /** Healthy enough for a fair fight and free: the core asks for half, a player would wait for more. */
++    fun ready(bot: Player) = !bot.isDead && !bot.isInDuel && !bot.isProcessingRequest && bot.karma == 0 &&
++            bot.currentHp >= bot.maxHp * READY_SHARE && bot.currentMp >= bot.maxMp * READY_SHARE
++
++    private fun waits(bot: Autobot) = waiting.containsKey(bot.objectId) && bot.isOnline && bot.life?.activity == SessionPlan.Activity.Duel
++
++    /** A waiting bot looks around every few seconds: a bot to fight, else a player to challenge. */
++    fun look(bot: Autobot) {
++        val now = System.currentTimeMillis()
++        if (now < (nextLook[bot.objectId] ?: 0L)) return
++        nextLook[bot.objectId] = now + LOOK_EVERY_MS
++        sweepAsks(now)
++        if (!ready(bot) || !bot.canDuel()) return
++        // The lower object id challenges, so two waiting bots never challenge each other at once.
++        val mine = DuelRating.rating(bot)
++        val rival = bot.getKnownTypeInRadius(Autobot::class.java, LOOK_RADIUS)
++                .filter { it.objectId > bot.objectId && waits(it) && ready(it) && abs(it.level - bot.level) <= settings.duelLevelGap &&
++                        now - (lastPair[key(bot.objectId, it.objectId)] ?: 0L) > REMATCH_MS }
++                .minByOrNull { abs(DuelRating.rating(it) - mine) }
++        if (rival != null) {
++            challengeBot(bot, rival)
++            return
++        }
++        val player = bot.getKnownTypeInRadius(Player::class.java, PLAYER_RADIUS)
++                .filter { it.isLiveAudience() && !it.isDead && !it.isInDuel && it.karma == 0 && abs(it.level - bot.level) <= PLAYER_LEVEL_GAP &&
++                        mayAsk(it, now) }
++                .minByOrNull { distance(bot, it) }
++        if (player != null) challengePlayer(bot, player)
++    }
++
++    /** Two bots at a ground: the same checks as RequestDuelStart and an answer like RequestDuelAnswerStart. */
++    private fun challengeBot(a: Autobot, b: Autobot): Boolean {
++        if (!a.canDuel() || !b.canDuel() || a.isProcessingRequest || b.isProcessingRequest || !a.isInsideRadius(b, CORE_RANGE, false, false)) return false
++        challenges.incrementAndGet()
++        accepted.incrementAndGet()
++        prepare(a)
++        prepare(b)
++        a.removeMeFromPartyMatch()
++        b.removeMeFromPartyMatch()
++        lastPair[key(a.objectId, b.objectId)] = System.currentTimeMillis()
++        DuelManager.getInstance().addDuel(a, b, false)
++        log("${a.name} (lv ${a.level}, ${DuelRating.rating(a)}) challenged ${b.name} (lv ${b.level}, ${DuelRating.rating(b)}) at ${a.x},${a.y},${a.z}")
++        return true
++    }
++
++    /** A player near a ground: the bot asks in chat and sends the usual challenge window; the player answers in the client. */
++    private fun challengePlayer(bot: Autobot, player: Player) {
++        if (!player.canDuel() || player.isProcessingRequest || bot.isProcessingRequest) return
++        val now = System.currentTimeMillis()
++        asked[player.objectId] = Ask(now, bot.objectId, true, asked[player.objectId]?.declines ?: 0)
++        challenges.incrementAndGet()
++        playerChallenges.incrementAndGet()
++        bot.say(line(Line.Challenge, russian(bot, player)).format(player.name))
++        bot.removeMeFromPartyMatch()
++        player.removeMeFromPartyMatch()
++        bot.onTransactionRequest(player)
++        player.sendPacket(ExDuelAskStart(bot.name, false))
++        player.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_HAS_CHALLENGED_YOU_TO_A_DUEL).addCharName(bot))
++        log("${bot.name} (lv ${bot.level}) challenged player ${player.name} (lv ${player.level})")
++    }
++
++    private fun mayAsk(player: Player, now: Long): Boolean {
++        val ask = asked[player.objectId] ?: return true
++        if (ask.pending) return false
++        return now - ask.at > if (ask.declines >= 2) ASK_AFTER_DECLINES_MS else ASK_EVERY_MS
++    }
++
++    /** A challenge to a player left unanswered or refused counts as a no; one that turned into a duel as a yes. */
++    private fun sweepAsks(now: Long) {
++        for ((playerId, ask) in asked) {
++            if (!ask.pending || now - ask.at < ANSWER_WAIT_MS) continue
++            ask.pending = false
++            val player = net.sf.l2j.gameserver.model.World.getInstance().getPlayer(playerId)
++            if (player != null && opponent(player)?.objectId == ask.botId) {
++                ask.declines = 0
++                accepted.incrementAndGet()
++            } else {
++                ask.declines++
++                declined.incrementAndGet()
++                log("player ${player?.name ?: playerId} did not take the duel (${ask.declines} in a row)")
++            }
++        }
++        asked.entries.removeIf { !it.value.pending && now - it.value.at > ASK_AFTER_DECLINES_MS * 2 }
++    }
++
++    /** The bot drops whatever it was doing for the duel. */
++    private fun prepare(bot: Autobot) {
++        bot.cancelSequence()
++        bot.abortAttack()
++        bot.abortCast()
++        bot.target = null
++        if (bot.isSitting) bot.standUp()
++    }
++
++    // ---------------------------------------------------------------- a player's /duel
++
++    /** Called by the core (RequestDuelStart) once a player challenged a bot: the bot never sees the window and answers in code. */
++    fun onChallenge(requestor: Player, bot: Autobot, party: Boolean) {
++        if (bot.life == null || !bot.isOnline) return
++        launchSafely {
++            delay(Rnd.get(1000L, 3000L))
++            if (bot.activeRequester !== requestor) return@launchSafely
++            val refusal = refusal(bot, requestor, party)
++            answer(bot, requestor, refusal == null)
++            if (refusal != null && Rnd.get(100) < EXPLAIN_REFUSAL_PERCENT) {
++                delay(Rnd.get(1000L, 3000L))
++                bot.tell(requestor.name, line(refusal, true))
++            }
++        }
++    }
++
++    /** Why the bot turns the challenge down, or null to accept. */
++    private fun refusal(bot: Autobot, requestor: Player, party: Boolean): Line? {
++        if (!enabled) return Line.NotNow
++        if (party) return Line.Party
++        if (requestor.karma > 0) return Line.Pk
++        if (bot.isInStoreMode || bot.isDead || bot.isInDuel || !bot.canDuel()) return Line.Busy
++        if (bot.life?.quests?.isActive == true) return Line.Busy
++        val temper = Temper.of(bot.objectId)
++        if (requestor.level - bot.level > if (temper == Temper.Gambler) STRONGER_PLAYER_GAMBLER else STRONGER_PLAYER) return Line.TooStrong
++        if (bot.life?.activity == SessionPlan.Activity.Duel) return null
++        val chance = when (temper) { Temper.Gambler -> 90; Temper.Normal -> 70; Temper.Cautious -> 40 }
++        return if (Rnd.get(100) < chance) null else Line.NotNow
++    }
++
++    /** The same steps as RequestDuelAnswerStart for a 1 vs 1 duel. */
++    private fun answer(bot: Autobot, requestor: Player, accept: Boolean) {
++        bot.activeRequester = null
++        requestor.onTransactionResponse()
++        if (!accept) {
++            declined.incrementAndGet()
++            requestor.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_HAS_DECLINED_YOUR_CHALLENGE_TO_A_DUEL).addCharName(bot))
++            log("${bot.name} (lv ${bot.level}) declined the duel of ${requestor.name} (lv ${requestor.level})")
++            return
++        }
++        if (!requestor.canDuel()) {
++            requestor.sendPacket(requestor.noDuelReason)
++            return
++        }
++        if (!bot.canDuel()) {
++            requestor.sendPacket(bot.noDuelReason)
++            return
++        }
++        if (!requestor.isInsideRadius(bot, CORE_RANGE, false, false)) {
++            requestor.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_CANNOT_RECEIVE_A_DUEL_CHALLENGE_BECAUSE_S1_IS_TOO_FAR_AWAY).addCharName(bot))
++            return
++        }
++        accepted.incrementAndGet()
++        challenges.incrementAndGet()
++        requestor.removeMeFromPartyMatch()
++        bot.removeMeFromPartyMatch()
++        requestor.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_HAS_ACCEPTED_YOUR_CHALLENGE_TO_A_DUEL_THE_DUEL_WILL_BEGIN_IN_A_FEW_MOMENTS).addCharName(bot))
++        prepare(bot)
++        DuelManager.getInstance().addDuel(requestor, bot, false)
++        log("${bot.name} (lv ${bot.level}, ${DuelRating.rating(bot)}) accepted the duel of ${requestor.name} (lv ${requestor.level}, ${DuelRating.rating(requestor)})")
++    }
++
++    // ---------------------------------------------------------------- the table for players
++
++    const val COMMAND = ".duels"
++
++    /** `.duels`: the top 10 and the player's own line. @return true when the line was the command. */
++    fun onCommand(player: Player, text: String): Boolean {
++        if (text.trim().lowercase() != COMMAND) return false
++        val top = DuelRating.top(10)
++        if (top.isEmpty()) {
++            player.sendMessage("Дуэли: рейтинга пока нет — никто не дрался.")
++            return true
++        }
++        player.sendMessage("Дуэли — лучшие (рейтинг, победы/поражения/ничьи):")
++        top.forEachIndexed { i, e -> player.sendMessage("${i + 1}. ${e.name} (${e.level}) — ${e.rating}, ${e.wins}/${e.losses}/${e.draws}") }
++        val place = DuelRating.place(player)
++        if (place == null) player.sendMessage("Вы ещё не дрались на дуэлях: рейтинг ${DuelRating.START}.")
++        else DuelRating.of(player).let { player.sendMessage("Вы: $place место, ${it.rating}, ${it.wins}/${it.losses}/${it.draws}") }
++        return true
++    }
++
++    /** One line every 10 minutes: who is at the grounds and how the duels went. */
++    fun summary(online: Collection<Autobot>) {
++        if (!enabled || !settings.duelLog) return
++        val leader = DuelRating.top(1).firstOrNull()?.let { "${it.name} ${it.rating} ${it.wins}/${it.losses}/${it.draws}" } ?: "-"
++        println("Autobots duels summary: atGround=${online.count { waits(it) }} inDuel=${online.count { it.isInDuel }} " +
++                "challenges=${challenges.getAndSet(0)} toPlayers=${playerChallenges.getAndSet(0)} accepted=${accepted.getAndSet(0)} " +
++                "declined=${declined.getAndSet(0)} duels=${duels.getAndSet(0)} draws=${draws.getAndSet(0)} cancelled=${cancelled.getAndSet(0)} " +
++                "withPlayers=${withPlayers.getAndSet(0)} leader=[$leader]")
++        waiting.keys.removeIf { id -> online.none { it.objectId == id && waits(it) } }
++    }
++
++    // ---------------------------------------------------------------- lines
++
++    /** A player hears Russian (the server's players speak it); between bots it is a trait of the speaker. */
++    private fun russian(bot: Player, other: Player) = other.isLiveAudience() || Math.floorMod(bot.objectId * 17 + 3, 100) < 70
++
++    enum class Line(val ru: List<String>, val en: List<String>) {
++        Challenge(listOf("%s, дуэль?", "го дуэль", "дуэль?", "%s, на дуэль?"), listOf("%s, duel?", "wanna duel?", "duel?")),
++        Won(listOf("гг", "gg", "изи", "гг вп"), listOf("gg", "gg wp", "ez")),
++        Lost(listOf("гг", "гг вп", "лагнуло", "ещё раз потом"), listOf("gg wp", "gg", "next time")),
++        Draw(listOf("ничья", "время вышло("), listOf("draw", "time's up")),
++        Streak(listOf("%d побед подряд на дуэлях, кто следующий?", "уже %d подряд на дуэлях, есть кто сильнее?"),
++                listOf("%d duel wins in a row, who's next?", "%d in a row, anyone stronger?")),
++        Upset(listOf("положил на дуэли %s (рейтинг %d)", "выиграл дуэль у %s, а у него %d"), listOf("beat %s in a duel (rating %d)")),
++        Busy(listOf("не сейчас, занят", "занят"), listOf("not now, busy")),
++        TooStrong(listOf("ты слишком сильный для меня", "не, ты сильнее"), listOf("you're way too strong for me")),
++        NotNow(listOf("не хочу, может позже", "не сейчас"), listOf("nah, maybe later")),
++        Party(listOf("пати на пати не играю", "только один на один"), listOf("no party duels")),
++        Pk(listOf("с пк не дуэлюсь"), listOf("no duels with pk"));
++    }
++
++    private fun line(line: Line, russian: Boolean): String = (if (russian) line.ru else line.en).random()
++}
