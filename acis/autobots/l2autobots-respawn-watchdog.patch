@@ -1,0 +1,90 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/Autobot.kt b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+index 44fd0ff..96acef9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/Autobot.kt
++++ b/src/main/kotlin/dev/l2j/autobots/Autobot.kt
+@@ -121,10 +121,21 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+             // A quest bot held by one sequence for minutes says which, so a hung walk shows on the stand.
+             val now = System.currentTimeMillis()
+             if (sequenceSince == 0L || sequenceSeen !== activeSequence) { sequenceSince = now; sequenceSeen = activeSequence }
+-            if (life?.quests?.isActive == true && now - sequenceSince > 120_000L && now - sequenceLoggedAt > 60_000L) {
++            // Every population bot, not just a quester: on the 40-76 stand four bots stood in town for two hours
++            // after a death with not a line in the log, held by a sequence that never ended.
++            if (life != null && now - sequenceSince > (if (life?.quests?.isActive == true) 120_000L else 300_000L) && now - sequenceLoggedAt > 60_000L) {
+                 sequenceLoggedAt = now
+                 println("Autobots life: $name held by ${activeSequence?.javaClass?.simpleName} for ${(now - sequenceSince) / 1000}s" +
+-                        " at $x,$y,$z moving=$isMoving sitting=$isSitting")
++                        " at $x,$y,$z moving=$isMoving sitting=$isSitting dead=$isDead target=${target?.name}")
++            }
++            // A dead bot's plan is over, and no sequence runs longer than the longest walk budget: let the life go on.
++            if (life != null && (isDead || now - sequenceSince > SEQUENCE_WATCHDOG_MS)) {
++                println("Autobots life: $name drops ${activeSequence?.javaClass?.simpleName} after ${(now - sequenceSince) / 1000}s" +
++                        (if (isDead) " (dead)" else "") + " at $x,$y,$z")
++                cancelSequence()
++                // A sequence stuck outside a suspension point never completes its job; free the bot all the same.
++                activeSequence = null
++                sequenceSince = 0L
+             }
+             return
+         }
+@@ -704,4 +715,6 @@ class Autobot(objectId: Int, template: PlayerTemplate?, app: Appearance?) : Play
+     internal fun cancelSequence() {
+         activeSequence?.cancellationToken?.cancelLambda?.invoke()
+     }
+-}
+\ No newline at end of file
++}
++/** Past any walk budget (15 min on a probed one-way route) and a town trip of several shops: a hung sequence. */
++private const val SEQUENCE_WATCHDOG_MS = 30 * 60 * 1000L
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/SocialBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/SocialBehavior.kt
+index beb96d6..1afab16 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/SocialBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/SocialBehavior.kt
+@@ -38,6 +38,10 @@ internal open class SocialBehavior(val bot: Player, var socialPreferences: Socia
+     }
+ 
+     internal suspend fun onRespawn() {
++        // A population bot's life decides where it goes after a death. The dashboard's walk back to the death spot
++        // has no time limit: on the 40-76 stand (bots logged in with the default respawn action) four bots stood by
++        // the gatekeeper or a wall for two hours.
++        if(bot is Autobot && bot.life != null) return
+         if(bot is Autobot) {
+             when(bot.respawnAction){
+                 RespawnAction.None -> {}
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/ReturnToDeathLocationSequence.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/ReturnToDeathLocationSequence.kt
+index b71d4bb..b6aefb2 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/ReturnToDeathLocationSequence.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/sequences/ReturnToDeathLocationSequence.kt
+@@ -28,9 +28,10 @@ internal class ReturnToDeathLocationSequence(override val bot: Player) : Sequenc
+         val closestGatekeeper = bot.findClosestGatekeeper() ?: return
+         bot.target = closestGatekeeper
+         bot.moveTo(closestGatekeeper.x, closestGatekeeper.y, closestGatekeeper.z)
++        val gatekeeperBy = System.currentTimeMillis() + MAX_WALK_MS
+         while (distance(bot, closestGatekeeper) >= 110) {
+ 
+-            if (bot.isDead) {
++            if (bot.isDead || System.currentTimeMillis() > gatekeeperBy) {
+                 return
+             }
+ 
+@@ -59,9 +60,10 @@ internal class ReturnToDeathLocationSequence(override val bot: Player) : Sequenc
+         val deathLoc = bot.lastDeathLocation!!
+         bot.moveTo(deathLoc.x, deathLoc.y, deathLoc.z)
+         bot.lastDeathLocation = null
++        val deathSpotBy = System.currentTimeMillis() + MAX_WALK_MS
+         while (distance(bot.location(), deathLoc) >= 1500) {
+ 
+-            if (bot.isDead) {
++            if (bot.isDead || System.currentTimeMillis() > deathSpotBy) {
+                 return
+             }
+ 
+@@ -78,4 +80,7 @@ internal class ReturnToDeathLocationSequence(override val bot: Player) : Sequenc
+             delay(Rnd.get(2000, 4000).toLong())
+         }
+     }
+-}
+\ No newline at end of file
++}
++
++/** A straight walk that hasn't arrived by then never will (a wall, a gatekeeper the bot can't get 110 from). */
++private const val MAX_WALK_MS = 5 * 60 * 1000L
