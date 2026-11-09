@@ -1,0 +1,31 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+index da7a286..a3ea095 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/SecondClassQuests.kt
+@@ -108,6 +108,14 @@ internal object SecondClassQuests {
+     private fun mark(questName: String, mark: Int, minLevel: Int, body: PathQuestBuilder.() -> Unit): PathQuest =
+             path(questName, HUMAN_FIGHTER, HUMAN_FIGHTER, mark, "") { level(minLevel); body() }
+ 
++    // Q227: Disrupt Undead, and the spells the Crimson Werewolf allows that clerics and Shillien oracles own: Ice
++    // Bolt, Wind Strike, Vampiric Touch from their mystic days (Disrupt Undead only takes undead targets).
++    // Declared before [quests]: an object's vals are set in source order, and a list declared after [quests] would
++    // still be null while the quests are built.
++    private const val DISRUPT_UNDEAD = 1031
++    private val REFORMER_NUKES = listOf(1184, 1177, 1147)
++    private val REVENANT_NUKES = listOf(DISRUPT_UNDEAD, 1184, 1177)
++
+     val quests: Map<Int, PathQuest> = listOf(
+             // Taken from 36 although the script allows 35: Filaur halfway through wants 36, a bot must not stall there.
+             mark("Q211_TrialOfTheChallenger", MARK_OF_CHALLENGER, 36) {
+@@ -892,11 +900,6 @@ internal object SecondClassQuests {
+     private const val STINGER_WASP_NEEDLE = 2876
+     private const val MARSH_SPIDER_WEB = 2877
+     private const val BLOOD_OF_LEECH = 2878
+-    // Q227: Disrupt Undead, and the spells the Crimson Werewolf allows that clerics and Shillien oracles own: Ice
+-    // Bolt, Wind Strike, Vampiric Touch from their mystic days (Disrupt Undead only takes undead targets).
+-    private const val DISRUPT_UNDEAD = 1031
+-    private val REFORMER_NUKES = listOf(1184, 1177, 1147)
+-    private val REVENANT_NUKES = listOf(DISRUPT_UNDEAD, 1184, 1177)
+     // Q229 items checked by the rules.
+     private const val IKER_LIST = 3310
+     private const val LARA_MEMO = 3314
