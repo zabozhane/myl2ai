@@ -1,0 +1,36 @@
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/model/entity/Duel.java b/aCis_gameserver/java/net/sf/l2j/gameserver/model/entity/Duel.java
+index dd345e4..5100949 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/model/entity/Duel.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/model/entity/Duel.java
+@@ -638,6 +638,9 @@ public class Duel
+ 	 */
+ 	protected void endDuel(DuelResult result)
+ 	{
++		// The bots' duel rating: the result before the players are restored.
++		dev.l2j.autobots.AutobotsManager.INSTANCE.onDuelEnd(_playerA, _playerB, _isPartyDuel, result.name());
++		
+ 		SystemMessage sm = null;
+ 		switch (result)
+ 		{
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestDuelStart.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestDuelStart.java
+index 8194fb1..cfdc445 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestDuelStart.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestDuelStart.java
+@@ -118,6 +118,8 @@ public final class RequestDuelStart extends L2GameClientPacket
+ 				
+ 				activeChar.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_PARTY_HAS_BEEN_CHALLENGED_TO_A_DUEL).addCharName(partyLeader));
+ 				targetChar.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_PARTY_HAS_CHALLENGED_YOUR_PARTY_TO_A_DUEL).addCharName(activeChar));
++				// A bot never sees the ExDuelAskStart window: it answers the challenge in code.
++				dev.l2j.autobots.AutobotsManager.INSTANCE.onDuelChallenge(activeChar, partyLeader, true);
+ 			}
+ 			else
+ 				activeChar.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_IS_BUSY_TRY_LATER).addCharName(partyLeader));
+@@ -136,6 +138,8 @@ public final class RequestDuelStart extends L2GameClientPacket
+ 				
+ 				activeChar.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_HAS_BEEN_CHALLENGED_TO_A_DUEL).addCharName(targetChar));
+ 				targetChar.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_HAS_CHALLENGED_YOU_TO_A_DUEL).addCharName(activeChar));
++				// A bot never sees the ExDuelAskStart window: it answers the challenge in code.
++				dev.l2j.autobots.AutobotsManager.INSTANCE.onDuelChallenge(activeChar, targetChar, false);
+ 			}
+ 			else
+ 				activeChar.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_IS_BUSY_TRY_LATER).addCharName(targetChar));
