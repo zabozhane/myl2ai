@@ -159,10 +159,10 @@ index a07b859..46dedbe 100644
              dev.l2j.autobots.population.llm.ChatMemory.tick()
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Bounties.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Bounties.kt
 new file mode 100644
-index 0000000..27e83d3
+index 0000000..99caab3
 --- /dev/null
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/Bounties.kt
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,512 @@
 +package dev.l2j.autobots.population.group
 +
 +import dev.l2j.autobots.Autobot
@@ -339,6 +339,8 @@ index 0000000..27e83d3
 +        if (killer.clanId != 0 && killer.clanId == pker.clanId) return false
 +        if (killer.allyId != 0 && killer.allyId == pker.allyId) return false
 +        if (killer.isInParty && killer.party === pker.party) return false
++        // Bots share accounts; only a player's own second character is a staged kill.
++        if (killer is Autobot || pker is Autobot) return true
 +        val a = killer.accountName
 +        return a == null || a != pker.accountName
 +    }
