@@ -1,3 +1,15 @@
+## 2026-11-09 — квесты вторых профессий падали при запуске
+
+- После #178 `SecondClassQuests` не инициализировался: NPE «PathQuestBuilder.hunt, parameter nukes». В Kotlin object
+  поля задаются по порядку в файле, а `REVENANT_NUKES` стоял ниже `quests`, поэтому в Q227 приходил null. Дальше
+  `NoClassDefFoundError`, и у ботов каждый тик падал `Gear.summonCrystal → StoreKeeper → LifeBehavior.nextSegment`.
+- Та же ошибка была тихой у `REFORMER_NUKES` (с #172): `spells` допускает null, поэтому охота на Crimson Werewolf и
+  Betrayer шла без заклинаний, обычным боем.
+- `l2autobots-quest-init-order.patch`: `DISRUPT_UNDEAD`, `REFORMER_NUKES`, `REVENANT_NUKES` перенесены выше `quests`.
+  Других полей, объявленных после места использования в инициализаторах объектов нет (проверены все object модуля).
+- Проверка: модуль собран локально, `SecondClassQuests` загружен в JVM: без патча NPE как на стенде, с патчем
+  23 квеста и оба списка заполнены.
+
 ## 2026-11-07 — путь к Evil Eye Lord по пробе геодаты
 
 - Серверная проба «только вперёд» от посадки Cave of Trials (9323,-112504,-2536): Evil Eye Lord достижим по нижнему
