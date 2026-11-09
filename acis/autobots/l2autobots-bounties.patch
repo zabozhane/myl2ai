@@ -1,0 +1,677 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 489d82c..859bb46 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -69,6 +69,14 @@
+   <mentorMaxBonds>10</mentorMaxBonds>
+   <mentorBotChancePercent>10</mentorBotChancePercent>
+   <mentorMinutes>30</mentorMinutes>
++  <!-- Bounties on PKers (docs/bounties.md): a PK puts a price on the killer's head, bountyPerLevel x its level from the
++       guards per PK (at most 5) plus a share of a bot victim's adena. Up to bountyHunters bots nearby go after the PKer;
++       whoever kills it while it has karma (bot or player) gets the money. Lifted when the karma is gone or after 3
++       days without a PK, the victims' shares go back. A whisper "награды" / "bounty" to any bot lists the heads. -->
++  <bountiesEnabled>true</bountiesEnabled>
++  <bountyHunters>3</bountyHunters>
++  <bountyPerLevel>1000</bountyPerLevel>
++  <bountyLog>true</bountyLog>
+   <!-- Bots gather parties on their own (a healer from level 25, then tank, buffer, spoiler and damage dealers),
+        shout for missing members and answer players who look for a group in chat. At most this percent of the
+        online population plays in parties; the rest hunt alone. groupLog prints every formed party. -->
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index 5c9c79b..90879a7 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -174,7 +174,8 @@ object AutobotsManager {
+             2 -> { // pm "
+                 if(target == null) return false
+                 val bot = activeBots.getOrElse(target) {null} ?: return false
+-                if (!dev.l2j.autobots.population.group.Mentors.onWhisper(chatter, bot, text) &&
++                if (!dev.l2j.autobots.population.group.Bounties.onWhisper(chatter, bot, text) &&
++                        !dev.l2j.autobots.population.group.Mentors.onWhisper(chatter, bot, text) &&
+                         !dev.l2j.autobots.population.notice.PlayerNotice.onWhisper(chatter, bot, text) &&
+                         !dev.l2j.autobots.population.news.Rumors.onWhisper(chatter, bot, text) &&
+                         !dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index e53b251..9efb128 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -271,7 +271,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+ 
+     /** Fights the enemy [dev.l2j.autobots.population.group.ClanWars] picks. @return true while there is one. */
+     private suspend fun warFight(bot: Autobot): Boolean {
+-        val enemy = dev.l2j.autobots.population.group.ClanWars.fightTarget(bot)
++        val enemy = dev.l2j.autobots.population.group.ClanWars.fightTarget(bot) ?: dev.l2j.autobots.population.group.Bounties.fightTarget(bot)
+         if(enemy == null) {
+             // The war fight is over (the flag ran out, the enemy fled): no hit lands on someone no longer fair game.
+             val victim = warEnemy
+@@ -311,7 +311,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+     private fun shouldAttackPlayer() : Boolean {
+         if(player.target !is Player)
+             return false
+-        if(player is Autobot && dev.l2j.autobots.population.group.ClanWars.isFightTarget(player, player.target as Creature))
++        if(player is Autobot && (dev.l2j.autobots.population.group.ClanWars.isFightTarget(player, player.target as Creature) ||
++                dev.l2j.autobots.population.group.Bounties.isFightTarget(player, player.target as Creature)))
+             return true
+         
+         return when(combatPreferences.attackPlayerType){
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index a94cbea..420007d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -60,6 +60,10 @@ internal data class AutobotSettings(
+         @JsonProperty("mentorMaxBonds") var mentorMaxBonds: Int = 10,
+         @JsonProperty("mentorBotChancePercent") var mentorBotChancePercent: Int = 10,
+         @JsonProperty("mentorMinutes") var mentorMinutes: Int = 30,
++        @JsonProperty("bountiesEnabled") var bountiesEnabled: Boolean = true,
++        @JsonProperty("bountyHunters") var bountyHunters: Int = 3,
++        @JsonProperty("bountyPerLevel") var bountyPerLevel: Int = 1000,
++        @JsonProperty("bountyLog") var bountyLog: Boolean = true,
+         @JsonProperty("groupFinderEnabled") var groupFinderEnabled: Boolean = true,
+         @JsonProperty("groupFinderMinLevel") var groupFinderMinLevel: Int = 10,
+         @JsonProperty("groupMaxPopulationPercent") var groupMaxPopulationPercent: Int = 40,
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index d49488a..0ddcb35 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -238,6 +238,8 @@ object OfflineFarmManager {
+ 
+     /** Core calls this once after a successful death, before Player applies XP/item penalties. */
+     fun reportDeath(player: Player, killer: Creature?) {
++        // Every player's death passes here (Player.doDie): bounties on PKers are posted and paid out.
++        dev.l2j.autobots.population.group.Bounties.onDeath(player, killer)
+         if (player is Autobot || !isFarming(player)) return
+         try {
+             val by = when {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 8041721..9eabd41 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -684,6 +684,12 @@ internal class LifeBehavior(private val bot: Autobot) {
+             return
+         }
+ 
++        // A bounty hunter goes after its PKer instead of its spot (docs/bounties.md).
++        if (!bot.isInParty) dev.l2j.autobots.population.group.Bounties.destination(bot)?.let {
++            chaseBounty(it, inTown)
++            return
++        }
++
+         // A party leader may take the party to a raid boss instead of its spot.
+         if (bot.isInParty && bot.party.leader === bot) {
+             RaidPlanner.consider(bot)
+@@ -935,6 +941,34 @@ internal class LifeBehavior(private val bot: Autobot) {
+         if (gatekeeperFailed && distance(bot.location(), target.location) > MAX_TRAVEL_ON_FOOT) abandon(target)
+     }
+ 
++    /**
++     * On the way to a PKer: a gatekeeper from town when it is far, then on foot one leg at a time (the PKer moves, the
++     * goal is checked again after each leg). Close to it the usual combat tick finds it and attacks.
++     */
++    private suspend fun chaseBounty(goal: Location, inTown: Boolean) {
++        dropSpot()
++        if (bot.isSitting) {
++            bot.standUp()
++            return
++        }
++        val remaining = distance(bot.location(), goal)
++        if (remaining < BOUNTY_LOOK_RANGE) {
++            bot.combatBehavior.onUpdate()
++            // Not seen yet (behind a hill, moved on): walk to the rumor and look again.
++            if (bot.target == null && !bot.isMoving && remaining > SPOT_RADIUS / 3)
++                WalkToSequence(bot, goal, 150) {}.execute()
++            return
++        }
++        val exit = if (inTown && !gatekeeperFailed && remaining > BOUNTY_RIDE) gatekeeperExitFor(goal) else null
++        if (exit != null) {
++            TravelByGatekeeperSequence(bot, exit) { gatekeeperFailed = true }.execute()
++            return
++        }
++        var failed = false
++        WalkToSequence(bot, legToward(goal), PARTY_LEG_ARRIVAL) { failed = true }.execute()
++        if (failed) dev.l2j.autobots.population.group.Bounties.giveUp(bot, "no way to ${goal.x},${goal.y}")
++    }
++
+     /** The leader on its way to a raid boss: a gatekeeper from town, then on foot, one leg at a time. */
+     private suspend fun travelToRaid(destination: Location, inTown: Boolean) {
+         if (bot.isSitting) {
+@@ -995,6 +1029,10 @@ internal class LifeBehavior(private val bot: Autobot) {
+         private const val DEADLY_SPOT_RADIUS = 5000
+         private const val PARTY_LEG = 2000.0
+         private const val PARTY_LEG_ARRIVAL = 150
++        /** A bounty hunter this close to where the PKer is looks around and fights instead of walking on. */
++        private const val BOUNTY_LOOK_RANGE = 1200
++        /** Farther than this from town a bounty hunter takes a gatekeeper. */
++        private const val BOUNTY_RIDE = 12000
+         private const val MAX_PLAYERS_AT_SPOT = 6
+         private const val MIN_WALK_SAVED_BY_TELEPORT = 12000
+         // About 20 seconds at the default think interval.
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index 05f5d70..4b1ff53 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -122,6 +122,7 @@ internal object PopulationManager {
+             if(ticks % 4 == 0) dev.l2j.autobots.movement.MovementStatus.sample(online)
+             if (ticks % GROUPS_EVERY_TICKS == 0) { dev.l2j.autobots.population.group.StaticParties.tick(online,now);GroupFinder.tick(online) }
+             if (ticks % GROUPS_EVERY_TICKS == 1) SocialTrade.tick(online)
++            if (ticks % GROUPS_EVERY_TICKS == 1) dev.l2j.autobots.population.group.Bounties.tick(online)
+             if (ticks % CLANS_EVERY_TICKS == 3) dev.l2j.autobots.population.group.Clans.tick(online)
+             if (ticks % GROUPS_EVERY_TICKS == 1) dev.l2j.autobots.population.group.Mentors.tick(online)
+             if (ticks % GROUPS_EVERY_TICKS == 0) dev.l2j.autobots.population.llm.BotChatter.tick(online)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Bounties.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Bounties.kt
+new file mode 100644
+index 0000000..99caab3
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Bounties.kt
+@@ -0,0 +1,512 @@
++package dev.l2j.autobots.population.group
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.population.SessionPlan
++import dev.l2j.autobots.population.economy.Temper
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.delay
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.geoengine.GeoEngine
++import net.sf.l2j.gameserver.model.World
++import net.sf.l2j.gameserver.model.actor.Creature
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.location.Location
++import java.util.concurrent.ConcurrentHashMap
++
++/**
++ * Bounties on PKers (spec in docs/bounties.md). A PK puts a price on the killer's head: a share from the guards (new
++ * adena, per PK and the PKer's level) and, from a bot victim, some of its own adena. Bots hunting nearby take the
++ * contract, walk to where the PKer was last seen and attack it once they see it; whoever kills the PKer while it still
++ * has karma (a bot or a player) gets the money. The bounty is lifted when the karma is worked off or after three quiet
++ * days, and the victims' shares go back to them. Players ask any bot for the list in a whisper.
++ */
++internal object Bounties {
++    private const val DAY = 24 * 60 * 60 * 1000L
++    private const val MAX_GUARD_SHARES = 5
++    private const val VICTIM_SHARE_PERCENT = 5
++    private const val VICTIM_SHARE_PER_LEVEL = 500L
++    private const val EXPIRE_MS = 3 * DAY
++
++    private const val HUNT_RANGE = 20000
++    private const val LEVEL_BELOW = 2
++    private const val LEVEL_ABOVE = 10
++    private const val HP_TO_START = 70
++    private const val HP_TO_QUIT = 40
++    private const val HUNT_MS = 30 * 60_000L
++    private const val RUMOR_MS = 60_000L
++    private const val RUMOR_NOISE = 600
++    private const val SEES_RANGE = 2500
++    private const val FIGHT_RANGE = 900
++    private const val KEEP_RANGE = 3500
++    private const val NORMAL_REWARD_PER_LEVEL = 2000L
++    private const val NORMAL_REWARD_PERCENT = 5
++    private const val SUMMARY_EVERY_TICKS = 10
++
++    private val settings get() = AutobotData.settings
++    val enabled get() = settings.bountiesEnabled
++
++    private class Bounty(val targetId: Int, var name: String, var level: Int, var guard: Long, var guardShares: Int, var lastPk: Long,
++                         var dirty: Boolean = true) {
++        /** victim bot -> adena it put in. */
++        val shares = ConcurrentHashMap<Int, Long>()
++        var seen: Location? = null
++        var seenAt = 0L
++        val total get() = guard + shares.values.sum()
++    }
++
++    /** A hunter's contract: whose head, since when, where it heads now. */
++    private class Hunt(val targetId: Int, val since: Long, var goal: Location, var goalAt: Long, var fighting: Boolean = false)
++
++    /** PKer -> its bounty. */
++    private val bounties = ConcurrentHashMap<Int, Bounty>()
++    /** hunter -> its contract. */
++    private val hunts = ConcurrentHashMap<Int, Hunt>()
++    /** victim bot -> adena to give back from a lifted bounty. */
++    private val refunds = ConcurrentHashMap<Int, Long>()
++    /** PKer -> when a hunter last shouted about it (once in a while, not every hunter). */
++    private val lastShout = ConcurrentHashMap<Int, Long>()
++
++    private var loaded = false
++    private var ticks = 0
++    private var posted = 0
++    private var hunters = 0
++    private var fights = 0
++    private var paid = 0
++    private var paidAdena = 0L
++    private var lifted = 0
++    private var gaveUp = 0
++
++    // ---------------------------------------------------------------- deaths
++
++    /** Every player's death (the core's doDie, after the karma of the kill is counted). */
++    fun onDeath(victim: Player, killer: Creature?) {
++        if (!enabled) return
++        try {
++            if (!loaded) load()
++            hunts.remove(victim.objectId)?.let { log("${victim.name} died hunting ${nameOf(it.targetId)}") }
++            val pk = killer?.actingPlayer ?: return
++            if (pk === victim) return
++            bounties[victim.objectId]?.let { if (victim.karma > 0) payOut(victim, pk, it) }
++            if (isPk(victim, pk)) post(victim, pk)
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    /** The core made [pk] a PKer for this kill: the victim was innocent, no mutual war, no PvP zone. */
++    private fun isPk(victim: Player, pk: Player): Boolean {
++        if (pk.karma <= 0 || victim.karma > 0 || victim.pvpFlag.toInt() != 0 || pk.isCursedWeaponEquipped) return false
++        if (victim.isInsideZone(ZoneId.PVP) && pk.isInsideZone(ZoneId.PVP)) return false
++        val a = victim.clan
++        val b = pk.clan
++        return a == null || b == null || !(a.isAtWarWith(b.clanId) && b.isAtWarWith(a.clanId))
++    }
++
++    private fun post(victim: Player, pk: Player) {
++        val now = System.currentTimeMillis()
++        val b = bounties.getOrPut(pk.objectId) { Bounty(pk.objectId, pk.name, pk.level, 0, 0, now) }
++        b.name = pk.name
++        b.level = pk.level
++        b.lastPk = now
++        if (b.guardShares < MAX_GUARD_SHARES) {
++            b.guardShares++
++            b.guard += settings.bountyPerLevel.toLong() * pk.level
++        }
++        if (victim is Autobot) {
++            val share = minOf(victim.adena.toLong() * VICTIM_SHARE_PERCENT / 100, VICTIM_SHARE_PER_LEVEL * victim.level)
++            if (share > 0 && victim.reduceAdena("Bounty", share.toInt(), null, false)) b.shares.merge(victim.objectId, share, Long::plus)
++        }
++        b.seen = Location(pk.x, pk.y, pk.z)
++        b.seenAt = now
++        b.dirty = true
++        posted++
++        val where = town(pk)
++        log("${pk.name} (lv ${pk.level}, ${pk.clan?.name ?: "-"}) PKed ${victim.name} near $where: bounty ${b.total} (guards ${b.guard}, shares ${b.shares.values.sum()})")
++        announce(victim, b, where)
++    }
++
++    /** The victim bot shouts the price once it is back on its feet; a player's death is shouted by a bot in town. */
++    private fun announce(victim: Player, b: Bounty, where: String) {
++        val crier = victim as? Autobot ?: crierFor(victim) ?: return
++        launchSafely {
++            delay(Rnd.get(15_000, 40_000).toLong())
++            if (!crier.isOnline || crier.isDead) return@launchSafely
++            val ru = crier.clan?.let { ClanChat.russian(it) } ?: (Math.floorMod(crier.objectId * 13, 100) < 70)
++            crier.shout(text(if (crier === victim) Line.MyBounty else Line.Bounty, ru, b.name, b.level, short(b.total), where))
++        }
++    }
++
++    private fun crierFor(victim: Player): Autobot? {
++        val region = MapRegionData.getInstance().getMapRegion(victim.x, victim.y)
++        return World.getInstance().players.filterIsInstance<Autobot>().filter {
++            it.life != null && !it.isDead && it.isInsideZone(ZoneId.TOWN) && MapRegionData.getInstance().getMapRegion(it.x, it.y) == region
++        }.randomOrNull()
++    }
++
++    private fun payOut(pker: Player, killer: Player, b: Bounty) {
++        if (!eligible(killer, pker)) {
++            log("${killer.name} killed ${pker.name} but can't claim its bounty (clan, party or account)")
++            return
++        }
++        val total = b.total
++        bounties.remove(pker.objectId)
++        delete(pker.objectId)
++        hunts.entries.removeIf { it.value.targetId == pker.objectId }
++        if (total <= 0) return
++        killer.addAdena("Bounty", total.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(), null, true)
++        paid++
++        paidAdena += total
++        println("Autobots bounty: ${killer.name} (lv ${killer.level}${if (killer is Autobot) "" else ", player"}) claimed the bounty on ${pker.name}: $total adena")
++        if (killer is Autobot) launchSafely {
++            delay(Rnd.get(4000, 12000).toLong())
++            if (!killer.isOnline) return@launchSafely
++            val ru = killer.clan?.let { ClanChat.russian(it) } ?: (Math.floorMod(killer.objectId * 13, 100) < 70)
++            killer.shout(text(Line.Claimed, ru, pker.name, short(total)))
++        }
++    }
++
++    /** Not a friend of the PKer cashing in on a staged death. */
++    private fun eligible(killer: Player, pker: Player): Boolean {
++        if (killer.clanId != 0 && killer.clanId == pker.clanId) return false
++        if (killer.allyId != 0 && killer.allyId == pker.allyId) return false
++        if (killer.isInParty && killer.party === pker.party) return false
++        // Bots share accounts; only a player's own second character is a staged kill.
++        if (killer is Autobot || pker is Autobot) return true
++        val a = killer.accountName
++        return a == null || a != pker.accountName
++    }
++
++    // ---------------------------------------------------------------- every 30 seconds
++
++    fun tick(online: List<Autobot>) {
++        if (!enabled) return
++        try {
++            if (!loaded) load()
++            val now = System.currentTimeMillis()
++            lift(now)
++            giveRefunds()
++            endHunts(now)
++            for (b in bounties.values) {
++                val pk = World.getInstance().getPlayer(b.targetId) ?: continue
++                if (pk.isDead || pk.karma <= 0 || pk.isInsideZone(ZoneId.PEACE)) continue
++                b.level = pk.level
++                if (now - b.seenAt >= RUMOR_MS) {
++                    b.seen = Location(pk.x + Rnd.get(-RUMOR_NOISE, RUMOR_NOISE), pk.y + Rnd.get(-RUMOR_NOISE, RUMOR_NOISE), pk.z)
++                    b.seenAt = now
++                }
++                recruit(pk, b, online, now)
++            }
++            save()
++        } catch (e: Exception) {
++            e.printStackTrace()
++        } finally {
++            if (++ticks % SUMMARY_EVERY_TICKS == 0 && settings.bountyLog) summary()
++        }
++    }
++
++    /** No karma left (online), or no new PK for three days: the bounty is gone, the victims get their shares back. */
++    private fun lift(now: Long) {
++        for (b in bounties.values.toList()) {
++            val pk = World.getInstance().getPlayer(b.targetId)
++            val worked = pk != null && pk.karma <= 0
++            if (!worked && now - b.lastPk < EXPIRE_MS) continue
++            bounties.remove(b.targetId)
++            delete(b.targetId)
++            b.shares.forEach { (id, adena) -> refunds.merge(id, adena, Long::plus) }
++            saveRefunds()
++            hunts.entries.removeIf { it.value.targetId == b.targetId }
++            lifted++
++            log("bounty on ${b.name} lifted (${if (worked) "karma worked off" else "no PK for 3 days"}), ${b.shares.values.sum()} adena back to ${b.shares.size} victims")
++        }
++    }
++
++    private fun giveRefunds() {
++        var changed = false
++        for ((id, adena) in refunds.toMap()) {
++            val bot = World.getInstance().getPlayer(id) as? Autobot ?: continue
++            if (!bot.isOnline) continue
++            refunds.remove(id)
++            bot.addAdena("BountyRefund", adena.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(), null, false)
++            changed = true
++            log("${bot.name} got $adena adena back from a lifted bounty")
++        }
++        if (changed) saveRefunds()
++    }
++
++    private fun endHunts(now: Long) {
++        for ((id, hunt) in hunts.toMap()) {
++            val hunter = World.getInstance().getPlayer(id) as? Autobot
++            val pk = World.getInstance().getPlayer(hunt.targetId)
++            val why = when {
++                hunter == null || !hunter.isOnline -> "logged out"
++                hunter.isDead -> "dead"
++                pk == null || !pk.isOnline -> "the PKer logged out"
++                pk.isDead -> "the PKer is dead"
++                pk.karma <= 0 -> "no karma left"
++                pk.isInsideZone(ZoneId.PEACE) -> "the PKer is in a peace zone"
++                now - hunt.since > HUNT_MS && !hunt.fighting -> "30 minutes without luck"
++                hunter.currentHp * 100 < hunter.maxHp * HP_TO_QUIT && !hunter.isInCombat -> "hurt"
++                hunter.isInParty -> "joined a party"
++                else -> null
++            } ?: continue
++            hunts.remove(id)
++            gaveUp++
++            log("${hunter?.name ?: id} stops hunting ${pk?.name ?: nameOf(hunt.targetId)}: $why")
++        }
++    }
++
++    /** Up to bountyHunters bots nearby take the contract, the closest first. */
++    private fun recruit(pk: Player, b: Bounty, online: List<Autobot>, now: Long) {
++        val taken = hunts.values.count { it.targetId == pk.objectId }
++        if (taken >= settings.bountyHunters) return
++        val reward = b.total
++        online.asSequence().filter { canHunt(it, pk, reward) }
++                .sortedBy { distance(it, pk) }
++                .take(settings.bountyHunters - taken)
++                .forEach { hunter ->
++                    val goal = b.seen ?: Location(pk.x, pk.y, pk.z)
++                    hunts[hunter.objectId] = Hunt(pk.objectId, now, goal, now)
++                    hunters++
++                    log("${hunter.name} (lv ${hunter.level}, ${Temper.of(hunter.objectId)}) goes after ${pk.name} (lv ${pk.level}) for $reward," +
++                            " ${distance(hunter, pk).toInt()} away")
++                    if (now - (lastShout[pk.objectId] ?: 0L) > 10 * 60_000L && Rnd.get(100) < 40) {
++                        lastShout[pk.objectId] = now
++                        val ru = hunter.clan?.let { ClanChat.russian(it) } ?: (Math.floorMod(hunter.objectId * 13, 100) < 70)
++                        hunter.shout(text(Line.Going, ru, pk.name))
++                    }
++                }
++    }
++
++    private fun canHunt(bot: Autobot, pk: Player, reward: Long): Boolean {
++        if (bot === pk || hunts.containsKey(bot.objectId) || bot.isDead || bot.karma > 0 || bot.isInParty) return false
++        val life = bot.life ?: return false
++        if (life.activity != SessionPlan.Activity.Hunt || life.quests.isActive || bot.isInStoreMode) return false
++        if (bot.level < pk.level - LEVEL_BELOW || bot.level > pk.level + LEVEL_ABOVE) return false
++        if (bot.currentHp * 100 < bot.maxHp * HP_TO_START) return false
++        if (bot.clanId != 0 && bot.clanId == pk.clanId) return false
++        if (bot.allyId != 0 && bot.allyId == pk.allyId) return false
++        if (distance(bot, pk) > HUNT_RANGE) return false
++        return when (Temper.of(bot.objectId)) {
++            Temper.Gambler -> true
++            Temper.Normal -> reward >= NORMAL_REWARD_PER_LEVEL * bot.level || reward * 100 >= bot.adena.toLong() * NORMAL_REWARD_PERCENT
++            Temper.Cautious -> false
++        }
++    }
++
++    // ---------------------------------------------------------------- hunting
++
++    /** Where a hunter heads now: the PKer itself once close enough to see it, else the latest rumor. Null: no contract. */
++    fun destination(bot: Autobot): Location? {
++        if (!enabled) return null
++        val hunt = hunts[bot.objectId] ?: return null
++        val pk = World.getInstance().getPlayer(hunt.targetId) ?: return null
++        if (pk.isDead || pk.karma <= 0) return null
++        val now = System.currentTimeMillis()
++        if (distance(bot, pk) < SEES_RANGE) {
++            hunt.goal = Location(pk.x, pk.y, pk.z)
++        } else if (now - hunt.goalAt >= RUMOR_MS) {
++            bounties[pk.objectId]?.seen?.let { hunt.goal = it }
++            hunt.goalAt = now
++        }
++        return hunt.goal
++    }
++
++    /** A walk to the PKer failed: the hunter gives up the contract. */
++    fun giveUp(bot: Autobot, why: String) {
++        val hunt = hunts.remove(bot.objectId) ?: return
++        gaveUp++
++        log("${bot.name} stops hunting ${nameOf(hunt.targetId)}: $why")
++    }
++
++    /**
++     * Who [bot] fights for a bounty now, or null: a hunter attacks its PKer once it sees it within 900; a bot with karma
++     * fights back whoever hits it.
++     */
++    fun fightTarget(bot: Autobot): Player? {
++        if (!enabled || bot.isDead || bot.isInsideZone(ZoneId.PEACE)) return null
++        if (bot.karma > 0) {
++            (bot.target as? Player)?.takeIf { !it.isDead && it.target === bot && distance(bot, it) < KEEP_RANGE }?.let { return it }
++            return bot.getKnownTypeInRadius(Player::class.java, FIGHT_RANGE)
++                    .filter { !it.isDead && it.target === bot && (it.isAttackingNow || it.isCastingNow) && !(bot.isInParty && bot.party === it.party) }
++                    .minByOrNull { distance(bot, it) }
++                    ?.also { if (bot.target !== it) log("${bot.name} (karma ${bot.karma}) fights back ${it.name}") }
++        }
++        val hunt = hunts[bot.objectId] ?: return null
++        val pk = World.getInstance().getPlayer(hunt.targetId) ?: return null
++        if (pk.isDead || pk.karma <= 0 || pk.isInsideZone(ZoneId.PEACE)) return null
++        val d = distance(bot, pk)
++        if (bot.target === pk && d < KEEP_RANGE) return pk
++        if (d > FIGHT_RANGE || !GeoEngine.getInstance().canSeeTarget(bot, pk)) return null
++        if (!hunt.fighting) {
++            hunt.fighting = true
++            fights++
++            println("Autobots bounty: ${bot.name} (lv ${bot.level}) attacks ${pk.name} (lv ${pk.level}, karma ${pk.karma}) at ${bot.x},${bot.y}")
++        }
++        return pk
++    }
++
++    /** The combat code may hit [target]: the hunter's PKer, or the one hitting a bot with karma. */
++    fun isFightTarget(bot: Autobot, target: Creature?): Boolean {
++        val p = target as? Player ?: return false
++        if (!enabled || p.isDead) return false
++        if (bot.karma > 0 && p.target === bot) return true
++        return p.karma > 0 && hunts[bot.objectId]?.targetId == p.objectId
++    }
++
++    fun isHunting(bot: Autobot) = enabled && hunts.containsKey(bot.objectId)
++
++    // ---------------------------------------------------------------- chat
++
++    private val ASKS = Regex("(?i)(наград|головы|голов[ау]|баунти|bount|\\bheads?\\b|wanted)")
++
++    /** A player whispers a bot about bounties: the five richest heads. @return true if handled. */
++    fun onWhisper(player: Player, bot: Autobot, text: String): Boolean {
++        if (!enabled || player is Autobot || !ASKS.containsMatchIn(text)) return false
++        val ru = GroupChat.isRussian(text)
++        val list = bounties.values.filter { it.total > 0 }.sortedByDescending { it.total }.take(5)
++        launchSafely {
++            delay(Rnd.get(2000, 6000).toLong())
++            if (list.isEmpty()) {
++                bot.tell(player.name, text(Line.NoBounties, ru))
++                return@launchSafely
++            }
++            bot.tell(player.name, text(Line.ListHead, ru, list.size))
++            for (b in list) {
++                delay(Rnd.get(800, 1800).toLong())
++                val where = b.seen?.let { MapRegionData.getInstance().getClosestTownName(it.x, it.y) } ?: "?"
++                bot.tell(player.name, text(Line.ListLine, ru, b.name, b.level, short(b.total), where))
++            }
++        }
++        return true
++    }
++
++    private enum class Line(val ru: List<String>, val en: List<String>) {
++        MyBounty(listOf("меня слил %1\$s (%2\$d ур.), даю за его голову %3\$s, был у %4\$s", "кто положит пкшника %1\$s (%2\$d) у %4\$s — награда %3\$s"),
++                listOf("%1\$s (lv %2\$d) pked me near %4\$s, %3\$s for his head", "bounty on %1\$s (%2\$d) near %4\$s: %3\$s")),
++        Bounty(listOf("за голову пкшника %1\$s (%2\$d ур.) награда %3\$s, видели у %4\$s", "пк %1\$s (%2\$d) у %4\$s, за голову %3\$s"),
++                listOf("bounty on PKer %1\$s (lv %2\$d): %3\$s, seen near %4\$s", "PK %1\$s (%2\$d) near %4\$s, %3\$s for the head")),
++        Going(listOf("иду за головой %1\$s", "%1\$s, я иду", "кто со мной на пкшника %1\$s?"), listOf("going after %1\$s", "%1\$s, I'm coming")),
++        Claimed(listOf("пкшник %1\$s всё, награда %2\$s моя", "сложил %1\$s, +%2\$s"), listOf("PKer %1\$s is done, %2\$s is mine", "got %1\$s, +%2\$s")),
++        NoBounties(listOf("сейчас наград нет, пкшников не видно", "никого не ищут"), listOf("no bounties now", "nobody is wanted now")),
++        ListHead(listOf("награды за головы (%1\$d):", "кого ищут:"), listOf("wanted (%1\$d):", "bounties:")),
++        ListLine(listOf("%1\$s, %2\$d ур. — %3\$s, у %4\$s"), listOf("%1\$s, lv %2\$d — %3\$s, near %4\$s"));
++    }
++
++    private fun text(line: Line, ru: Boolean, vararg args: Any): String {
++        val template = (if (ru) line.ru else line.en).random()
++        return try { template.format(*args) } catch (e: java.util.IllegalFormatException) { template }
++    }
++
++    private fun short(adena: Long) = when {
++        adena >= 1_000_000 -> "%.1fкк".format(adena / 1_000_000.0).replace(".0", "")
++        adena >= 1000 -> "${adena / 1000}к"
++        else -> "$adena"
++    }
++
++    private fun town(p: Player) = MapRegionData.getInstance().getClosestTownName(p.x, p.y)
++
++    private fun nameOf(id: Int) = World.getInstance().getPlayer(id)?.name ?: bounties[id]?.name ?: "$id"
++
++    private fun log(msg: String) {
++        if (settings.bountyLog) println("Autobots bounty: $msg")
++    }
++
++    // ---------------------------------------------------------------- storage
++
++    @Synchronized
++    private fun load() {
++        if (loaded) return
++        loaded = true
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.createStatement().use {
++                    it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_bounties (target_id INT UNSIGNED NOT NULL PRIMARY KEY, name VARCHAR(35) NOT NULL, " +
++                            "level INT NOT NULL, guard BIGINT NOT NULL, guard_shares INT NOT NULL, last_pk BIGINT NOT NULL)")
++                    it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_bounty_shares (target_id INT UNSIGNED NOT NULL, victim_id INT UNSIGNED NOT NULL, " +
++                            "adena BIGINT NOT NULL, PRIMARY KEY(target_id, victim_id))")
++                }
++                con.prepareStatement("SELECT target_id, name, level, guard, guard_shares, last_pk FROM autobot_bounties").use { ps ->
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) bounties[rs.getInt(1)] = Bounty(rs.getInt(1), rs.getString(2), rs.getInt(3), rs.getLong(4), rs.getInt(5), rs.getLong(6), false)
++                    }
++                }
++                con.prepareStatement("SELECT target_id, victim_id, adena FROM autobot_bounty_shares").use { ps ->
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) {
++                            // target 0 holds the shares of lifted bounties still owed to their victims.
++                            if (rs.getInt(1) == 0) refunds[rs.getInt(2)] = rs.getLong(3)
++                            else bounties[rs.getInt(1)]?.shares?.put(rs.getInt(2), rs.getLong(3))
++                        }
++                    }
++                }
++            }
++            log("loaded ${bounties.size} bounties and ${refunds.size} refunds")
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    private fun save() {
++        val dirty = bounties.values.filter { it.dirty }
++        if (dirty.isEmpty()) return
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("REPLACE INTO autobot_bounties (target_id, name, level, guard, guard_shares, last_pk) VALUES (?,?,?,?,?,?)").use { ps ->
++                    for (b in dirty) {
++                        ps.setInt(1, b.targetId); ps.setString(2, b.name); ps.setInt(3, b.level); ps.setLong(4, b.guard); ps.setInt(5, b.guardShares); ps.setLong(6, b.lastPk)
++                        ps.addBatch()
++                    }
++                    ps.executeBatch()
++                }
++                con.prepareStatement("REPLACE INTO autobot_bounty_shares (target_id, victim_id, adena) VALUES (?,?,?)").use { ps ->
++                    for (b in dirty) for ((id, adena) in b.shares) {
++                        ps.setInt(1, b.targetId); ps.setInt(2, id); ps.setLong(3, adena)
++                        ps.addBatch()
++                    }
++                    ps.executeBatch()
++                }
++            }
++            dirty.forEach { it.dirty = false }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    private fun saveRefunds() {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("DELETE FROM autobot_bounty_shares WHERE target_id=0").use { it.executeUpdate() }
++                con.prepareStatement("INSERT INTO autobot_bounty_shares (target_id, victim_id, adena) VALUES (0,?,?)").use { ps ->
++                    for ((id, adena) in refunds) {
++                        ps.setInt(1, id); ps.setLong(2, adena)
++                        ps.addBatch()
++                    }
++                    ps.executeBatch()
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    private fun delete(targetId: Int) {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("DELETE FROM autobot_bounties WHERE target_id=?").use { it.setInt(1, targetId); it.executeUpdate() }
++                con.prepareStatement("DELETE FROM autobot_bounty_shares WHERE target_id=?").use { it.setInt(1, targetId); it.executeUpdate() }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    private fun summary() {
++        val top = bounties.values.maxByOrNull { it.total }?.let { "${it.name} lv ${it.level} ${it.total}" } ?: "-"
++        println("Autobots bounty summary: heads=${bounties.size} top=[$top] hunting=${hunts.size} posted=$posted hunters=$hunters " +
++                "fights=$fights paid=$paid paidAdena=$paidAdena lifted=$lifted gaveUp=$gaveUp refundsOwed=${refunds.size}")
++    }
++}

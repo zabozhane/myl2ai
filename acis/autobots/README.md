@@ -585,3 +585,19 @@ actual link rather than requiring an unrelated straight line to the destination 
     15000, waiting when they fall behind; "баф" and "пока"/"спасибо" are answered. A newbie bot gets a greeting
     and +5 liking for its mentor at the end.
   - `Autobots mentors:` lines for bonds, ends and leads, `Autobots mentors summary` every 10 minutes.
+- `l2autobots-bounties.patch` — bounties on PKers (`population/group/Bounties.kt`, spec `docs/bounties.md`,
+  `bountiesEnabled`, `bountyHunters`, `bountyPerLevel`, `bountyLog`):
+  - Every player's death goes through `OfflineFarmManager.reportDeath` (called by `Player.doDie`) to `Bounties.onDeath`.
+    A PK (innocent victim, killer got karma, no mutual war, no PvP zone) adds `bountyPerLevel` × the PKer's level
+    from the guards (at most 5 shares) and 5% of a bot victim's adena (at most 500 × its level). The victim bot, or a
+    bot in town of the region for a player victim, shouts the price.
+  - Every 30 s up to `bountyHunters` solo hunting bots within 20000 (level −2..+10 of the PKer, not of its clan or
+    alliance, a gambler always, a normal temper for a reward worth it, cautious never) take the contract. They know
+    where the PKer is from a rumor (every minute, ±600), see it within 2500, ride a gatekeeper from town past 12000
+    and walk legs of 2000 (`LifeBehavior.chaseBounty`), attack it within 900 (`CombatBehavior.warFight`). A bot with
+    karma fights back whoever hits it. A hunt ends with the PKer dead, offline, without karma or in a peace zone,
+    after 30 minutes or when the hunter is hurt.
+  - Whoever kills the PKer while it has karma (bot or player, not of its clan, alliance, party or account) gets the
+    whole bounty. No karma left or 3 days without a PK lift it; the victims' shares go back to them when online.
+    `autobot_bounties`, `autobot_bounty_shares`. A whisper "награды" / "bounty" to a bot lists the five richest
+    heads. `Autobots bounty summary` every 5 minutes.
