@@ -1,0 +1,48 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+index b8eda5c..b2c5117 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/NpcTravel.kt
+@@ -76,8 +76,11 @@ internal object NpcTravel {
+         // A long grid step lands on the surface above an underground village or cave, so
+         // its whole graph closes around the origin. Only such an exhausted graph earns a
+         // finer long search; a slow or crowded failure keeps the original bounded cost.
+-        if(longWalk && wide.exhausted && System.nanoTime()<deadline)
+-            search(player,from,to,maxDistance,400,6000,deadline,reversible).route?.let { return it }
++        if(longWalk && wide.exhausted && System.nanoTime()<deadline) {
++            val fine=search(player,from,to,maxDistance,400,6000,deadline,reversible)
++            fine.route?.let { return it }
++            resumeFrom(player,fine,from,to,maxDistance,deadline,reversible)?.let { return it }
++        }
+         // A coarse grid can have no node on a narrow village ramp even though the
+         // geodata permits walking there. A nearby goal still needs local refinement
+         // when its caller permits a long detour; the larger allowance must not remove
+@@ -112,11 +115,28 @@ internal object NpcTravel {
+             val fine=search(player,from,to,maxDistance,400,6000,deadline,false)
+             fine.route ?: fine.best?.takeIf { distance(it,to)<=4000 }?.let { near ->
+                 search(player,near,to,6000,150,4000,deadline,false).route?.let { fine.bestRoute+it }
+-            }
++            } ?: resumeFrom(player,fine,from,to,maxDistance,deadline,false)
+         } ?: return null
+         return Walk(route,(listOf(from)+route).zipWithNext().sumOf { distance(it.first,it.second) })
+     }
+ 
++    /**
++     * A fine search that ran out of nodes after leaving a pocket the wide grid can't step out of (a gatekeeper landing
++     * among fences and slopes: KINGSLY's wide grid expanded 4 nodes at -88510,83377 and the fine one stopped 4.7k short
++     * of the Umbar orcs) goes on with the wide grid from the closest point it reached.
++     */
++    private fun resumeFrom(player: Player,fine: Search,from: Location,to: Location,maxDistance: Int,deadline: Long,
++                           reversible: Boolean): List<Location>? {
++        val near=fine.best ?: return null
++        if(fine.bestRoute.isEmpty() || distance(from,near)<2400 || System.nanoTime()>=deadline) return null
++        val rest=maxDistance-distance(from,near).toInt()
++        if(rest<=0) return null
++        val wide=search(player,near,to,rest,2400,800,deadline,reversible)
++        wide.route?.let { return fine.bestRoute+it }
++        if(distance(near,to)>4000) return null
++        return search(player,near,to,6000,150,4000,deadline,reversible).route?.let { fine.bestRoute+it }
++    }
++
+     /** Why a long walk does not plan: how far the wide grid search got towards [to], for the logs. */
+     fun probe(player: Player,from: Location,to: Location,maxDistance: Int): String {
+         val deadline=System.nanoTime()+5_000_000_000L
