@@ -1,0 +1,44 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index a4c5fd2..2b3aff6 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -633,6 +633,12 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     private suspend fun hunt() {
+         val inTown = bot.isInsideZone(ZoneId.TOWN)
++        // Off to hunt with empty hands (its weapon came back from a closed store, a swap went wrong): the best weapon
++        // in the bag goes on first.
++        // Not during a quest: some quests want bare hands (QuestRunner.holdWeapon).
++        if (economy && !quests.isActive && bot.inventory.getPaperdollItem(net.sf.l2j.gameserver.model.itemcontainer.Inventory.PAPERDOLL_RHAND) == null &&
++                bot.inventory.items.any { it.isWeapon && !it.isEquipped && it.item.type2 != net.sf.l2j.gameserver.model.item.kind.Item.TYPE2_QUEST })
++            dev.l2j.autobots.population.economy.Gear.equipUpgradesFromInventory(bot)
+         if(inTown && recoverUnusableOrigin()) return
+         if (inTown && economy && !tripDoneInTown) {
+             visitShops()
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index e635984..208f398 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -164,7 +164,11 @@ internal object Gear {
+             // A goal nothing sells is no goal: the bot works toward the best piece the shops really have.
+             val reachable = if (Market.npcPrice(itemId) != null) itemId
+                     else Market.bestAlternative(itemId, GOAL_BUDGET_BASE + GOAL_BUDGET_PER_LEVEL * bot.level)
+-            if (reachable <= 0) null else Wish(slot, reachable)
++            // A stand-in no better than what is worn is no step forward: the goal itself stays the wish, for player
++            // stores and crafting. On the 40-76 stand a Sorcerer 52 swapped its C sword for a 150k Long Sword and put
++            // the C sword up for sale; a Hawkeye bought a Forest Bow, put its own bow back on and sold it at a loss.
++            if (reachable > 0 && reachable != itemId && isSatisfied(bot, slot, reachable)) Wish(slot, itemId)
++            else if (reachable <= 0) null else Wish(slot, reachable)
+         }
+     }
+ 
+@@ -254,6 +258,9 @@ internal object Gear {
+      */
+     private fun fitsEmptySlot(bot: Player, item: ItemInstance): Boolean {
+         if (item.item.type2 == Item.TYPE2_ACCESSORY) return true
++        // Bare hands are never the better choice: a Gladiator 40 whose sword went into its store after a swap hunted
++        // two hours with its fists and killed nothing (40-76 stand).
++        if (item.isWeapon) return item.item.type2 != Item.TYPE2_QUEST
+         if (!item.isArmor || item.itemType == (if (bot.isMageClass) ArmorType.HEAVY else ArmorType.MAGIC)) return false
+         val inventory = bot.inventory
+         return when (item.item.bodyPart) {
