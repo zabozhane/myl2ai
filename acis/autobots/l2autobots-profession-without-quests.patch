@@ -1,0 +1,106 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index 1d84ad7..8fc5561 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -59,6 +59,9 @@ internal data class AutobotSettings(
+         @JsonProperty("craftEnabled") var craftEnabled: Boolean = true,
+         @JsonProperty("crafterArtisanPercent") var crafterArtisanPercent: Int = 60,
+         @JsonProperty("questsEnabled") var questsEnabled: Boolean = true,
++        // Owner 09.11: residents and offline farmers died too often on the Path and mark quests; they take the first
++        // and second profession at the guild master as soon as the level allows. true brings the quests back.
++        @JsonProperty("professionQuests") var professionQuests: Boolean = false,
+         @JsonProperty("questLog") var questLog: Boolean = true,
+         @JsonProperty("questerPercent") var questerPercent: Int = 30,
+         @JsonProperty("raidsEnabled") var raidsEnabled: Boolean = true,
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+index b9b8488..eab3d3f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/quests/QuestRunner.kt
+@@ -91,8 +91,9 @@ internal class QuestRunner(private val bot: Player) {
+ 
+     fun professionBusiness(): Boolean {
+         if(!AutobotData.settings.questsEnabled || bot.isInParty) return false
+-        if(bot.classId.level()==1) return secondClassBusiness()
+         if(bot.classId.level()==2) return bot.level>=THIRD_CLASS_LEVEL && thirdClassFor()!=null
++        if(!AutobotData.settings.professionQuests) return directClassTarget()!=null
++        if(bot.classId.level()==1) return secondClassBusiness()
+         if(bot.classId.level()!=0 || bot.level<START_LEVEL) return false
+         restoreRetry()
+         return System.currentTimeMillis()>=pausedUntil && PathQuests.forBaseClass(bot.classId).any { it.to in getSupportedClasses }
+@@ -236,8 +237,9 @@ internal class QuestRunner(private val bot: Player) {
+     }
+ 
+     private suspend fun update(): Boolean {
+-        if (bot.classId.level() == 1) return updateSecond()
+         if (bot.classId.level() == 2) return updateThird()
++        if (!AutobotData.settings.professionQuests) return updateWithoutQuest()
++        if (bot.classId.level() == 1) return updateSecond()
+         if (bot.classId.level() != 0 || bot.level < START_LEVEL) return false
+         restoreRetry()
+         if (System.currentTimeMillis() < pausedUntil) return false
+@@ -306,6 +308,56 @@ internal class QuestRunner(private val bot: Player) {
+         if (System.currentTimeMillis() < pausedUntil) return false
+         val to = thirdClassFor() ?: return false
+         val masters = SecondClassQuests.classes.firstOrNull { it.to == bot.classId }?.masters.orEmpty()
++        return changeAtMaster(to, masters, "without the saga")
++    }
++
++    /** The profession the bot takes now without a quest, with the guild masters who give it; null when not due. */
++    private fun directClassTarget(): Pair<ClassId, List<Int>>? {
++        if (System.currentTimeMillis() < pausedUntil) return null
++        return when (bot.classId.level()) {
++            0 -> {
++                if (bot.level < CLASS_CHANGE_LEVEL) return null
++                ensureLoaded()
++                // The branch a started Path quest already follows, the owner's goal, the dwarf split or the weights.
++                val path = currentPath() ?: return null
++                path.to to PathQuests.guildMasters[path.from].orEmpty()
++            }
++            1 -> {
++                if (bot.level < SECOND_CLASS_LEVEL) return null
++                ensureLoaded()
++                val target = currentSecond() ?: return null
++                target.to to target.masters
++            }
++            else -> null
++        }
++    }
++
++    /** The first profession at 20 and the second at 40 straight from the guild master, as the third is taken at 76. */
++    private suspend fun updateWithoutQuest(): Boolean {
++        val (to, masters) = directClassTarget() ?: return false
++        relax()
++        // No quest watches this trip: a guild master the bot can't get to is retried later, not walked at forever.
++        if (travelFailures > MAX_TRAVEL_FAILURES && System.currentTimeMillis() - firstFailureAt > TRAVEL_GRACE_MS) {
++            pausedUntil = System.currentTimeMillis() + TRAVEL_PAUSE_MS
++            travelFailures = 0
++            QuestLog.log(bot, QuestEvent.Stuck, "profession $to put aside: can't get to the guild master ($lastFailure)")
++            return false
++        }
++        val from = bot.classId
++        val started = allQuests().filter { it.from == from || it.mark in SecondClassQuests.quests }
++                .mapNotNull { bot.getQuestState(it.questName) }.filter { it.isStarted }
++        val busy = changeAtMaster(to, masters, "without the profession quest")
++        if (bot.classId == to) {
++            // A half-done Path or mark quest is dropped with its items; the profession no longer needs it.
++            started.forEach { it.exitQuest(true) }
++            chosen = null
++            chosenSecond = null
++        }
++        return busy
++    }
++
++    /** Walks to the closest of [masters] (or takes [to] in a town when none exists). @return true when it took the tick. */
++    private suspend fun changeAtMaster(to: ClassId, masters: List<Int>, how: String): Boolean {
+         val master = QuestWorld.closestNpc(bot, masters)
+         if (master != null) {
+             if (!reach(master)) return true
+@@ -319,7 +371,7 @@ internal class QuestRunner(private val bot: Player) {
+             return false
+         }
+         applyNewClass()
+-        QuestLog.log(bot, QuestEvent.ClassChanged, "became ${bot.classId} without the saga" + (master?.let { " at ${it.name}" } ?: " in town"))
++        QuestLog.log(bot, QuestEvent.ClassChanged, "became ${bot.classId} $how" + (master?.let { " at ${it.name}" } ?: " in town"))
+         return true
+     }
+ 
