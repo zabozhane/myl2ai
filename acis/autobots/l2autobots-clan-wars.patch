@@ -1,0 +1,784 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 4af2987..fda071b 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -47,6 +47,14 @@
+   <clanLeaderPercent>25</clanLeaderPercent>
+   <clanFoundMinLevel>15</clanFoundMinLevel>
+   <clanPoolEnabled>true</clanPoolEnabled>
++  <!-- Clan wars (docs/clan-wars.md): bot clans hold grudges against other clans (spot disputes, PKs, raid bosses,
++       scams, defectors), a leader declares war when the grudge passes its temper's threshold, the other side answers
++       or not. In a mutual war members fight enemies in the field without karma and help each other; the losing side
++       surrenders, a quiet or old war is stopped. clanWarPkEnabled: in a war the other side did not answer, bold bots
++       PK lone enemies and live with the karma. clanWarLog prints grudges, declarations, fights and a summary. -->
++  <clanWarsEnabled>true</clanWarsEnabled>
++  <clanWarPkEnabled>true</clanWarPkEnabled>
++  <clanWarLog>true</clanWarLog>
+   <!-- Bots gather parties on their own (a healer from level 25, then tank, buffer, spoiler and damage dealers),
+        shout for missing members and answer players who look for a group in chat. At most this percent of the
+        online population plays in parties; the rest hunt alone. groupLog prints every formed party. -->
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index 4191b0c..582f99e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -34,6 +34,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+     internal var isMovingTowardsTarget: Boolean = false
+     
+     private val blacklistedTargets: MutableList<Int> = mutableListOf()
++
++    // The player a clan war fight is on, to stop hitting it the moment the fight ends.
++    private var warEnemy: Player? = null
+     
+     private val lootPicker = LootPicker(player)
+     
+@@ -50,6 +53,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         }
+         deadSince = 0
+         dev.l2j.autobots.population.economy.Healing.use(player)
++        // A clan war fight (docs/clan-wars.md) comes before monsters, rest and loot.
++        if(player is Autobot && warFight(player)) return
+         
+         ensureSummonPet()        
+         dev.l2j.autobots.population.economy.Gear.useStockedBow(player)
+@@ -180,9 +185,50 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         }
+     }
+ 
++    /** Fights the enemy [dev.l2j.autobots.population.group.ClanWars] picks. @return true while there is one. */
++    private suspend fun warFight(bot: Autobot): Boolean {
++        val enemy = dev.l2j.autobots.population.group.ClanWars.fightTarget(bot)
++        if(enemy == null) {
++            // The war fight is over (the flag ran out, the enemy fled): no hit lands on someone no longer fair game.
++            val victim = warEnemy
++            warEnemy = null
++            val desire = bot.ai.desire
++            if(victim != null && (desire.intention == IntentionType.ATTACK || desire.intention == IntentionType.CAST) && bot.target === victim &&
++                    victim.pvpFlag.toInt() == 0 && victim.karma == 0) {
++                bot.abortAttack()
++                bot.abortCast()
++                bot.ai.setIntention(IntentionType.IDLE)
++                resetTarget()
++            }
++            return false
++        }
++        warEnemy = enemy
++        if(bot.isSitting) {
++            bot.standUp()
++            return true
++        }
++        if(bot.target !== enemy) {
++            bot.target = enemy
++            committedTarget = enemy
++            isMovingTowardsTarget = false
++            blacklistedTargets.clear()
++        }
++        beforeAttack()
++        val skill = getNextAvailableSkill()
++        val desire = bot.ai.desire
++        when {
++            skill != null -> bot.useMagicSkill(skill, true)
++            desire.intention == IntentionType.ATTACK && desire.firstParameter === enemy -> {}
++            else -> bot.attack(true)
++        }
++        return true
++    }
++
+     private fun shouldAttackPlayer() : Boolean {
+         if(player.target !is Player)
+             return false
++        if(player is Autobot && dev.l2j.autobots.population.group.ClanWars.isFightTarget(player, player.target as Creature))
++            return true
+         
+         return when(combatPreferences.attackPlayerType){
+             AttackPlayerType.None -> return false
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index 80cd538..a346dff 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -48,6 +48,9 @@ internal data class AutobotSettings(
+         @JsonProperty("clanLeaderPercent") var clanLeaderPercent: Int = 25,
+         @JsonProperty("clanFoundMinLevel") var clanFoundMinLevel: Int = 15,
+         @JsonProperty("clanPoolEnabled") var clanPoolEnabled: Boolean = true,
++        @JsonProperty("clanWarsEnabled") var clanWarsEnabled: Boolean = true,
++        @JsonProperty("clanWarPkEnabled") var clanWarPkEnabled: Boolean = true,
++        @JsonProperty("clanWarLog") var clanWarLog: Boolean = true,
+         @JsonProperty("groupFinderEnabled") var groupFinderEnabled: Boolean = true,
+         @JsonProperty("groupFinderMinLevel") var groupFinderMinLevel: Int = 10,
+         @JsonProperty("groupMaxPopulationPercent") var groupMaxPopulationPercent: Int = 40,
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index a4c5fd2..d5a0ecb 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -372,7 +372,8 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     /** The end of a session: back to town, a last visit to the shops, then waiting there for the logout. */
+     private suspend fun goHome() {
+-        if (!Errands.atTown(bot) && !homeUnreachable) {
++        // A PKer can't shop or use a gatekeeper, and guards hunt it in town: it logs out where it is.
++        if (!Errands.atTown(bot) && !homeUnreachable && bot.karma == 0) {
+             // The end of a session leaves time for a long walk, which a quick trip for loot would not take.
+             if (bot.isSitting) {
+                 bot.standUp()
+@@ -444,6 +445,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+                     (RaidPlanner.raidOf(bot.party)?.let { ", raid ${it.boss.name} ${it.phase}" } ?: ""))
+         }
+         avoidDeadlySpot(killer)
++        dev.l2j.autobots.population.group.ClanWars.onDeath(bot, killer)
+         if (killer is Monster) rememberPreyDeath(killer)
+         // Died on a long walk to its spot: the way there is what kills, don't walk it again.
+         if (killer === bot) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index 5f5b3c6..1857d6d 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -64,7 +64,8 @@ internal object Errands {
+ 
+     fun shouldLeaveSpot(bot: Autobot,lastTripAt: Long): Boolean = leaveReason(bot,lastTripAt)!=null
+ 
+-    fun leaveReason(bot: Autobot,lastTripAt: Long): String? = policyReason(bot,lastTripAt)
++    /** A PKer stays out of town (no shops, no gatekeepers, guards) and works the karma off on monsters. */
++    fun leaveReason(bot: Autobot,lastTripAt: Long): String? = if(bot.karma>0) null else policyReason(bot,lastTripAt)
+             ?: if(System.currentTimeMillis()-lastTripAt>=DeathPenaltyRecovery.TRIP_RETRY_MS &&
+                     DeathPenaltyRecovery.worthTrip(bot,bot.adena)) "death_penalty" else null
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/ClanChat.kt b/src/main/kotlin/dev/l2j/autobots/population/group/ClanChat.kt
+index 3145427..d4e5fd9 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/ClanChat.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/ClanChat.kt
+@@ -64,7 +64,16 @@ internal object ClanChat {
+         PartyLead(listOf("иди к нам, мы у %s, кидаю пати", "го к нам, %s, инвайт"), listOf("join us near %s, inviting", "come to %s, sending party")),
+         PartyFree(listOf("я свободен, кидай пати", "могу, кидай инвайт"), listOf("im free, invite me", "sure, inv me")),
+         HelpComing(listOf("бегу", "иду, держись", "щас буду"), listOf("coming", "on my way", "omw")),
+-        HelpFar(listOf("я у %s, далеко", "я далеко, у %s"), listOf("im near %s, far", "far away, near %s"));
++        HelpFar(listOf("я у %s, далеко", "я далеко, у %s"), listOf("im near %s, far", "far away, near %s")),
++        Declared(listOf("объявляем войну %s: %s", "всё, война с %s, %s", "%s получат войну, %s"), listOf("war on %s: %s", "we declare war on %s, %s", "%s gets a war, %s")),
++        DeclaredShout(listOf("%s объявляет войну %s", "%s vs %s, война"), listOf("%s declares war on %s", "%s vs %s, war")),
++        DeclaredOnUs(listOf("%s объявили нам войну", "смотрите, %s нам войну кинули", "%s на нас войну объявили, что делаем?"), listOf("%s declared war on us", "%s just warred us")),
++        Answered(listOf("отвечаем %s, война", "ок, %s хотели войну, получат", "принимаем войну с %s"), listOf("we answer %s, war it is", "ok %s wanted war, they get it")),
++        Peace(listOf("договорился с лидером %s, без войны", "с %s замирились, не трогаем их"), listOf("made peace with %s, leave them be", "talked to %s leader, no war")),
++        Surrender(listOf("сдаёмся %s, не тянем", "всё, сдались %s"), listOf("we surrender to %s", "gg, we give up to %s")),
++        Stopped(listOf("война с %s всё, закончили", "сняли войну с %s"), listOf("war with %s is over", "stopped the war with %s")),
++        Pked(listOf("положил %1${'$'}s из %2${'$'}s", "%1${'$'}s из %2${'$'}s слился, хе", "минус %1${'$'}s (%2${'$'}s)"), listOf("killed %1${'$'}s of %2${'$'}s", "%1${'$'}s (%2${'$'}s) down")),
++        EnemiesHere(listOf("враги у %1${'$'}s, %2${'$'}d чел, нужна помощь", "у %1${'$'}s %2${'$'}d врагов, кто рядом?"), listOf("enemies near %1${'$'}s, %2${'$'}d of them, help", "%2${'$'}d enemies at %1${'$'}s"));
+     }
+ 
+     private val HELLO = Regex("^(прив|привет|ку\\b|хай|здаро|всем привет|hi\\b|hello|hey|o/)", RegexOption.IGNORE_CASE)
+@@ -80,13 +89,13 @@ internal object ClanChat {
+     private val offers = Collections.synchronizedMap(WeakHashMap<Player, Pair<Int, Long>>())
+ 
+     /** The clan's language: the player's in it if there is one, else a trait of the clan. */
+-    private fun russian(clan: Clan): Boolean {
++    fun russian(clan: Clan): Boolean {
+         // A player in the clan: the server's players speak Russian.
+         if (clan.onlineMembers.any { it.isLiveAudience() }) return true
+         return Math.floorMod(clan.clanId * 13, 100) < 70
+     }
+ 
+-    private fun text(line: Line, russian: Boolean, vararg args: Any): String {
++    fun text(line: Line, russian: Boolean, vararg args: Any): String {
+         val template = (if (russian) line.ru else line.en).random()
+         return try { template.format(*args) } catch (e: java.util.IllegalFormatException) { template }
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/ClanWars.kt b/src/main/kotlin/dev/l2j/autobots/population/group/ClanWars.kt
+new file mode 100644
+index 0000000..b3bcb8b
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/ClanWars.kt
+@@ -0,0 +1,537 @@
++package dev.l2j.autobots.population.group
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.population.SessionPlan
++import dev.l2j.autobots.population.economy.Temper
++import dev.l2j.autobots.population.trade.TradeEvents
++import dev.l2j.autobots.utils.distance
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.sql.ClanTable
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.geoengine.GeoEngine
++import net.sf.l2j.gameserver.model.actor.Creature
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
++import net.sf.l2j.gameserver.model.pledge.Clan
++import net.sf.l2j.gameserver.network.clientpackets.RequestStartPledgeWar
++import net.sf.l2j.gameserver.network.clientpackets.RequestStopPledgeWar
++import net.sf.l2j.gameserver.network.clientpackets.RequestSurrenderPledgeWar
++import java.util.concurrent.ConcurrentHashMap
++import kotlin.math.pow
++
++/**
++ * Clan wars of bot clans (spec in docs/clan-wars.md). A bot clan keeps a grudge against other clans: members hunting
++ * on one spot, a PK, a raid boss taken, a scam, a defector. Past the leader's temper threshold the leader declares war
++ * through the core's own checks ([RequestStartPledgeWar.declare]); a clan a war is declared on answers or not. In a
++ * mutual war members fight enemies in the field (no karma, the core's rule), call and come for help and take revenge;
++ * in a war the other side did not answer the bold ones PK lone enemies and live with the karma. The losing side
++ * surrenders, a quiet or old war is stopped. Grudges and war scores survive a restart in two small tables.
++ */
++internal object ClanWars {
++    private const val DAY = 24 * 60 * 60 * 1000L
++    private const val DECAY_PER_DAY = 0.9
++    private const val SPOT_RANGE = 600
++    private const val SPOT_CAP = 10.0
++    private const val PK_POINTS = 30.0
++    private const val KILL_POINTS = 5.0
++    private const val RAID_POINTS = 20.0
++    private const val SCAM_POINTS = 15.0
++    private const val DEFECTOR_POINTS = 10.0
++    private const val DECLARED_POINTS = 40.0
++    private const val PEACE_POINTS = 30.0
++    private const val MAX_POINTS = 300.0
++    private const val MAX_WARS = 2
++
++    private const val FIGHT_RANGE = 900
++    private const val HELP_RANGE = 3000
++    private const val KEEP_RANGE = HELP_RANGE + 500
++    private const val SCAN_MS = 1500L
++    private const val LEVEL_EDGE = 3
++    private const val PK_LEVEL_EDGE = 2
++    private const val HP_TO_FIGHT = 60
++    private const val HP_TO_PK = 70
++    private const val PK_EVERY_MS = 60 * 60 * 1000L
++    private const val REVENGE_MS = DAY
++    private const val CALL_EVERY_MS = 3 * 60 * 1000L
++
++    private const val SURRENDER_DEATHS = 10
++    private const val QUIET_DAYS = 3
++    private const val OLD_DAYS = 7
++
++    private val settings get() = AutobotData.settings
++    val enabled get() = settings.clansEnabled && settings.clanWarsEnabled
++
++    private class Grudge(var points: Double, var reason: String, var at: Long, var dirty: Boolean = true)
++
++    /** One side of a war: since when this clan is in it, its last fight, its kills and deaths. */
++    private class War(val started: Long, var lastFight: Long, var kills: Int = 0, var deaths: Int = 0, var dirty: Boolean = true)
++
++    private fun key(a: Int, b: Int) = (a.toLong() shl 32) or (b.toLong() and 0xffffffffL)
++    private fun first(k: Long) = (k shr 32).toInt()
++    private fun second(k: Long) = k.toInt()
++
++    /** (clan, other clan) -> how much the clan hates the other. */
++    private val grudges = ConcurrentHashMap<Long, Grudge>()
++    /** (clan, enemy clan) -> this clan's side of a war. */
++    private val wars = ConcurrentHashMap<Long, War>()
++    /** victim bot -> (killer, when): the killer is the first to hit next time. */
++    private val killers = ConcurrentHashMap<Int, Pair<Int, Long>>()
++    /** (clan, enemy clan) -> when the enemy last killed one of ours. */
++    private val lastLoss = ConcurrentHashMap<Long, Long>()
++    /** bot -> when it last went for a PK. */
++    private val lastPk = ConcurrentHashMap<Int, Long>()
++    /** bot -> the enemy it chose to PK. */
++    private val pkTarget = ConcurrentHashMap<Int, Int>()
++    /** bot -> when it looks around for enemies again. */
++    private val nextScan = ConcurrentHashMap<Int, Long>()
++    /** clan -> when a member may call for help again. */
++    private val lastCall = ConcurrentHashMap<Int, Long>()
++    /** bot -> (old clan, when) it left; joining another clan within a day makes it a defector. */
++    private val leftClan = ConcurrentHashMap<Int, Pair<Int, Long>>()
++    /** (clan, attacker clan): the clan's leader has seen that war declared on it. */
++    private val noticed: MutableSet<Long> = ConcurrentHashMap.newKeySet()
++    /** (clan, other clan) -> when the peaceful leader of the clan last made peace with the other. */
++    private val lastPeace = ConcurrentHashMap<Long, Long>()
++
++    private var loaded = false
++    private var lastDecay = System.currentTimeMillis()
++
++    private var declared = 0
++    private var answered = 0
++    private var surrendered = 0
++    private var stopped = 0
++    private var peaces = 0
++    private var fights = 0
++    private var pks = 0
++    private var warKills = 0
++
++    init {
++        TradeEvents.scamListeners.add(TradeEvents.ScamListener { victim, scammerId, _, _ ->
++            val scammerClan = ClanTable.getInstance().clans.firstOrNull { it.isMember(scammerId) } ?: return@ScamListener
++            add(victim.clan, scammerClan, SCAM_POINTS, "scam")
++        })
++    }
++
++    // ---------------------------------------------------------------- grudges
++
++    fun grudge(clan: Clan, other: Clan): Double = grudges[key(clan.clanId, other.clanId)]?.points ?: 0.0
++
++    private fun add(clan: Clan?, other: Clan?, points: Double, reason: String) {
++        if (!enabled || clan == null || other == null || clan.clanId == other.clanId || !Clans.isBotClan(clan)) return
++        val g = grudges.getOrPut(key(clan.clanId, other.clanId)) { Grudge(0.0, reason, 0) }
++        g.points = (g.points + points).coerceIn(0.0, MAX_POINTS)
++        g.reason = reason
++        g.at = System.currentTimeMillis()
++        g.dirty = true
++    }
++
++    /** A party left a raid boss to rivals, or rivals took it from the party. */
++    fun onRaidTaken(loser: Player, winner: Player) = add(loser.clan, winner.clan, RAID_POINTS, "raid")
++
++    fun onLeftClan(bot: Player, clanId: Int) {
++        leftClan[bot.objectId] = clanId to System.currentTimeMillis()
++    }
++
++    fun onJoinedClan(bot: Player, clan: Clan) {
++        val (old, at) = leftClan.remove(bot.objectId) ?: return
++        if (System.currentTimeMillis() - at > DAY) return
++        add(ClanTable.getInstance().getClan(old), clan, DEFECTOR_POINTS, "defector")
++    }
++
++    /** A bot died: kills and deaths of a war, a PK, revenge. */
++    fun onDeath(victim: Autobot, killer: Creature?) {
++        if (!enabled) return
++        val pk = killer?.actingPlayer ?: return
++        if (pk === victim) return
++        val ours = victim.clan ?: return
++        val theirs = pk.clan
++        val now = System.currentTimeMillis()
++        killers[victim.objectId] = pk.objectId to now
++        if (theirs == null || theirs.clanId == ours.clanId) return
++        lastLoss[key(ours.clanId, theirs.clanId)] = now
++        // The core gave karma: the victim had no flag and no karma, and the war (if any) was not mutual.
++        val pked = pk.karma > 0 && victim.pvpFlag.toInt() == 0 && victim.karma == 0 && !mutual(ours, theirs)
++        if (atWar(ours, theirs)) {
++            wars[key(theirs.clanId, ours.clanId)]?.let { it.kills++; it.lastFight = now; it.dirty = true }
++            wars[key(ours.clanId, theirs.clanId)]?.let { it.deaths++; it.lastFight = now; it.dirty = true }
++            warKills++
++        }
++        add(ours, theirs, if (pked) PK_POINTS else if (atWar(ours, theirs)) KILL_POINTS else PK_POINTS, if (pked) "pk" else "kill")
++        if (pk is Autobot && pkTarget[pk.objectId] == victim.objectId) {
++            pkTarget.remove(pk.objectId)
++            if (pked) afterPk(pk, victim)
++        }
++        if (settings.clanWarLog) println("Autobots wars: ${pk.name} (${theirs.name}) killed ${victim.name} (${ours.name})" +
++                "${if (pked) " as PK, karma ${pk.karma}" else ""}, grudge ${ours.name}->${theirs.name} ${grudge(ours, theirs).toInt()}")
++    }
++
++    /** The PKer leaves its party, boasts in clan chat and stays out of town until the karma is gone. */
++    private fun afterPk(pk: Autobot, victim: Player) {
++        pks++
++        pk.party?.removePartyMember(pk, net.sf.l2j.gameserver.enums.MessageType.LEFT)
++        ClanChat.say(pk, ClanChat.Line.Pked, victim.name, victim.clan?.name ?: "", pauseMs = Rnd.get(2000, 6000).toLong())
++    }
++
++    // ---------------------------------------------------------------- wars, every clan tick (5 minutes)
++
++    fun atWar(a: Clan, b: Clan) = a.isAtWarWith(b.clanId) || b.isAtWarWith(a.clanId)
++    fun mutual(a: Clan, b: Clan) = a.isAtWarWith(b.clanId) && b.isAtWarWith(a.clanId)
++
++    private enum class Mood(val threshold: Int) { Peaceful(100), Normal(70), Aggressive(40) }
++
++    private fun mood(bot: Player) = when (Temper.of(bot.objectId)) {
++        Temper.Cautious -> Mood.Peaceful
++        Temper.Normal -> Mood.Normal
++        Temper.Gambler -> Mood.Aggressive
++    }
++
++    fun tick(online: List<Autobot>) {
++        if (!enabled) return
++        try {
++            if (!loaded) {
++                load()
++                // Wars declared before a restart were seen already.
++                ClanTable.getInstance().clans.forEach { c -> c.attackerList.forEach { noticed.add(key(c.clanId, it)) } }
++            }
++            decay()
++            spotDisputes(online)
++            for (clan in ClanTable.getInstance().clans.toList()) {
++                if (!Clans.isBotClan(clan)) continue
++                val leader = clan.leader?.playerInstance as? Autobot ?: continue
++                if (!leader.isOnline || leader.life == null) continue
++                endWars(clan, leader)
++                answerWars(clan, leader)
++                declareWar(clan, leader)
++            }
++            save()
++        } catch (e: Exception) {
++            e.printStackTrace()
++        } finally {
++            if (settings.clanWarLog) summary()
++        }
++    }
++
++    private fun decay() {
++        val now = System.currentTimeMillis()
++        val factor = DECAY_PER_DAY.pow((now - lastDecay).toDouble() / DAY)
++        lastDecay = now
++        for (g in grudges.values) {
++            g.points *= factor
++            g.dirty = true
++        }
++        grudges.entries.removeIf { it.value.points < 1.0 && now - it.value.at > DAY }
++    }
++
++    /** Members of two clans hunting next to each other: +1 a pair, at most +10 a tick; a stronger rival counts more. */
++    private fun spotDisputes(online: List<Autobot>) {
++        val pairs = HashMap<Long, Int>()
++        for (bot in online) {
++            val clan = bot.clan ?: continue
++            if (!Clans.isBotClan(clan) || bot.isDead || bot.life?.activity != SessionPlan.Activity.Hunt) continue
++            if (bot.isInsideZone(ZoneId.TOWN) || bot.isInsideZone(ZoneId.PEACE)) continue
++            for (other in bot.getKnownTypeInRadius(Player::class.java, SPOT_RANGE)) {
++                val oc = other.clan ?: continue
++                if (oc.clanId == clan.clanId || other.isDead || other.isInsideZone(ZoneId.PEACE)) continue
++                if (bot.isInParty && bot.party === other.party) continue
++                if (clan.allyId != 0 && clan.allyId == oc.allyId) continue
++                pairs.merge(key(clan.clanId, oc.clanId), 1, Int::plus)
++            }
++        }
++        for ((k, n) in pairs) {
++            val clan = ClanTable.getInstance().getClan(first(k)) ?: continue
++            val other = ClanTable.getInstance().getClan(second(k)) ?: continue
++            // Prestige: a clearly stronger clan crowding us, or a weaker one growing next to us, rankles more.
++            val rivals = if (stronger(clan, other) || stronger(other, clan)) 1.5 else 1.0
++            add(clan, other, minOf(n.toDouble(), SPOT_CAP) * rivals, "spot")
++        }
++    }
++
++    /** Clearly stronger: a higher level, or half again as many members. */
++    private fun stronger(a: Clan, b: Clan) = a.level > b.level || a.membersCount * 2 >= b.membersCount * 3
++
++    private fun avgLevel(clan: Clan) = clan.members.map { it.level }.average().takeIf { !it.isNaN() } ?: 0.0
++
++    /** A clan a war was declared on answers when the grudge (+40 for the declaration) passes its leader's threshold
++     * and it is not much weaker. */
++    private fun answerWars(clan: Clan, leader: Autobot) {
++        noticed.removeIf { first(it) == clan.clanId && !clan.isAtWarAttacker(second(it)) }
++        for (id in clan.attackerList.toList()) {
++            val enemy = ClanTable.getInstance().getClan(id) ?: continue
++            val k = key(clan.clanId, id)
++            if (noticed.add(k)) {
++                // First time the leader sees it: the declaration itself is an insult.
++                add(clan, enemy, DECLARED_POINTS, "declared on us")
++                if (settings.clanWarLog) println("Autobots wars: ${clan.name} learned ${enemy.name} declared war on it")
++                ClanChat.say(leader, ClanChat.Line.DeclaredOnUs, enemy.name, pauseMs = Rnd.get(2000, 8000).toLong())
++            }
++            // Answered already, or surrendered (the core's pause keeps it from answering again for 5 days).
++            if (clan.isAtWarWith(id) || clan.hasWarPenaltyWith(id)) continue
++            val weak = clan.membersCount * 10 < enemy.membersCount * 7 || avgLevel(clan) + 5 < avgLevel(enemy)
++            if (weak || grudge(clan, enemy) < mood(leader).threshold) continue
++            if (!RequestStartPledgeWar.declare(leader, enemy)) continue
++            wars[k] = War(System.currentTimeMillis(), System.currentTimeMillis())
++            answered++
++            println("Autobots wars: ${clan.name} answered the war of ${enemy.name} (grudge ${grudge(clan, enemy).toInt()}), it is mutual now")
++            ClanChat.say(leader, ClanChat.Line.Answered, enemy.name, pauseMs = Rnd.get(2000, 6000).toLong())
++        }
++    }
++
++    /** The clan with the worst grudge past the threshold gets a war, or, from a peaceful leader, a peace offer. */
++    private fun declareWar(clan: Clan, leader: Autobot) {
++        if (clan.warList.size >= MAX_WARS) return
++        val mood = mood(leader)
++        val (k, g) = grudges.entries.filter { first(it.key) == clan.clanId && it.value.points >= mood.threshold }
++                .maxByOrNull { it.value.points }?.toPair() ?: return
++        val enemy = ClanTable.getInstance().getClan(second(k)) ?: return
++        if (clan.isAtWarWith(enemy.clanId) || clan.hasWarPenaltyWith(enemy.clanId)) return
++        val now = System.currentTimeMillis()
++        val enemyLeader = enemy.leader?.playerInstance
++        if (mood == Mood.Peaceful && enemyLeader is Autobot && enemyLeader.isOnline && mood(enemyLeader) != Mood.Aggressive &&
++                now - (lastPeace[k] ?: 0L) > DAY) {
++            lastPeace[k] = now
++            add(clan, enemy, -PEACE_POINTS, "peace")
++            add(enemy, clan, -PEACE_POINTS, "peace")
++            peaces++
++            println("Autobots wars: ${leader.name} (${clan.name}) made peace with ${enemyLeader.name} (${enemy.name})")
++            ClanChat.say(leader, ClanChat.Line.Peace, enemy.name, pauseMs = Rnd.get(4000, 9000).toLong())
++            return
++        }
++        if (!RequestStartPledgeWar.declare(leader, enemy)) return
++        declared++
++        wars[k] = War(now, now)
++        println("Autobots wars: ${clan.name} declared war on ${enemy.name}: ${g.reason}, grudge ${g.points.toInt()}, leader ${leader.name} ${mood.name}")
++        ClanChat.say(leader, ClanChat.Line.Declared, enemy.name, reasonText(g.reason, ClanChat.russian(clan)), pauseMs = Rnd.get(2000, 6000).toLong())
++        if (Rnd.get(100) < 30) leader.shout(ClanChat.text(ClanChat.Line.DeclaredShout, true, clan.name, enemy.name))
++    }
++
++    private fun reasonText(reason: String, ru: Boolean) = when (reason) {
++        "spot" -> if (ru) "сидят на наших спотах" else "they keep taking our spots"
++        "pk" -> if (ru) "пкшат наших" else "they pk our people"
++        "kill" -> if (ru) "убивают наших" else "they kill our people"
++        "raid" -> if (ru) "увели наш рб" else "they took our raid boss"
++        "scam" -> if (ru) "кинули нашего" else "they scammed one of us"
++        "defector" -> if (ru) "сманили нашего" else "they took our member"
++        else -> if (ru) "достали" else "enough of them"
++    }
++
++    /** The losing side surrenders; a war without fights or simply too old is stopped by its declarer. */
++    private fun endWars(clan: Clan, leader: Autobot) {
++        val now = System.currentTimeMillis()
++        val peaceful = mood(leader) == Mood.Peaceful
++        for (id in clan.warList.toList()) {
++            val enemy = ClanTable.getInstance().getClan(id)
++            val k = key(clan.clanId, id)
++            val war = wars.getOrPut(k) { War(now, now) }
++            if (enemy == null) {
++                wars.remove(k)
++                continue
++            }
++            if (mutual(clan, enemy) && war.deaths >= SURRENDER_DEATHS && war.kills * 2 <= war.deaths) {
++                if (!RequestSurrenderPledgeWar.surrender(leader, enemy)) continue
++                surrendered++
++                finished(clan, enemy, k)
++                println("Autobots wars: ${clan.name} surrendered to ${enemy.name} (kills ${war.kills}, deaths ${war.deaths})")
++                ClanChat.say(leader, ClanChat.Line.Surrender, enemy.name, pauseMs = Rnd.get(2000, 6000).toLong())
++                continue
++            }
++            val quiet = (if (peaceful) QUIET_DAYS - 2 else QUIET_DAYS) * DAY
++            val old = (if (peaceful) OLD_DAYS - 3 else OLD_DAYS) * DAY
++            if (now - war.lastFight < quiet && now - war.started < old) continue
++            if (!RequestStopPledgeWar.stop(leader, enemy, false)) continue
++            stopped++
++            finished(clan, enemy, k)
++            println("Autobots wars: ${clan.name} stopped its war on ${enemy.name} (${(now - war.started) / DAY}d, kills ${war.kills}, deaths ${war.deaths})")
++            ClanChat.say(leader, ClanChat.Line.Stopped, enemy.name, pauseMs = Rnd.get(2000, 6000).toLong())
++        }
++    }
++
++    private fun finished(clan: Clan, enemy: Clan, k: Long) {
++        wars.remove(k)?.let { delete(k) }
++        grudges[k]?.let { it.points = 0.0; it.dirty = true }
++    }
++
++    // ---------------------------------------------------------------- fighting
++
++    private fun isLoner(bot: Autobot) = Sociability.of(bot) == Sociability.Loner
++    private fun withPlayer(bot: Autobot) = bot.party?.members?.any { it !is Autobot } == true
++
++    /**
++     * Who [bot] fights now, or null to go on with its life. Called on every combat tick: keeps the current enemy, and
++     * every 1.5 s looks around: an attacker, an enemy on a clan mate, its killer, an enemy of a mutual war, a PK.
++     */
++    fun fightTarget(bot: Autobot): Player? {
++        if (!enabled) return null
++        val clan = bot.clan ?: return null
++        if (bot.isInsideZone(ZoneId.PEACE) || bot.isDead) return null
++        (bot.target as? Player)?.let { if (keepsFighting(bot, clan, it)) return it }
++        val now = System.currentTimeMillis()
++        if (now < (nextScan[bot.objectId] ?: 0L)) return null
++        nextScan[bot.objectId] = now + SCAN_MS
++        val noWars = clan.warList.isEmpty() && clan.attackerList.isEmpty()
++        val revenge = killers[bot.objectId]?.takeIf { now - it.second < REVENGE_MS }?.first
++        if (noWars && revenge == null) return null
++        val around = bot.getKnownTypeInRadius(Player::class.java, HELP_RANGE).filter {
++            !it.isDead && !it.isInsideZone(ZoneId.PEACE) && it.clanId != clan.clanId && !(bot.isInParty && bot.party === it.party) && !it.isGM
++        }
++        if (around.isEmpty()) return null
++
++        // Somebody hits us or a clan mate: fight back, help.
++        around.filter { hostile(it) && it.target === bot && distance(bot, it) < FIGHT_RANGE }.minByOrNull { distance(bot, it) }
++                ?.let { return start(bot, it, "fights back") }
++        if (!busy(bot)) around.filter { hostile(it) && (it.target as? Player)?.clanId == clan.clanId && sees(bot, it) }
++                .minByOrNull { distance(bot, it) }?.let { return start(bot, it, "helps against") }
++
++        // The rest is starting a fight, which a loner or a bot playing with a player does not do.
++        if (isLoner(bot) || withPlayer(bot)) return null
++        val near = around.filter { distance(bot, it) < FIGHT_RANGE && sees(bot, it) }
++        revenge?.let { id -> near.firstOrNull { it.objectId == id && canFight(bot, clan, it, LEVEL_EDGE, HP_TO_FIGHT) }?.let { return start(bot, it, "takes revenge on") } }
++        val enemies = near.filter { it.clan?.let { c -> mutual(clan, c) } == true }
++        enemies.filter { canFight(bot, clan, it, LEVEL_EDGE, HP_TO_FIGHT) }.minByOrNull { distance(bot, it) }?.let { return start(bot, it, "attacks") }
++        if (enemies.isNotEmpty()) callHelp(bot, clan, enemies.size)
++        return pk(bot, clan, near, now)
++    }
++
++    /** One-sided war: a bold bot PKs a lone enemy bot weaker than itself. */
++    private fun pk(bot: Autobot, clan: Clan, near: List<Player>, now: Long): Player? {
++        if (!settings.clanWarPkEnabled || bot.karma > 0 || now - (lastPk[bot.objectId] ?: 0L) < PK_EVERY_MS) return null
++        val mood = mood(bot)
++        if (mood == Mood.Peaceful) return null
++        val victim = near.filter { v ->
++            val vc = v.clan ?: return@filter false
++            v is Autobot && v.karma == 0 && v.pvpFlag.toInt() == 0 && atWar(clan, vc) && !mutual(clan, vc) &&
++                    (mood == Mood.Aggressive || now - (lastLoss[key(clan.clanId, vc.clanId)] ?: 0L) < REVENGE_MS || grudge(clan, vc) >= 100) &&
++                    canFight(bot, clan, v, PK_LEVEL_EDGE, HP_TO_PK)
++        }.minByOrNull { distance(bot, it) } ?: return null
++        lastPk[bot.objectId] = now
++        pkTarget[bot.objectId] = victim.objectId
++        return start(bot, victim, "goes to PK")
++    }
++
++    /** A player who may be fought: an enemy of a war, a flagged attacker or a PKer. */
++    private fun hostile(p: Player) = p.pvpFlag > 0 || p.karma > 0
++
++    private fun sees(bot: Player, p: Player) = GeoEngine.getInstance().canSeeTarget(bot, p)
++
++    /** Busy with its own monster: a bot hit by monsters doesn't run off to help. */
++    private fun busy(bot: Autobot) = bot.getKnownTypeInRadius(Monster::class.java, 400).any { !it.isDead && it.target === bot && it.isInCombat }
++
++    /** Not much stronger, the bot healthy enough and not outnumbered. */
++    private fun canFight(bot: Autobot, clan: Clan, enemy: Player, levelEdge: Int, hp: Int): Boolean {
++        if (enemy.level > bot.level + levelEdge || bot.currentHp * 100 < bot.maxHp * hp) return false
++        val theirs = enemy.getKnownTypeInRadius(Player::class.java, FIGHT_RANGE).count { !it.isDead && it.clanId == enemy.clanId } + 1
++        val ours = bot.getKnownTypeInRadius(Player::class.java, FIGHT_RANGE).count { !it.isDead && it.clanId == clan.clanId } + 1
++        return theirs <= ours
++    }
++
++    private fun keepsFighting(bot: Autobot, clan: Clan, p: Player): Boolean {
++        if (p.isDead || p.isInsideZone(ZoneId.PEACE) || p.clanId == clan.clanId || distance(bot, p) > KEEP_RANGE) return false
++        val pc = p.clan
++        return (pc != null && mutual(clan, pc)) || hostile(p) || pkTarget[bot.objectId] == p.objectId
++    }
++
++    private fun start(bot: Autobot, enemy: Player, what: String): Player {
++        if (bot.target === enemy) return enemy
++        fights++
++        if (settings.clanWarLog) println("Autobots wars: ${bot.name} (${bot.clan?.name}, lv ${bot.level}) $what ${enemy.name}" +
++                " (${enemy.clan?.name ?: "-"}, lv ${enemy.level}${if (enemy.karma > 0) ", karma" else ""}) at ${bot.x},${bot.y}")
++        return enemy
++    }
++
++    /** Enemies the bot can't take on: the clan hears where they are. */
++    private fun callHelp(bot: Autobot, clan: Clan, count: Int) {
++        val now = System.currentTimeMillis()
++        if (now - (lastCall[clan.clanId] ?: 0L) < CALL_EVERY_MS) return
++        lastCall[clan.clanId] = now
++        val where = net.sf.l2j.gameserver.data.xml.MapRegionData.getInstance().getClosestTownName(bot.x, bot.y)
++        ClanChat.say(bot, ClanChat.Line.EnemiesHere, where, count)
++    }
++
++    /** A player with karma or a flag a clan bot is fighting: the combat code may hit it without being an innocent. */
++    fun isFightTarget(bot: Autobot, target: Creature?): Boolean {
++        val p = target as? Player ?: return false
++        val clan = bot.clan ?: return false
++        return enabled && keepsFighting(bot, clan, p)
++    }
++
++    // ---------------------------------------------------------------- storage
++
++    private fun load() {
++        loaded = true
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.createStatement().use {
++                    it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_clan_grudges (clan_id INT UNSIGNED NOT NULL, other_id INT UNSIGNED NOT NULL, " +
++                            "points DOUBLE NOT NULL, reason VARCHAR(16) NOT NULL, at BIGINT NOT NULL, PRIMARY KEY(clan_id, other_id))")
++                    it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_clan_wars (clan_id INT UNSIGNED NOT NULL, enemy_id INT UNSIGNED NOT NULL, " +
++                            "started BIGINT NOT NULL, last_fight BIGINT NOT NULL, kills INT NOT NULL, deaths INT NOT NULL, PRIMARY KEY(clan_id, enemy_id))")
++                }
++                con.prepareStatement("SELECT clan_id, other_id, points, reason, at FROM autobot_clan_grudges").use { ps ->
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) grudges[key(rs.getInt(1), rs.getInt(2))] = Grudge(rs.getDouble(3), rs.getString(4), rs.getLong(5), false)
++                    }
++                }
++                con.prepareStatement("SELECT clan_id, enemy_id, started, last_fight, kills, deaths FROM autobot_clan_wars").use { ps ->
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) wars[key(rs.getInt(1), rs.getInt(2))] = War(rs.getLong(3), rs.getLong(4), rs.getInt(5), rs.getInt(6), false)
++                    }
++                }
++            }
++            if (settings.clanWarLog) println("Autobots wars: loaded ${grudges.size} grudges and ${wars.size} wars")
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    private fun save() {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("REPLACE INTO autobot_clan_grudges (clan_id, other_id, points, reason, at) VALUES (?,?,?,?,?)").use { ps ->
++                    for ((k, g) in grudges) {
++                        if (!g.dirty) continue
++                        g.dirty = false
++                        ps.setInt(1, first(k)); ps.setInt(2, second(k)); ps.setDouble(3, g.points); ps.setString(4, g.reason); ps.setLong(5, g.at)
++                        ps.addBatch()
++                    }
++                    ps.executeBatch()
++                }
++                con.prepareStatement("DELETE FROM autobot_clan_grudges WHERE points < 1").use { it.executeUpdate() }
++                con.prepareStatement("REPLACE INTO autobot_clan_wars (clan_id, enemy_id, started, last_fight, kills, deaths) VALUES (?,?,?,?,?,?)").use { ps ->
++                    for ((k, w) in wars) {
++                        if (!w.dirty) continue
++                        w.dirty = false
++                        ps.setInt(1, first(k)); ps.setInt(2, second(k)); ps.setLong(3, w.started); ps.setLong(4, w.lastFight); ps.setInt(5, w.kills); ps.setInt(6, w.deaths)
++                        ps.addBatch()
++                    }
++                    ps.executeBatch()
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    private fun delete(k: Long) {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("DELETE FROM autobot_clan_wars WHERE clan_id=? AND enemy_id=?").use { ps ->
++                    ps.setInt(1, first(k)); ps.setInt(2, second(k)); ps.executeUpdate()
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    private fun summary() {
++        val botClans = ClanTable.getInstance().clans.filter { Clans.isBotClan(it) }
++        val active = botClans.sumOf { c -> c.warList.size }
++        val mutualWars = botClans.sumOf { c -> c.warList.count { id -> ClanTable.getInstance().getClan(id)?.isAtWarWith(c.clanId) == true } } / 2
++        val top = grudges.entries.maxByOrNull { it.value.points }?.let { (k, g) ->
++            "${ClanTable.getInstance().getClan(first(k))?.name}->${ClanTable.getInstance().getClan(second(k))?.name} ${g.points.toInt()} ${g.reason}"
++        } ?: "-"
++        println("Autobots wars summary: grudges=${grudges.size} top=[$top] wars=$active mutual=$mutualWars declared=$declared answered=$answered " +
++                "peace=$peaces surrendered=$surrendered stopped=$stopped fights=$fights pks=$pks warKills=$warKills")
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt
+index 6adf937..ad1dbe5 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt
+@@ -79,6 +79,7 @@ internal object Clans {
+             recruit(online)
+             leave(online)
+             ClanPool.tick(online)
++            ClanWars.tick(online)
+         } catch (e: Exception) {
+             e.printStackTrace()
+         } finally {
+@@ -234,6 +235,7 @@ internal object Clans {
+         who.clanJoinExpiryTime = 0
+         who.broadcastUserInfo()
+         persist(who)
++        ClanWars.onJoinedClan(who, clan)
+         return true
+     }
+ 
+@@ -247,6 +249,7 @@ internal object Clans {
+         clan.broadcastToOnlineMembers(PledgeShowMemberListDelete(bot.name))
+         bot.sendPacket(SystemMessageId.YOU_HAVE_WITHDRAWN_FROM_CLAN)
+         persist(bot)
++        ClanWars.onLeftClan(bot, clan.clanId)
+         left++
+         println("Autobots clans: ${bot.name} left ${clan.name}: $why")
+     }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+index 44b9abe..09af49f 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+@@ -214,7 +214,7 @@ internal object GroupFinder {
+     }
+ 
+     // A bot away from the keyboard or about to log out does not answer party searches.
+-    private fun isFree(bot: Autobot) = !StaticParties.reserved(bot.objectId) && !bot.isInParty && !bot.isDead && !bot.isInStoreMode && bot.life != null && bot.controller == null &&
++    private fun isFree(bot: Autobot) = !StaticParties.reserved(bot.objectId) && !bot.isInParty && bot.karma == 0 && !bot.isDead && !bot.isInStoreMode && bot.life != null && bot.controller == null &&
+             bot.life?.activity.let { it != SessionPlan.Activity.Afk && it != SessionPlan.Activity.Home }
+ 
+     /** Lookers around the leader's level it doesn't avoid, the ones it likes best first; clan mates count as liked. */
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidBehavior.kt
+index 5a59948..db22677 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/raid/RaidBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/raid/RaidBehavior.kt
+@@ -95,12 +95,14 @@ internal object RaidBehavior {
+                 raid.intercept = true
+                 raid.pvp = Rnd.get(100) < PVP_PERCENT
+                 RaidLog.count(RaidLog.Event.Intercepted)
++                dev.l2j.autobots.population.group.ClanWars.onRaidTaken(rivals.first(), leader)
+                 leader.partySay(listOf("whatever, we take it", "забираем рб", "бьём, кто успел тот и съел").random())
+                 RaidLog.note(leader, "takes ${raid.boss.name} from ${rivals.first().name}${if (raid.pvp) " and fights them for it" else ""}")
+                 return pull(leader, party, raid)
+             }
+             if (raid.elapsed() > WAIT_POLITELY_MS) {
+                 RaidLog.count(RaidLog.Event.GaveWay)
++                dev.l2j.autobots.population.group.ClanWars.onRaidTaken(leader, rivals.first())
+                 leader.partySay(listOf("its taken, lets go", "рб заняли, уходим", "ладно, не наш").random())
+                 return endRaid(party, "left it to ${rivals.first().name}")
+             }
