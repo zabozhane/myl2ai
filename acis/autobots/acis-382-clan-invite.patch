@@ -1,0 +1,13 @@
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestJoinPledge.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestJoinPledge.java
+index fafbc5a..632522b 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestJoinPledge.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestJoinPledge.java
+@@ -45,6 +45,8 @@ public final class RequestJoinPledge extends L2GameClientPacket
+ 		
+ 		target.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_HAS_INVITED_YOU_TO_JOIN_THE_CLAN_S2).addCharName(activeChar).addString(clan.getName()));
+ 		target.sendPacket(new AskJoinPledge(activeChar.getObjectId(), clan.getName()));
++		// A bot never sees the AskJoinPledge window: it answers the invite in code.
++		dev.l2j.autobots.AutobotsManager.INSTANCE.onClanInvite(activeChar, target);
+ 	}
+ 	
+ 	public int getPledgeType()

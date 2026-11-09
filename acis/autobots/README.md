@@ -455,3 +455,30 @@ actual link rather than requiring an unrelated straight line to the destination 
     rides back with the manager or, without the ride (inside the track a Scroll of Escape lands at the track), walks
     out by the Race Track Gatekeeper; 5 failed tries a minute apart and it stays.
   - Skipped while `AllowDerbyTrack` (server.properties) is off or the Race Managers are not in the world. `Autobots derby summary` every 10 minutes.
+
+- `acis-382-clan-invite.patch` — `RequestJoinPledge` calls `AutobotsManager.onClanInvite` after sending
+  AskJoinPledge: a bot never sees the window, so it answers a player's clan invite in code.
+- `l2autobots-clan-life.patch` — bot clans that grow and play (stages 4a/4b, spec `docs/clans.md`), replaces the
+  founding rules of `l2autobots-clans.patch`:
+  - Founding: a leader type (`clanLeaderPercent` of the team players, by object id) from `clanFoundMinLevel` (15)
+    that knows somebody (affinity 15+), or any non-loner with two friends (25+), or a static party leader.
+  - Recruiting: the leader and up to two officers (power grade 5 with the join right, the members the leader likes
+    best) invite acquaintances, bots within 1500 and bots that heard their recruitment shout (every 40-60 minutes
+    while there is room). The invited weigh liking, trust, race, level, schedule and character; a refusal is kept
+    for a day. Joining and leaving go through `checkClanJoinCondition`, the clan level's member limit, the core's
+    penalties and the same packets as `RequestAnswerJoinPledge` / `RequestWithdrawPledge`.
+  - Getting acquainted without a party: bots within 600 of each other (one spot, one town) up to affinity 10,
+    clan mates up to 30 (`Relations.acquaint`). Party building prefers clan mates.
+  - A leader absent for 7 days (career break or quit) hands the clan to the member who plays and is liked most;
+    a clan where nobody played for 14 days is dissolved, offline bot members cleared in `autobots` too.
+  - `ClanPool` (`clanPoolEnabled`, needs `socialTradeEnabled`): once a day a clan pools adena for the next clan
+    level (leader pays the SP, 650k / 2.5M adena) or for the next kit piece of its strongest member online who
+    can't afford it. Members give 5-25% of what they can spare (keeping their own next piece) through the trade
+    window when they meet the recipient (one party, 1500 apart, or one town). A scamming leader keeps a level pool:
+    the givers' liking drops by 40 and they leave. Gifts are logged in `autobot_clan_pool`.
+  - `ClanChat`: clan events as code lines (welcome, pool call, gifts, thanks, clan level, new leader, leaving). A
+    player's clan chat: greetings, "пати" (a bot leader with room invites, free bots offer), "помогите" (where the
+    nearest are), anything else to `BotTalk.onClanChat`. "ищу клан" in shout brings a recruiter's whisper; a whisper
+    about the clan to a leader or officer gets the real AskJoinPledge after the same checks; a player's clan
+    invite to a bot is answered by sympathy.
+  - `Autobots clans summary` every 5 minutes: clans, members, free leader types, founded/joined/declined/left, pools.
