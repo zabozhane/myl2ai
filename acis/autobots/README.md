@@ -482,3 +482,27 @@ actual link rather than requiring an unrelated straight line to the destination 
     about the clan to a leader or officer gets the real AskJoinPledge after the same checks; a player's clan
     invite to a bot is answered by sympathy.
   - `Autobots clans summary` every 5 minutes: clans, members, free leader types, founded/joined/declined/left, pools.
+
+- `acis-382-clan-wars.patch` — a war can be declared from clan level `AltClanLevelForWar` (new, retail 3; here 1)
+  and `AltClanMembersForWar` members (here 10, retail 15), owner's decision of 09.11. `RequestStartPledgeWar`,
+  `RequestStopPledgeWar` and `RequestSurrenderPledgeWar` keep their checks in static `declare` / `stop` /
+  `surrender`, which the bots call.
+- `l2autobots-clan-wars.patch` — clan wars of bot clans (`population/group/ClanWars.kt`, spec `docs/clan-wars.md`,
+  `clanWarsEnabled`, `clanWarPkEnabled`, `clanWarLog`):
+  - Grudges (`autobot_clan_grudges`, −10% a day): members of two clans hunting within 600 (+1 a pair, at most 10 a
+    clan tick, ×1.5 for a clearly stronger or weaker clan), a member killed (+30 PK, +5 in a war), a raid boss taken
+    or given way (+20), a scam or unpaid loan (+15), a member who left and joined them within a day (+10), a war
+    declared on us (+40).
+  - The leader online declares on the worst grudge past its temper (aggressive 40, normal 70, cautious 100), at most
+    2 wars; a cautious leader makes peace with a non-aggressive one instead (−30 both, once a day). A clan a war is
+    declared on answers when its grudge passes the threshold and it is not much weaker. Lines in clan chat, a shout.
+  - Combat (`CombatBehavior.warFight`, before monsters, rest and loot): a flagged or red attacker is fought back, a
+    clan mate attacked within 3000 gets help, the bot's killer and enemies of a mutual war within 900 are attacked
+    when not stronger (+3 levels), HP over 60% and not outnumbered; otherwise the clan hears where the enemies are.
+    Loners and bots in a party with a player don't start fights.
+  - PK in a one-sided war (`clanWarPkEnabled`): aggressive bots, normal ones after a loss or with a grudge of 100+,
+    PK a lone unflagged enemy bot (+2 levels, HP over 70%, once an hour, no karma yet). The PKer leaves its party,
+    boasts in clan chat, takes no town trips and logs out in the field until the karma is worked off.
+  - End: the losing side of a mutual war (10+ deaths, kills at most half) surrenders; the declarer stops a war
+    without fights for 3 days or older than 7 (a cautious leader 1 and 4). Kills, deaths and dates in
+    `autobot_clan_wars`. `Autobots wars summary` every clan tick.

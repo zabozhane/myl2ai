@@ -1,0 +1,280 @@
+diff --git a/aCis_gameserver/config/clans.properties b/aCis_gameserver/config/clans.properties
+index d2f10cf..a2707de 100644
+--- a/aCis_gameserver/config/clans.properties
++++ b/aCis_gameserver/config/clans.properties
+@@ -25,8 +25,11 @@ DaysBeforeCreateNewAllyWhenDissolved = 10
+ # Maximum number of clans in ally
+ AltMaxNumOfClansInAlly = 3
+ 
+-# Number of members needed to request a clan war
+-AltClanMembersForWar = 15
++# Clan level needed to request a clan war (retail: 3)
++AltClanLevelForWar = 1
++
++# Number of members needed to request a clan war (retail: 15)
++AltClanMembersForWar = 10
+ 
+ # Number of days needed by a clan to war back another clan
+ AltClanWarPenaltyWhenEnded = 5
+diff --git a/aCis_gameserver/java/net/sf/l2j/Config.java b/aCis_gameserver/java/net/sf/l2j/Config.java
+index 523d782..24dd64f 100644
+--- a/aCis_gameserver/java/net/sf/l2j/Config.java
++++ b/aCis_gameserver/java/net/sf/l2j/Config.java
+@@ -49,6 +49,7 @@ public final class Config
+ 	public static int ALT_ACCEPT_CLAN_DAYS_WHEN_DISMISSED;
+ 	public static int ALT_CREATE_ALLY_DAYS_WHEN_DISSOLVED;
+ 	public static int ALT_MAX_NUM_OF_CLANS_IN_ALLY;
++	public static int ALT_CLAN_LEVEL_FOR_WAR;
+ 	public static int ALT_CLAN_MEMBERS_FOR_WAR;
+ 	public static int ALT_CLAN_WAR_PENALTY_WHEN_ENDED;
+ 	public static boolean ALT_MEMBERS_CAN_WITHDRAW_FROM_CLANWH;
+@@ -665,6 +666,7 @@ public final class Config
+ 		ALT_CLAN_JOIN_DAYS = clans.getProperty("DaysBeforeJoinAClan", 5);
+ 		ALT_CLAN_CREATE_DAYS = clans.getProperty("DaysBeforeCreateAClan", 10);
+ 		ALT_MAX_NUM_OF_CLANS_IN_ALLY = clans.getProperty("AltMaxNumOfClansInAlly", 3);
++		ALT_CLAN_LEVEL_FOR_WAR = clans.getProperty("AltClanLevelForWar", 3);
+ 		ALT_CLAN_MEMBERS_FOR_WAR = clans.getProperty("AltClanMembersForWar", 15);
+ 		ALT_CLAN_WAR_PENALTY_WHEN_ENDED = clans.getProperty("AltClanWarPenaltyWhenEnded", 5);
+ 		ALT_CLAN_DISSOLVE_DAYS = clans.getProperty("DaysToPassToDissolveAClan", 7);
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestStartPledgeWar.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestStartPledgeWar.java
+index cd245c5..7a5dee3 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestStartPledgeWar.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestStartPledgeWar.java
+@@ -24,77 +24,90 @@ public final class RequestStartPledgeWar extends L2GameClientPacket
+ 		if (player == null)
+ 			return;
+ 		
++		final Clan attackedClan = ClanTable.getInstance().getClanByName(_pledgeName);
++		if (attackedClan == null)
++		{
++			player.sendPacket(SystemMessageId.CLAN_WAR_CANNOT_DECLARED_CLAN_NOT_EXIST);
++			return;
++		}
++		
++		declare(player, attackedClan);
++	}
++	
++	/**
++	 * Declares a war with every retail check; the bots use it too.
++	 * @param player : the declaring clan member, who needs the war privilege.
++	 * @param attackedClan : the clan the war is declared on.
++	 * @return true if the war was declared.
++	 */
++	public static boolean declare(Player player, Clan attackedClan)
++	{
+ 		final Clan attackerClan = player.getClan();
+ 		if (attackerClan == null)
+-			return;
++			return false;
+ 		
+ 		if ((player.getClanPrivileges() & Clan.CP_CL_PLEDGE_WAR) != Clan.CP_CL_PLEDGE_WAR)
+ 		{
+ 			player.sendPacket(SystemMessageId.YOU_ARE_NOT_AUTHORIZED_TO_DO_THAT);
+-			return;
+-		}
+-		
+-		final Clan attackedClan = ClanTable.getInstance().getClanByName(_pledgeName);
+-		if (attackedClan == null)
+-		{
+-			player.sendPacket(SystemMessageId.CLAN_WAR_CANNOT_DECLARED_CLAN_NOT_EXIST);
+-			return;
++			return false;
+ 		}
+ 		
+ 		if (attackedClan.getClanId() == attackerClan.getClanId())
+ 		{
+ 			player.sendPacket(SystemMessageId.CANNOT_DECLARE_AGAINST_OWN_CLAN);
+-			return;
++			return false;
+ 		}
+ 		
+ 		if (attackerClan.getWarList().size() >= 30)
+ 		{
+ 			player.sendPacket(SystemMessageId.TOO_MANY_CLAN_WARS);
+-			return;
++			return false;
+ 		}
+ 		
+-		if (attackerClan.getLevel() < 3 || attackerClan.getMembersCount() < Config.ALT_CLAN_MEMBERS_FOR_WAR)
++		if (attackerClan.getLevel() < Config.ALT_CLAN_LEVEL_FOR_WAR || attackerClan.getMembersCount() < Config.ALT_CLAN_MEMBERS_FOR_WAR)
+ 		{
+ 			player.sendPacket(SystemMessageId.CLAN_WAR_DECLARED_IF_CLAN_LVL3_OR_15_MEMBER);
+-			return;
++			return false;
+ 		}
+ 		
+-		if (!attackerClan.getAttackerList().contains(attackedClan.getClanId()) && (attackedClan.getLevel() < 3 || attackedClan.getMembersCount() < Config.ALT_CLAN_MEMBERS_FOR_WAR))
++		if (!attackerClan.getAttackerList().contains(attackedClan.getClanId()) && (attackedClan.getLevel() < Config.ALT_CLAN_LEVEL_FOR_WAR || attackedClan.getMembersCount() < Config.ALT_CLAN_MEMBERS_FOR_WAR))
+ 		{
+ 			player.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_CLAN_CANNOT_DECLARE_WAR_TOO_LOW_LEVEL_OR_NOT_ENOUGH_MEMBERS).addString(attackedClan.getName()));
+-			return;
++			return false;
+ 		}
+ 		
+ 		if (attackerClan.getAllyId() == attackedClan.getAllyId() && attackerClan.getAllyId() != 0)
+ 		{
+ 			player.sendPacket(SystemMessageId.CLAN_WAR_AGAINST_A_ALLIED_CLAN_NOT_WORK);
+-			return;
++			return false;
+ 		}
+ 		
+ 		if (attackedClan.getDissolvingExpiryTime() > 0)
+ 		{
+ 			player.sendPacket(SystemMessageId.NO_CLAN_WAR_AGAINST_DISSOLVING_CLAN);
+-			return;
++			return false;
+ 		}
+ 		
+ 		if (attackerClan.isAtWarWith(attackedClan.getClanId()))
+ 		{
+ 			player.sendPacket(SystemMessageId.WAR_ALREADY_DECLARED);
+-			return;
++			return false;
+ 		}
+ 		
+ 		if (attackerClan.hasWarPenaltyWith(attackedClan.getClanId()))
+ 		{
+ 			player.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.ALREADY_AT_WAR_WITH_S1_WAIT_5_DAYS).addString(attackedClan.getName()));
+-			return;
++			return false;
+ 		}
+ 		
+-		ClanTable.getInstance().storeClansWars(player.getClanId(), attackedClan.getClanId());
++		ClanTable.getInstance().storeClansWars(attackerClan.getClanId(), attackedClan.getClanId());
+ 		
+ 		for (Player member : attackedClan.getOnlineMembers())
+ 			member.broadcastUserInfo();
+ 		
+ 		for (Player member : attackerClan.getOnlineMembers())
+ 			member.broadcastUserInfo();
++		
++		return true;
+ 	}
+ }
+\ No newline at end of file
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestStopPledgeWar.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestStopPledgeWar.java
+index 0776550..a059c40 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestStopPledgeWar.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestStopPledgeWar.java
+@@ -22,32 +22,49 @@ public final class RequestStopPledgeWar extends L2GameClientPacket
+ 		if (player == null)
+ 			return;
+ 		
+-		final Clan playerClan = player.getClan();
+-		if (playerClan == null)
+-			return;
+-		
+ 		final Clan clan = ClanTable.getInstance().getClanByName(_pledgeName);
+ 		if (clan == null)
+ 			return;
+ 		
++		stop(player, clan);
++	}
++	
++	public static boolean stop(Player player, Clan clan)
++	{
++		return stop(player, clan, true);
++	}
++	
++	/**
++	 * Stops a war this clan declared, with the retail checks; the bots use it too.
++	 * @param player : the clan member with the war privilege.
++	 * @param clan : the enemy clan.
++	 * @param anyCombat : retail, no member online may be in combat; false only checks members fighting players (flagged), as bot clans always have somebody hunting.
++	 * @return true if the war was stopped.
++	 */
++	public static boolean stop(Player player, Clan clan, boolean anyCombat)
++	{
++		final Clan playerClan = player.getClan();
++		if (playerClan == null)
++			return false;
++		
+ 		if ((player.getClanPrivileges() & Clan.CP_CL_PLEDGE_WAR) != Clan.CP_CL_PLEDGE_WAR)
+ 		{
+ 			player.sendPacket(SystemMessageId.YOU_ARE_NOT_AUTHORIZED_TO_DO_THAT);
+-			return;
++			return false;
+ 		}
+ 		
+ 		if (!playerClan.isAtWarWith(clan.getClanId()))
+ 		{
+ 			player.sendPacket(SystemMessageId.NOT_INVOLVED_IN_WAR);
+-			return;
++			return false;
+ 		}
+ 		
+ 		for (Player member : playerClan.getOnlineMembers())
+ 		{
+-			if (member.isInCombat())
++			if (anyCombat ? member.isInCombat() : member.getPvpFlag() > 0)
+ 			{
+ 				player.sendPacket(SystemMessageId.CANT_STOP_CLAN_WAR_WHILE_IN_COMBAT);
+-				return;
++				return false;
+ 			}
+ 		}
+ 		
+@@ -58,5 +75,7 @@ public final class RequestStopPledgeWar extends L2GameClientPacket
+ 		
+ 		for (Player member : playerClan.getOnlineMembers())
+ 			member.broadcastUserInfo();
++		
++		return true;
+ 	}
+ }
+\ No newline at end of file
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestSurrenderPledgeWar.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestSurrenderPledgeWar.java
+index b37d99f..929ecb6 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestSurrenderPledgeWar.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestSurrenderPledgeWar.java
+@@ -23,29 +23,41 @@ public final class RequestSurrenderPledgeWar extends L2GameClientPacket
+ 		if (activeChar == null)
+ 			return;
+ 		
++		final Clan clan = ClanTable.getInstance().getClanByName(_pledgeName);
++		if (clan == null)
++			return;
++		
++		surrender(activeChar, clan);
++	}
++	
++	/**
++	 * Surrenders a war with the retail checks and penalty; the bots use it too.
++	 * @param activeChar : the clan member with the war privilege.
++	 * @param clan : the enemy clan.
++	 * @return true if the clan surrendered.
++	 */
++	public static boolean surrender(Player activeChar, Clan clan)
++	{
+ 		final Clan playerClan = activeChar.getClan();
+ 		if (playerClan == null)
+-			return;
++			return false;
+ 		
+ 		// Check if player who does the request has the correct rights to do it
+ 		if ((activeChar.getClanPrivileges() & Clan.CP_CL_PLEDGE_WAR) != Clan.CP_CL_PLEDGE_WAR)
+ 		{
+ 			activeChar.sendPacket(SystemMessageId.YOU_ARE_NOT_AUTHORIZED_TO_DO_THAT);
+-			return;
++			return false;
+ 		}
+ 		
+-		final Clan clan = ClanTable.getInstance().getClanByName(_pledgeName);
+-		if (clan == null)
+-			return;
+-		
+ 		if (!playerClan.isAtWarWith(clan.getClanId()))
+ 		{
+ 			activeChar.sendPacket(SystemMessageId.NOT_INVOLVED_IN_WAR);
+-			return;
++			return false;
+ 		}
+ 		
+ 		activeChar.deathPenalty(false, false, false);
+-		activeChar.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.YOU_HAVE_SURRENDERED_TO_THE_S1_CLAN).addString(_pledgeName));
++		activeChar.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.YOU_HAVE_SURRENDERED_TO_THE_S1_CLAN).addString(clan.getName()));
+ 		ClanTable.getInstance().deleteClansWars(playerClan.getClanId(), clan.getClanId());
++		return true;
+ 	}
+ }
+\ No newline at end of file
