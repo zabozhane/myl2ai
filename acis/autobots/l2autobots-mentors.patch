@@ -1,5 +1,5 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index e1f492d..9a4985e 100644
+index 8daf1d4..489d82c 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
 @@ -55,6 +55,20 @@
@@ -24,19 +24,19 @@ index e1f492d..9a4985e 100644
         shout for missing members and answer players who look for a group in chat. At most this percent of the
         online population plays in parties; the rest hunt alone. groupLog prints every formed party. -->
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-index 64fc761..a1ab7cd 100644
+index 1bb1b8d..5c9c79b 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 @@ -174,7 +174,8 @@ object AutobotsManager {
              2 -> { // pm "
                  if(target == null) return false
                  val bot = activeBots.getOrElse(target) {null} ?: return false
--                if (!dev.l2j.autobots.population.news.Rumors.onWhisper(chatter, bot, text) &&
+-                if (!dev.l2j.autobots.population.notice.PlayerNotice.onWhisper(chatter, bot, text) &&
 +                if (!dev.l2j.autobots.population.group.Mentors.onWhisper(chatter, bot, text) &&
-+                        !dev.l2j.autobots.population.news.Rumors.onWhisper(chatter, bot, text) &&
++                        !dev.l2j.autobots.population.notice.PlayerNotice.onWhisper(chatter, bot, text) &&
+                         !dev.l2j.autobots.population.news.Rumors.onWhisper(chatter, bot, text) &&
                          !dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
                          !dev.l2j.autobots.population.llm.Persuasion.onWhisper(chatter, bot, text) &&
-                         !PlayerTrade.onWhisper(chatter, bot, text) && !GroupChat.onWhisper(chatter, bot, text)) BotTalk.onWhisper(chatter, bot, text)
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 index f89b588..e53b251 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
@@ -80,7 +80,7 @@ index 64d5932..5fa1373 100644
      }
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index 8a45b0a..b09a4a5 100644
+index 0324de5..a94cbea 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 @@ -51,6 +51,15 @@ internal data class AutobotSettings(
@@ -113,13 +113,13 @@ index aeef07f..8041721 100644
          if (!bot.isInsideZone(ZoneId.TOWN)) tripDoneInTown = false
  
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-index e9e93b7..99c9242 100644
+index c5161fe..05f5d70 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-@@ -115,12 +115,14 @@ internal object PopulationManager {
-                 dev.l2j.autobots.population.group.StaticParties.summary()
+@@ -116,12 +116,14 @@ internal object PopulationManager {
                  dev.l2j.autobots.population.llm.Llm.summary()
                  dev.l2j.autobots.population.news.ServerNews.summary()
+                 dev.l2j.autobots.population.notice.PlayerNotice.summary()
 +                dev.l2j.autobots.population.group.Mentors.summary()
              }
              val online = members.values.mapNotNull { active(it) }.distinctBy { it.objectId }
@@ -132,10 +132,10 @@ index e9e93b7..99c9242 100644
              dev.l2j.autobots.population.news.ServerNews.tick()
              if (ticks % GROUPS_EVERY_TICKS == 1) dev.l2j.autobots.population.news.Rumors.tick(online)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-index 09af49f..71a1525 100644
+index e36398e..a407a77 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
-@@ -214,7 +214,7 @@ internal object GroupFinder {
+@@ -219,7 +219,7 @@ internal object GroupFinder {
      }
  
      // A bot away from the keyboard or about to log out does not answer party searches.
@@ -612,7 +612,7 @@ index 0000000..06e6478
 +    private fun pretty(questName: String) = questName.substringAfter('_').replace(Regex("([a-z])([A-Z])"), "$1 $2")
 +}
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
-index d70beed..0dd2cbb 100644
+index b38bef7..c8b5fc3 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
 @@ -5,6 +5,7 @@ import dev.l2j.autobots.Autobot
@@ -623,7 +623,7 @@ index d70beed..0dd2cbb 100644
  import dev.l2j.autobots.population.group.Sociability
  import dev.l2j.autobots.population.trade.PlayerTrade
  import kotlinx.coroutines.delay
-@@ -167,6 +168,7 @@ internal object BotTalk {
+@@ -176,6 +177,7 @@ internal object BotTalk {
  
      private fun activity(bot: Autobot): String = when {
          bot.isInStoreMode -> "sitting in your private store in ${GroupFinder.placeName(bot)}"
