@@ -1,0 +1,125 @@
+diff --git a/aCis_gameserver/config/server.properties b/aCis_gameserver/config/server.properties
+index 0a76317..f7b14e7 100644
+--- a/aCis_gameserver/config/server.properties
++++ b/aCis_gameserver/config/server.properties
+@@ -233,10 +233,10 @@ GMAudit = False
+ # =================================================================
+ 
+ # Activate or no the community board.
+-EnableCommunityBoard = False
++EnableCommunityBoard = True
+ 
+ # Show this community board section when you open it.
+-BBSDefault = _bbshome
++BBSDefault = _bbsnews
+ 
+ # =================================================================
+ #                          Flood Protectors
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/communitybbs/CommunityBoard.java b/aCis_gameserver/java/net/sf/l2j/gameserver/communitybbs/CommunityBoard.java
+index 934c87c..d438ac5 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/communitybbs/CommunityBoard.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/communitybbs/CommunityBoard.java
+@@ -31,7 +31,9 @@ public class CommunityBoard
+ 			return;
+ 		}
+ 		
+-		if (command.startsWith("_bbshome"))
++		if (command.startsWith("_bbsnews"))
++			dev.l2j.autobots.AutobotsManager.INSTANCE.onCommunityBoard(player, command);
++		else if (command.startsWith("_bbshome"))
+ 			TopBBSManager.getInstance().parseCmd(command, player);
+ 		else if (command.startsWith("_bbsloc"))
+ 			RegionBBSManager.getInstance().parseCmd(command, player);
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/data/sql/ClanTable.java b/aCis_gameserver/java/net/sf/l2j/gameserver/data/sql/ClanTable.java
+index c6d7629..613cd72 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/data/sql/ClanTable.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/data/sql/ClanTable.java
+@@ -357,6 +357,8 @@ public class ClanTable
+ 		{
+ 			LOGGER.error("Couldn't store clans wars.", e);
+ 		}
++		
++		dev.l2j.autobots.AutobotsManager.INSTANCE.onClanWarDeclared(clan1, clan2);
+ 	}
+ 	
+ 	/**
+@@ -405,6 +407,8 @@ public class ClanTable
+ 		{
+ 			LOGGER.error("Couldn't delete clans wars.", e);
+ 		}
++		
++		dev.l2j.autobots.AutobotsManager.INSTANCE.onClanWarEnded(clan1, clan2);
+ 	}
+ 	
+ 	/**
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java
+index 12d178b..76d0795 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/Player.java
+@@ -3729,6 +3729,7 @@ public class Player extends Playable
+ 			{
+ 				// Add PvP point to attacker.
+ 				setPvpKills(getPvpKills() + 1);
++				dev.l2j.autobots.AutobotsManager.INSTANCE.onPvpKill(this, targetPlayer);
+ 				
+ 				// Send UserInfo packet to attacker with its Karma and PK Counter
+ 				sendPacket(new UserInfo(this));
+@@ -3744,6 +3745,9 @@ public class Player extends Playable
+ 			// Calculate new karma.
+ 			setKarma(getKarma() + Formulas.calculateKarmaGain(getPkKills(), target instanceof Summon));
+ 			
++			if (target instanceof Player)
++				dev.l2j.autobots.AutobotsManager.INSTANCE.onPk(this, targetPlayer);
++			
+ 			// Send UserInfo packet to attacker with its Karma and PK Counter
+ 			sendPacket(new UserInfo(this));
+ 		}
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/GrandBoss.java b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/GrandBoss.java
+index e0fd263..f80e20d 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/GrandBoss.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/GrandBoss.java
+@@ -62,6 +62,7 @@ public final class GrandBoss extends Monster
+ 			}
+ 		}
+ 		
++		dev.l2j.autobots.AutobotsManager.INSTANCE.onRaidKilled(this, killer);
+ 		return true;
+ 	}
+ 	
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/Monster.java b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/Monster.java
+index d862916..4e7a4d3 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/Monster.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/Monster.java
+@@ -1137,6 +1137,8 @@ public class Monster extends Attackable
+ 					else
+ 						dropItem(player, item);
+ 					
++					dev.l2j.autobots.AutobotsManager.INSTANCE.onMonsterDrop(this, player, item.getId(), item.getValue());
++					
+ 					// Broadcast message if RaidBoss was defeated
+ 					if (isRaidBoss())
+ 						broadcastPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_DIED_DROPPED_S3_S2).addCharName(this).addItemName(item.getId()).addNumber(item.getValue()));
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/RaidBoss.java b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/RaidBoss.java
+index 85bbe11..2cb6122 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/RaidBoss.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/model/actor/instance/RaidBoss.java
+@@ -127,6 +127,7 @@ public class RaidBoss extends Monster
+ 			}
+ 		}
+ 		
++		dev.l2j.autobots.AutobotsManager.INSTANCE.onRaidKilled(this, killer);
+ 		RaidBossManager.getInstance().onDeath(this);
+ 		return true;
+ 	}
+diff --git a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestSurrenderPledgeWar.java b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestSurrenderPledgeWar.java
+index 929ecb6..3fc88ed 100644
+--- a/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestSurrenderPledgeWar.java
++++ b/aCis_gameserver/java/net/sf/l2j/gameserver/network/clientpackets/RequestSurrenderPledgeWar.java
+@@ -57,6 +57,7 @@ public final class RequestSurrenderPledgeWar extends L2GameClientPacket
+ 		
+ 		activeChar.deathPenalty(false, false, false);
+ 		activeChar.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.YOU_HAVE_SURRENDERED_TO_THE_S1_CLAN).addString(clan.getName()));
++		dev.l2j.autobots.AutobotsManager.INSTANCE.onClanWarSurrender(playerClan, clan);
+ 		ClanTable.getInstance().deleteClansWars(playerClan.getClanId(), clan.getClanId());
+ 		return true;
+ 	}

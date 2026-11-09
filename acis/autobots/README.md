@@ -506,6 +506,46 @@ actual link rather than requiring an unrelated straight line to the destination 
   - End: the losing side of a mutual war (10+ deaths, kills at most half) surrenders; the declarer stops a war
     without fights for 3 days or older than 7 (a cautious leader 1 and 4). Kills, deaths and dates in
     `autobot_clan_wars`. `Autobots wars summary` every clan tick.
+
+- `acis-382-duels.patch` — `RequestDuelStart` calls `AutobotsManager.onDuelChallenge` after a 1 vs 1 or party
+  challenge (a bot never sees `ExDuelAskStart`), `Duel.endDuel` calls `AutobotsManager.onDuelEnd` with the result
+  before the players are restored.
+- `l2autobots-duels.patch` — duels and the duel rating (`population/duel/`, spec `docs/duels.md`, `duelsEnabled`,
+  `duelChancePercent`, `duelMinLevel`, `duelLevelGap`, `duelLog`):
+  - `DuelGrounds`: per town (by name) the nearest point outside town, peace, PvP, siege, water and boss zones along
+    8 rays from a respawn point (+400 margin, no aggressive spawns in 1500), searched once.
+  - Session activity `Duel` (`DuelVisit`): rare like the derby, from `duelMinLevel`, not in a party, with a quest or
+    at night; gamblers go more, cautious bots and grinders less. To town, out to the ground, rest to 90% HP/MP, up to
+    1-3 duels, leave after 15 minutes without one.
+  - `Duels.look`: a waiting bot challenges a waiting bot (lower object id challenges, level gap `duelLevelGap`, no
+    rematch for 30 minutes, closest rating first) with the core's checks and `DuelManager.addDuel`, or a live player
+    within 1000 with a line in chat and the real `ExDuelAskStart` (once in 10 minutes, hourly after two refusals).
+    A player's `/duel` to a bot is answered in 1-3 s like `RequestDuelAnswerStart` (no party duels, no PK, not busy
+    or on a quest, at most +5 levels, +10 for a gambler; 90/70/40% by temper, always at the ground).
+  - `CombatBehavior.duelFight` (before war fights, monsters, rest and loot): only the opponent, nothing during the
+    countdown or after the result; a cautious bot under 15% HP may surrender.
+  - `DuelRating`: Elo (1000, K 40 for the first 10 duels, then 24, a timeout is a draw, a cancelled duel does not
+    count) for bots and players in `autobot_duel_ratings`; gg lines, a shout every 3 wins in a row, a clan chat line
+    after beating a 100+ stronger rating. `.duels` shows the top 10 and the player's own line.
+    `Autobots duels summary` every 10 minutes.
+- `acis-382-news.patch` — core hooks for the server news: `RaidBoss`/`GrandBoss.doDie` (raid killed), the
+  categorized drop in `Monster.doItemDrop`, the PK and war-PvP branches of `Player.onKillUpdatePvPKarma`,
+  `ClanTable.storeClansWars`/`deleteClansWars` and `RequestSurrenderPledgeWar.surrender`, `_bbsnews` in
+  `CommunityBoard`. The community board is on (`EnableCommunityBoard = True`) and opens on `_bbsnews`.
+- `l2autobots-news.patch` — server news and rumors (`population/news/`, spec `docs/news.md`, `newsEnabled`,
+  `newsRumorsEnabled`, `newsRumorMinutes`, `newsRumorsPerHour`, `newsRareDropChance`, `newsLog`):
+  - `ServerNews`: raid bosses killed (with the party, clan and notable drops), rare drops from monsters (base chance
+    at most `newsRareDropChance` of 1000000, gear, jewels, recipes, enchant scrolls, spellbooks), PKs, wars
+    declared / mutual / surrendered / stopped and a battle score every 30 minutes (3+ kills in a mutual war). Bots
+    and players alike. The last 200 in memory, a week in `autobot_news`.
+  - `NewsBoard` (Alt+B): the feed with tabs (all, raids, drops, PK, wars) and pages, wars going on with the score
+    from `autobot_clan_wars`, PKs online.
+  - `Rumors`: every 30 s, in each region with a live player, one bot shouts fresh news (this region's first, raids
+    and wars from anywhere), as hearsay after 15 minutes; the raid killer or the PK victim online tells it
+    themselves; 0-3 others react. "что нового" / "новости" / "what's new" in shout, general chat or a whisper is
+    answered with the last news.
+  - `Autobots news:` lines and `Autobots news summary` every 10 minutes.
+
 - `l2autobots-bounties.patch` — bounties on PKers (`population/group/Bounties.kt`, spec `docs/bounties.md`,
   `bountiesEnabled`, `bountyHunters`, `bountyPerLevel`, `bountyLog`):
   - Every player's death goes through `OfflineFarmManager.reportDeath` (called by `Player.doDie`) to `Bounties.onDeath`.

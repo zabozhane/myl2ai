@@ -1,0 +1,128 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+index 21059e9..2798910 100644
+--- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
+@@ -17,6 +17,7 @@ import net.sf.l2j.gameserver.geoengine.GeoEngine
+ import net.sf.l2j.gameserver.model.L2Skill
+ import net.sf.l2j.gameserver.model.actor.Creature
+ import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.actor.instance.Monster
+ import net.sf.l2j.gameserver.model.actor.instance.Servitor
+ import net.sf.l2j.gameserver.model.location.Location
+ 
+@@ -45,6 +46,16 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+     // When the bot died; a raise from the party is waited for only so long.
+     private var deadSince = 0L
+ 
++    // The monster target is watched for progress: its HP going down or the bot getting closer. A target with
++    // neither for TARGET_STALL_MS is dropped and skipped for a while; without this a bot held a monster it could
++    // not hit for up to two hours with full HP and MP (Bormaley, fjdf on the main server, 2026-11-09).
++    private var watchedTargetId = 0
++    private var watchedSince = 0L
++    private var watchedLastSeen = 0L
++    private var watchedBestHp = 0.0
++    private var watchedBestDistance = 0.0
++    private val stalledTargets: MutableMap<Int, Long> = mutableMapOf()
++
+     internal suspend fun onUpdate() {
+         if(player.isDead) {
+             // A live player on auto hunt decides about the revive; AutofarmManager stops it.
+@@ -64,12 +75,51 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         if(AutofarmManager.allowsLoot(player) && lootPicker.onUpdateHerbs()) return
+         if(AutofarmManager.allowsRest(player) && rester.onUpdate()) return
+         if(AutofarmManager.allowsLoot(player) && lootPicker.onUpdate()) return
++        dropStalledTarget()
+         targetAppropriateTarget()
+         checkSelfSupportingSkills()
+         beforeAttack()
+         attack()
+         afterAttack()
+     }
++
++    private fun skipsTarget(objectId: Int): Boolean =
++            blacklistedTargets.contains(objectId) || (stalledTargets[objectId] ?: 0L) > System.currentTimeMillis()
++
++    /** Drops a monster target the bot has fought for [TARGET_STALL_MS] without hurting it or getting closer. */
++    private fun dropStalledTarget() {
++        val target = player.target as? Monster
++        val now = System.currentTimeMillis()
++        if (target == null || target.isDead || target.isRaidRelated) {
++            watchedTargetId = 0
++            return
++        }
++        val gap = distance(player, target)
++        if (target.objectId != watchedTargetId || now - watchedLastSeen > TARGET_WATCH_GAP_MS) {
++            watchedTargetId = target.objectId
++            watchedSince = now
++            watchedBestHp = target.currentHp
++            watchedBestDistance = gap
++        } else if (target.currentHp < watchedBestHp - 0.5 || gap < watchedBestDistance - TARGET_CLOSING_STEP) {
++            watchedBestHp = minOf(watchedBestHp, target.currentHp)
++            watchedBestDistance = minOf(watchedBestDistance, gap)
++            watchedSince = now
++        }
++        watchedLastSeen = now
++        if (now - watchedSince < TARGET_STALL_MS) return
++
++        stalledTargets.entries.removeIf { it.value <= now }
++        stalledTargets[target.objectId] = now + STALLED_TARGET_SKIP_MS
++        println("Autobots combat: ${player.name} id=${player.objectId} drops target ${target.name} (${target.npcId}) id=${target.objectId}" +
++                " after ${(now - watchedSince) / 1000}s without progress: hp=${target.currentHp.toInt()}/${target.maxHp} distance=${gap.toInt()}" +
++                " dz=${target.z - player.z} canSee=${GeoEngine.getInstance().canSeeTarget(player, target)} intention=${player.ai.desire.intention}" +
++                " attacksMe=${target.target === player} at ${player.x},${player.y},${player.z}")
++        watchedTargetId = 0
++        player.abortAttack()
++        player.abortCast()
++        resetTarget()
++        player.ai.setIntention(IntentionType.ACTIVE)
++    }
+     
+     /**
+      * A tick without looking for a fight of its own: a party member waiting for the tank to pull still regenerates,
+@@ -347,7 +397,11 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         val closestTargeter = player.getClosestEntityInRadius<Creature>(radius){ !areInTheSameClanOrParty(it) &&
+                 (if(combatPreferences.attackPlayerType == AttackPlayerType.None) it !is Player else true) && !it.isDead && it.target != null && it.target.objectId == player.objectId }
+ 
+-        if((player.target != null && closestTargeter != null && !blacklistedTargets.contains(closestTargeter.objectId) && player.target != closestTargeter && !(player.target as Creature).isInCombat) && GeoEngine.getInstance().canSeeTarget(player, closestTargeter)) {
++        // Someone attacking the bot comes before a chosen target that is not hurt yet: a bot that walked on to an
++        // untouched monster with full HP while another one beat it ignored the attacker (owner's request 2026-11-09).
++        val current = player.target as? Creature
++        val untouched = current != null && current.target !== player && current.currentHp >= current.maxHp
++        if((current != null && closestTargeter != null && !skipsTarget(closestTargeter.objectId) && current != closestTargeter && (!current.isInCombat || untouched)) && GeoEngine.getInstance().canSeeTarget(player, closestTargeter)) {
+             player.target = closestTargeter
+             committedTarget = closestTargeter
+             blacklistedTargets.clear()
+@@ -382,9 +436,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+     private fun targetAppropriateCreatureByTypeInRadius(radius: Int, targetingPreference: TargetingPreference) { // TODO alive only?
+         
+         val targets: MutableList<Creature> = when(targetingPreference) {
+-            TargetingPreference.Random -> player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) && AutofarmManager.isInHuntingArea(player, it) }.toMutableList()
++            TargetingPreference.Random -> player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !skipsTarget(it.objectId) && AutofarmManager.isInHuntingArea(player, it) }.toMutableList()
+             TargetingPreference.Closest -> {
+-                val target = player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !blacklistedTargets.contains(it.objectId) && AutofarmManager.isInHuntingArea(player, it) }.minByOrNull { distance(player, it) }
++                val target = player.getKnownTargatablesInRadius(radius, combatPreferences.attackPlayerType) { !areInTheSameClanOrParty(it) && !skipsTarget(it.objectId) && AutofarmManager.isInHuntingArea(player, it) }.minByOrNull { distance(player, it) }
+                 if(target != null) mutableListOf(target) else mutableListOf()
+             }
+         }
+@@ -392,8 +446,8 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         if (targets.isNotEmpty()) {
+ 
+             val closestAttacker = if(player.target != null && (player.target as Creature).getHealthPercentage() < 100) null else when(targetingPreference){
+-                TargetingPreference.Closest -> targets.firstOrNull{it.target != null && it.target.objectId == player.objectId && it.isInCombat && !blacklistedTargets.contains(it.objectId)}
+-                TargetingPreference.Random -> targets.sortedBy { distance(player, it) }.firstOrNull{it.target != null && it.target.objectId == player.objectId && it.isInCombat && !blacklistedTargets.contains(it.objectId)}
++                TargetingPreference.Closest -> targets.firstOrNull{it.target != null && it.target.objectId == player.objectId && it.isInCombat && !skipsTarget(it.objectId)}
++                TargetingPreference.Random -> targets.sortedBy { distance(player, it) }.firstOrNull{it.target != null && it.target.objectId == player.objectId && it.isInCombat && !skipsTarget(it.objectId)}
+             }
+ 
+             if(closestAttacker != null) {
+@@ -474,5 +528,9 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
+         private const val BEGINNER_SOULSHOT_ID = 5789
+         private const val BEGINNER_SPIRITSHOT_ID = 5790
+         private const val MAX_WAIT_FOR_RAISE = 120_000L
++        private const val TARGET_STALL_MS = 45_000L
++        private const val TARGET_WATCH_GAP_MS = 10_000L
++        private const val TARGET_CLOSING_STEP = 50.0
++        private const val STALLED_TARGET_SKIP_MS = 5 * 60_000L
+     }
+ }
+\ No newline at end of file

@@ -1,0 +1,24 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+index 7074378..334f05e 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
+@@ -898,7 +898,10 @@ internal class LifeBehavior(private val bot: Autobot) {
+             WalkToSequence(bot, legToward(target.location), PARTY_LEG_ARRIVAL) { abandon(target) }.withHuntDeadline(deadline)
+         } else {
+             var failed=false
+-            val walk=WalkToSequence(bot, target.location, SPOT_RADIUS) { failed=true }.withHuntDeadline(deadline)
++            // From town the bot walks right up to the spot: a spot centre within SPOT_RADIUS of the town counted as
++            // reached at once, and EvilPrem/Silentina stood in town for hours, re-planning this walk every tick.
++            val arrival=if(inTown) minOf(SPOT_RADIUS,TOWN_SPOT_ARRIVAL) else SPOT_RADIUS
++            val walk=WalkToSequence(bot, target.location, arrival) { failed=true }.withHuntDeadline(deadline)
+             walk.execute()
+             if(failed) {
+                 val detour=if(walk.failureReason=="no_safe_path")
+@@ -971,6 +974,7 @@ internal class LifeBehavior(private val bot: Autobot) {
+ 
+     companion object {
+         private const val SPOT_RADIUS = 1500
++        private const val TOWN_SPOT_ARRIVAL = 300
+         private const val LOGIN_DANGER_RADIUS = 2000
+         /** A spot is a 2500 cell; a hunter chasing monsters strays a little beyond it. */
+         private const val DEADLY_SPOT_RADIUS = 5000

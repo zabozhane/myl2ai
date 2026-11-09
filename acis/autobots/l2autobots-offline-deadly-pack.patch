@@ -1,0 +1,43 @@
+diff --git a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+index d524cbd..d49488a 100644
+--- a/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/offlinelife/OfflineFarmManager.kt
+@@ -251,7 +251,10 @@ object OfflineFarmManager {
+             val attackers = player.getKnownTypeInRadius(Monster::class.java, 2000)
+                     .filter { !it.isDead && it.target === player }
+             val route = traveling[player.objectId]
+-            if(killer is Monster && killer.isAggressive && route==null) rememberDeadlySpots(player,killer,attackers.size<=1)
++            // Every death to monsters off a route marks the place, not only one to an aggressive killer: THUNDER
++            // (Dark Mystic 13-14) died 13 times in three days in the Balor orc camp, half of them to a passive
++            // Lieutenant that left no mark, the rest marking only the spots of the one killer kind.
++            if(killer is Monster && route==null) rememberDeadlySpots(player,killer,attackers,killer.isAggressive && attackers.size<=1)
+             LOGGER.info("Offline farm death: ${player.name} id=${player.objectId} lv ${player.level} ${player.classId}" +
+                     " killed by $by, attackers ${attackers.size} [${attackers.joinToString(" ") { "${it.name}/${it.level}" }}]" +
+                     ", healing=${dev.l2j.autobots.population.economy.Healing.count(player)} mp=${player.currentMp.toInt()}/${player.maxMp}" +
+@@ -271,17 +274,21 @@ object OfflineFarmManager {
+      * A monster below the deadly margin can still kill this character here (a caster against a fighter,
+      * several at once). The spawn data cannot tell that, so do not send it back to that prey for a while.
+      */
+-    private fun rememberDeadlySpots(player: Player,killer: Monster,alone: Boolean) {
++    private fun rememberDeadlySpots(player: Player,killer: Monster,attackers: List<Monster>,alone: Boolean) {
+         val now=System.currentTimeMillis()
+-        // One such monster alone beat the character: it is too strong for it anywhere, not only here.
+-        val radius=if(alone) Int.MAX_VALUE else DEADLY_SPOT_RADIUS
+-        val keys=HuntingSpots.keysWithNpcNear(player.location(),killer.npcId,radius)
++        // One aggressive monster alone beat the character: it is too strong for it anywhere, not only here.
++        // The rest of the pack lives in the neighbouring spots of the same camp: those spots are left as well.
++        val kinds=(attackers.map { it.npcId }+killer.npcId).toSet()
++        val keys=kinds.flatMap { npcId ->
++            HuntingSpots.keysWithNpcNear(player.location(),npcId,if(alone && npcId==killer.npcId) Int.MAX_VALUE else DEADLY_SPOT_RADIUS)
++        }.distinct()
+         if(keys.isEmpty()) return
+         val marks=deadlyMarks(player.objectId,now)
+         keys.forEach { marks[it]=now }
+         DeadlySpotStore.save(player.objectId,keys.associateWith { now })
+         LOGGER.info("Offline farm: ${player.name} id=${player.objectId} avoids ${keys.size} spots of ${killer.name} (${killer.npcId})" +
+-                " within ${if(alone) "the world" else "$radius"} for ${DEADLY_SPOT_MS/60_000} minutes after a death there.")
++                (if(kinds.size>1) " and ${kinds.size-1} more kinds of its pack" else "") +
++                " within ${if(alone) "the world" else "$DEADLY_SPOT_RADIUS"} for ${DEADLY_SPOT_MS/60_000} minutes after a death there.")
+     }
+ 
+     private fun deadlyMarks(id: Int,now: Long): MutableMap<Long,Long> =
