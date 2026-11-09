@@ -1,0 +1,1162 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 09df084..4af2987 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -40,7 +40,13 @@
+   <professionWeightSummoner>100</professionWeightSummoner>
+   <!-- Parties: population bots in a party follow the leader, assist the tank, heal, buff and rest together. -->
+   <groupsEnabled>true</groupsEnabled>
++  <!-- Bot clans (docs/clans.md): leader types (this percent of team players) found clans from clanFoundMinLevel once
++       they know somebody; leaders and officers recruit acquaintances, bots around and in shout. clanPoolEnabled: members
++       chip in adena through the trade window for the strongest one's next piece or the next clan level. -->
+   <clansEnabled>true</clansEnabled>
++  <clanLeaderPercent>25</clanLeaderPercent>
++  <clanFoundMinLevel>15</clanFoundMinLevel>
++  <clanPoolEnabled>true</clanPoolEnabled>
+   <!-- Bots gather parties on their own (a healer from level 25, then tank, buffer, spoiler and damage dealers),
+        shout for missing members and answer players who look for a group in chat. At most this percent of the
+        online population plays in parties; the rest hunt alone. groupLog prints every formed party. -->
+diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+index d24fc99..86c59a2 100644
+--- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
+@@ -125,6 +125,7 @@ object AutobotsManager {
+             }
+             1 -> { // shout !
+                 val chatterRegion = MapRegionData.getInstance().getMapRegion(chatter.x, chatter.y)
++                dev.l2j.autobots.population.group.ClanChat.onShout(chatter, text, activeBots.values)
+                 BotTalk.onShout(chatter, text, activeBots.values.filter {
+                     MapRegionData.getInstance().getMapRegion(it.x, it.y) == chatterRegion && !BlockList.isBlocked(it, chatter) })
+                 activeBots.forEach {
+@@ -137,7 +138,8 @@ object AutobotsManager {
+             2 -> { // pm "
+                 if(target == null) return false
+                 val bot = activeBots.getOrElse(target) {null} ?: return false
+-                if (!dev.l2j.autobots.population.llm.Persuasion.onWhisper(chatter, bot, text) &&
++                if (!dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
++                        !dev.l2j.autobots.population.llm.Persuasion.onWhisper(chatter, bot, text) &&
+                         !PlayerTrade.onWhisper(chatter, bot, text) && !GroupChat.onWhisper(chatter, bot, text)) BotTalk.onWhisper(chatter, bot, text)
+ 
+                 World.getInstance().players.filter { it.isGM }.forEach {
+@@ -148,6 +150,9 @@ object AutobotsManager {
+             3 -> { // party #
+                 GroupChat.onPartyChat(chatter, text)
+             }
++            4 -> { // clan @
++                dev.l2j.autobots.population.group.ClanChat.onClanChat(chatter, text)
++            }
+             17 -> { // hero chat %
+                 if(!chatter.isHero) return false
+                 activeBots.forEach {
+@@ -168,6 +173,11 @@ object AutobotsManager {
+         if (target is Autobot) PartyInvites.onInvite(requestor, target)
+     }
+ 
++    /** Called by RequestJoinPledge once a player's clan invited a bot: the bot answers like the client would. */
++    fun onClanInvite(requestor: Player, target: Player) {
++        if (target is Autobot && target.life != null) dev.l2j.autobots.population.group.ClanChat.onInvite(requestor, target)
++    }
++
+     /** Called by TradeRequest once a player asked a bot to trade: a bot never sees the request window. */
+     fun onTradeRequest(requestor: Player, target: Player) {
+         if(dev.l2j.autobots.offlinelife.OfflineFarmManager.isFarming(target)) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index 1f9f63a..80cd538 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -45,6 +45,9 @@ internal data class AutobotSettings(
+         @JsonProperty("professionWeightSummoner") var professionWeightSummoner: Int = 100,
+         @JsonProperty("groupsEnabled") var groupsEnabled: Boolean = true,
+         @JsonProperty("clansEnabled") var clansEnabled: Boolean = true,
++        @JsonProperty("clanLeaderPercent") var clanLeaderPercent: Int = 25,
++        @JsonProperty("clanFoundMinLevel") var clanFoundMinLevel: Int = 15,
++        @JsonProperty("clanPoolEnabled") var clanPoolEnabled: Boolean = true,
+         @JsonProperty("groupFinderEnabled") var groupFinderEnabled: Boolean = true,
+         @JsonProperty("groupFinderMinLevel") var groupFinderMinLevel: Int = 10,
+         @JsonProperty("groupMaxPopulationPercent") var groupMaxPopulationPercent: Int = 40,
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+index c3336c0..a07b859 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
+@@ -201,6 +201,21 @@ internal object PopulationManager {
+     /** The hour the bot wakes up at: a stable chronotype, for matching play styles in clans (stage 4a). */
+     fun wakeHour(objectId: Int): Int? = members[objectId]?.schedule?.wakeHour()
+ 
++    /** A bot of the living population (not one made from the dashboard, not a player). */
++    fun isMember(objectId: Int): Boolean = members.containsKey(objectId)
++
++    /**
++     * How many days in a row, up to [max], the bot has not been playing (a break or quitting, by its career); 0 when it
++     * plays today. Null for anyone outside the population: players come and go on their own.
++     */
++    fun absentDays(objectId: Int, max: Int): Int? {
++        val member = members[objectId] ?: return null
++        val today = LocalDate.now(zone)
++        var days = 0
++        while (days < max && !member.career.isActiveOn(today.minusDays(days.toLong()))) days++
++        return days
++    }
++
+     private fun logout(bot: Autobot) {
+         GroupFinder.forget(bot)
+         Relations.save(bot, forget = true)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index e64e0da..5f5b3c6 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -42,7 +42,7 @@ internal object Errands {
+     private const val HEAVY_LOAD_PERCENT = 45
+ 
+     // Enough for a gatekeeper hop; a newbie with 800 adena should still afford a scroll and some potions.
+-    fun reserve(bot: Player): Int = 200 + bot.level * 100
++    fun reserve(bot: Player): Int = 200 + bot.level * 100 + dev.l2j.autobots.population.group.ClanPool.reserved(bot)
+ 
+     fun spendable(bot: Player): Int = (bot.adena - reserve(bot)).coerceAtLeast(0)
+ 
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/ClanChat.kt b/src/main/kotlin/dev/l2j/autobots/population/group/ClanChat.kt
+new file mode 100644
+index 0000000..3145427
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/ClanChat.kt
+@@ -0,0 +1,262 @@
++package dev.l2j.autobots.population.group
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.llm.Attention.isLiveAudience
++import dev.l2j.autobots.population.llm.BotTalk
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.sql.ClanTable
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.pledge.Clan
++import net.sf.l2j.gameserver.network.SystemMessageId
++import net.sf.l2j.gameserver.network.clientpackets.RequestJoinPledge
++import net.sf.l2j.gameserver.network.serverpackets.AskJoinPledge
++import net.sf.l2j.gameserver.network.serverpackets.SystemMessage
++import java.util.Collections
++import java.util.WeakHashMap
++
++/**
++ * Clan chat and clan talk with players (stage 4a). Clan events are lines of code, no model: founding, joining,
++ * leaving, a new leader, a pool and its gifts, a clan level. A player's line in clan chat gets an answer: a greeting,
++ * a party offer, where the members are when asked for help, otherwise one bot talks through [BotTalk]. A player can
++ * ask a bot clan to take them (a whisper to its leader or officer, or "ищу клан" in shout) and get the real
++ * AskJoinPledge window; a player's clan invite to a bot is answered like the client would.
++ */
++/**
++ * A coroutine in the shared scope that can't take the scope down: CoScopes.generalScope has a plain Job, so one
++ * uncaught exception in a child cancels it and with it the population tick.
++ */
++internal fun launchSafely(block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit) = CoScopes.generalScope.launch {
++    try {
++        block()
++    } catch (e: kotlinx.coroutines.CancellationException) {
++        throw e
++    } catch (e: Exception) {
++        e.printStackTrace()
++    }
++}
++
++internal object ClanChat {
++    enum class Line(val ru: List<String>, val en: List<String>) {
++        Hello(listOf("привет всем", "всем ку", "о/", "здарова"), listOf("hi all", "hey", "o/", "hello clan")),
++        Bye(listOf("всем пока, я ухожу из клана", "ну всё, я ухожу, удачи"), listOf("bye all, leaving the clan", "im out, gl all")),
++        Welcome(listOf("добро пожаловать, %s", "%s, привет, welcome", "у нас новенький: %s"), listOf("welcome %s", "welcome to the clan %s", "hi %s, welcome")),
++        Joined(listOf("привет!", "рад быть с вами", "всем привет, я новенький"), listOf("hi!", "glad to be here", "hi all, new here")),
++        NewLeader(listOf("лидер пропал, теперь клан веду я", "клан на мне теперь, лидер давно не заходит"), listOf("leader is gone, i lead now", "i took the clan, leader quit")),
++        PoolItem(listOf("скинемся %s на %s? не хватает %d", "давайте поможем %s с %s, нужно ещё %d"), listOf("lets chip in for %s, needs %s, %d short", "help %s get %s? %d short")),
++        PoolLevel(listOf("собираем на %s, нужно %d, кто сколько может", "скидываемся на %s, не хватает %d"), listOf("pooling for %s, %d needed", "chip in for %s, %d short")),
++        Gave(listOf("кинул %1${'$'}s %2${'$'}d", "держи %2${'$'}d, %1${'$'}s", "%1${'$'}s, скинул %2${'$'}d"), listOf("sent %1${'$'}s %2${'$'}d", "here %2${'$'}d, %1${'$'}s", "%1${'$'}s, gave %2${'$'}d")),
++        Thanks(listOf("спасибо всем, хватает!", "спс, клан, теперь куплю", "ура, спасибо всем"), listOf("ty all, got enough!", "thanks clan, buying it", "ty all")),
++        LevelUp(listOf("клан теперь %d уровня, спасибо всем!", "есть %d лвл клана!"), listOf("clan is level %d now, ty all!", "clan lvl %d!")),
++        Recruit(listOf("клан %s набирает, %d+ ур., пишите в пм", "набор в %s, %d+, кто хочет в дружный клан, пм", "%s ищет людей, %d+ ур, пм"),
++                listOf("%s recruiting, lvl %d+, pm", "clan %s is recruiting, %d+ pm me", "join %s, lvl %d+, pm")),
++        RecruitOffer(listOf("привет, иди к нам в %s, нас %d", "привет, у нас клан %s, %d чел, пойдёшь?"), listOf("hi, join %s? we are %d", "hi, clan %s, %d people, want in?")),
++        Inviting(listOf("кидаю инвайт", "лови приглашение", "ок, приглашаю"), listOf("sending invite", "ok, inviting", "invite sent")),
++        Full(listOf("сорри, клан забит", "мест нет пока"), listOf("sorry, clan is full", "no room now")),
++        NoPk(listOf("с пк не берём", "ты красный, сорри"), listOf("no pk, sorry", "you're red, no")),
++        TooLow(listOf("с %d уровня берём", "подкачайся до %d и пиши"), listOf("lvl %d+ only", "come back at %d")),
++        NotRecruiting(listOf("это к лидеру", "я не приглашаю, спроси лидера"), listOf("ask the leader", "i cant invite, ask the leader")),
++        PartyLead(listOf("иди к нам, мы у %s, кидаю пати", "го к нам, %s, инвайт"), listOf("join us near %s, inviting", "come to %s, sending party")),
++        PartyFree(listOf("я свободен, кидай пати", "могу, кидай инвайт"), listOf("im free, invite me", "sure, inv me")),
++        HelpComing(listOf("бегу", "иду, держись", "щас буду"), listOf("coming", "on my way", "omw")),
++        HelpFar(listOf("я у %s, далеко", "я далеко, у %s"), listOf("im near %s, far", "far away, near %s"));
++    }
++
++    private val HELLO = Regex("^(прив|привет|ку\\b|хай|здаро|всем привет|hi\\b|hello|hey|o/)", RegexOption.IGNORE_CASE)
++    private val PARTY = Regex("(пати|\\bпт\\b|го кач|кто кач|party|\\blfp\\b|\\blfg\\b|кто со мной)", RegexOption.IGNORE_CASE)
++    private val HELP = Regex("(помогит|хелп|спасит|убива|help|\\bpk\\b|пк напал)", RegexOption.IGNORE_CASE)
++    private val WANTS_CLAN = Regex("(клан|\\bкп\\b|вступ|возьм|прим[иу]|clan|join|\\+$|^\\+|^да$|^yes$|^го$|хочу)", RegexOption.IGNORE_CASE)
++    private val LOOKING_FOR_CLAN = Regex("(ищу (клан|кп)|возьм(ите|ет) (в )?клан|кто возьм[её]т в клан|\\blf clan\\b|looking for (a )?clan)", RegexOption.IGNORE_CASE)
++
++    private const val PLAYER_ACCEPT = 15
++    private const val OFFER_TTL_MS = 10 * 60_000L
++
++    /** player -> (recruiter, until) of a whispered clan offer. */
++    private val offers = Collections.synchronizedMap(WeakHashMap<Player, Pair<Int, Long>>())
++
++    /** The clan's language: the player's in it if there is one, else a trait of the clan. */
++    private fun russian(clan: Clan): Boolean {
++        // A player in the clan: the server's players speak Russian.
++        if (clan.onlineMembers.any { it.isLiveAudience() }) return true
++        return Math.floorMod(clan.clanId * 13, 100) < 70
++    }
++
++    private fun text(line: Line, russian: Boolean, vararg args: Any): String {
++        val template = (if (russian) line.ru else line.en).random()
++        return try { template.format(*args) } catch (e: java.util.IllegalFormatException) { template }
++    }
++
++    /** Says [line] in clan chat after a short typing pause. */
++    fun say(bot: Autobot, line: Line, vararg args: Any, pauseMs: Long = 0) {
++        val clan = bot.clan ?: return
++        val msg = text(line, russian(clan), *args)
++        if (pauseMs <= 0) {
++            bot.clanSay(msg)
++            return
++        }
++        launchSafely {
++            delay(pauseMs)
++            if (bot.isOnline && bot.clan === clan) bot.clanSay(msg)
++        }
++    }
++
++    private fun typing() = Rnd.get(2000, 6000).toLong()
++
++    fun welcome(recruiter: Autobot, newcomer: Player) {
++        say(recruiter, Line.Welcome, newcomer.name, pauseMs = typing())
++        if (newcomer is Autobot && Rnd.get(100) < 70) say(newcomer, Line.Joined, pauseMs = typing() + 4000)
++    }
++
++    fun recruitShout(bot: Autobot, clan: Clan) {
++        bot.shout(text(Line.Recruit, Rnd.get(100) < 70, clan.name, Clans.MIN_JOIN_LEVEL))
++    }
++
++    fun poolCall(caller: Autobot, recipient: Autobot, goal: ClanPool.Goal, what: String, need: Long) {
++        if (goal == ClanPool.Goal.Level) say(caller, Line.PoolLevel, what, need)
++        else say(caller, Line.PoolItem, recipient.name, what, need)
++    }
++
++    fun gave(giver: Autobot, recipient: Autobot, gift: Int) {
++        if (Rnd.get(100) < 60) say(giver, Line.Gave, recipient.name, gift, pauseMs = typing())
++    }
++
++    fun thanks(recipient: Autobot) = say(recipient, Line.Thanks, pauseMs = typing())
++
++    fun levelUp(leader: Autobot, level: Int) = say(leader, Line.LevelUp, level, pauseMs = typing())
++
++    /** A player's line in clan chat; bots of the clan online answer like clan mates. */
++    fun onClanChat(player: Player, text: String) {
++        if (player is Autobot) return
++        val clan = player.clan ?: return
++        val bots = clan.onlineMembers.filterIsInstance<Autobot>().filter { it.life != null && !it.isDead }
++        if (bots.isEmpty()) return
++        val ru = GroupChat.isRussian(text)
++        when {
++            HELP.containsMatchIn(text) -> {
++                bots.sortedBy { distance(it, player) }.take(2).forEachIndexed { i, bot ->
++                    val msg = if (distance(bot, player) <= 4000) text(Line.HelpComing, ru)
++                    else text(Line.HelpFar, ru, GroupFinder.placeName(bot))
++                    later(bot, msg, i)
++                }
++            }
++            PARTY.containsMatchIn(text) && !player.isInParty -> {
++                val led = bots.mapNotNull { it.party?.takeIf { p -> p.leader === it && p.membersCount < 9 && GroupFinder.judge(p, player) == null } }.firstOrNull()
++                if (led != null) {
++                    val leader = led.leader as Autobot
++                    later(leader, text(Line.PartyLead, ru, GroupFinder.placeName(leader)), 0)
++                    launchSafely {
++                        delay(Rnd.get(5000, 9000).toLong())
++                        if (!player.isInParty && player.isOnline && leader.party === led) GroupFinder.invitePlayer(leader, player)
++                    }
++                    return
++                }
++                bots.filter { !it.isInParty && kotlin.math.abs(it.level - player.level) <= 5 && Sociability.of(it) != Sociability.Loner }
++                        .shuffled().take(2).forEachIndexed { i, bot -> later(bot, text(Line.PartyFree, ru), i) }
++            }
++            HELLO.containsMatchIn(text.trim()) -> {
++                bots.filter { Rnd.get(100) < 40 }.shuffled().take(2).forEachIndexed { i, bot -> later(bot, text(Line.Hello, ru), i) }
++            }
++            else -> BotTalk.onClanChat(player, clan, bots, text)
++        }
++    }
++
++    private fun later(bot: Autobot, msg: String, order: Int) {
++        launchSafely {
++            delay(typing() + order * Rnd.get(2000, 5000))
++            if (bot.isOnline && bot.clan != null) bot.clanSay(msg)
++        }
++    }
++
++    /**
++     * A player in shout looking for a clan: a recruiter of a bot clan with room in the region whispers an offer.
++     */
++    fun onShout(player: Player, text: String, online: Collection<Autobot>) {
++        if (player is Autobot || player.clanId != 0 || !LOOKING_FOR_CLAN.containsMatchIn(text) || !AutobotData.settings.clansEnabled) return
++        val ru = GroupChat.isRussian(text)
++        val region = MapRegionData.getInstance().getMapRegion(player.x, player.y)
++        val recruiter = ClanTable.getInstance().clans.filter { Clans.isBotClan(it) && it.membersCount < it.getMaxNrOfMembers(0) }
++                .flatMap { Clans.recruiters(it) }
++                .filter { MapRegionData.getInstance().getMapRegion(it.x, it.y) == region }
++                .randomOrNull() ?: return
++        launchSafely {
++            delay(Rnd.get(8000, 30000).toLong())
++            val clan = recruiter.clan ?: return@launchSafely
++            if (player.clanId != 0 || !player.isOnline) return@launchSafely
++            offers[player] = recruiter.objectId to System.currentTimeMillis() + OFFER_TTL_MS
++            recruiter.tell(player.name, text(Line.RecruitOffer, ru, clan.name, clan.membersCount))
++        }
++    }
++
++    /**
++     * A whisper to a recruiter of a bot clan asking to join (or answering its offer). @return true if handled.
++     */
++    fun onWhisper(player: Player, bot: Autobot, text: String): Boolean {
++        if (player is Autobot || player.clanId != 0 || !AutobotData.settings.clansEnabled) return false
++        val clan = bot.clan ?: return false
++        if (!Clans.isBotClan(clan)) return false
++        val offered = offers[player]?.let { it.first == bot.objectId && System.currentTimeMillis() < it.second } == true
++        if (!offered && !WANTS_CLAN.containsMatchIn(text)) return false
++        if (!offered && !text.contains("клан", true) && !text.contains("clan", true) && !text.contains("кп", true)) return false
++        val ru = GroupChat.isRussian(text)
++        launchSafely {
++            delay(Rnd.get(3000, 8000).toLong())
++            val refusal = when {
++                bot.objectId != clan.leaderId && (bot.clanPrivileges and Clan.CP_CL_JOIN_CLAN) == 0 -> Line.NotRecruiting
++                clan.membersCount >= clan.getMaxNrOfMembers(0) -> Line.Full
++                player.karma > 0 -> Line.NoPk
++                player.level < Clans.MIN_JOIN_LEVEL -> Line.TooLow
++                Clans.sympathy(bot, player) < PLAYER_ACCEPT && !offered -> Line.Full
++                else -> null
++            }
++            if (refusal != null) {
++                bot.tell(player.name, text(refusal, ru, Clans.MIN_JOIN_LEVEL))
++                return@launchSafely
++            }
++            bot.tell(player.name, text(Line.Inviting, ru))
++            delay(Rnd.get(1000, 3000).toLong())
++            invitePlayer(bot, player)
++        }
++        return true
++    }
++
++    /** The real clan invite window, the same steps as RequestJoinPledge; the core handles the player's answer. */
++    private fun invitePlayer(bot: Autobot, player: Player) {
++        val clan = bot.clan ?: return
++        if (!clan.checkClanJoinCondition(bot, player, 0)) return
++        if (!bot.request.setRequest(player, RequestJoinPledge())) return
++        player.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_HAS_INVITED_YOU_TO_JOIN_THE_CLAN_S2).addCharName(bot).addString(clan.name))
++        player.sendPacket(AskJoinPledge(bot.objectId, clan.name))
++        println("Autobots clans: ${bot.name} invited player ${player.name} to ${clan.name}")
++    }
++
++    /**
++     * A player's clan invites a bot (RequestJoinPledge already sent the window): the bot weighs it like an invite
++     * from a bot clan and answers after a pause, joining through the core's checks or saying no.
++     */
++    fun onInvite(requestor: Player, bot: Autobot) {
++        val clan = requestor.clan ?: return
++        if (bot.life == null) return
++        launchSafely {
++            delay(Rnd.get(3000, 8000).toLong())
++            if (bot.request.partner !== requestor) return@launchSafely
++            val score = Clans.sympathy(requestor, bot)
++            val accept = score >= PLAYER_ACCEPT + Rnd.get(20) && bot.clanId == 0
++            if (accept && Clans.join(clan, requestor, bot)) {
++                println("Autobots clans: ${bot.name} joined player ${requestor.name}'s clan ${clan.name} (score $score)")
++                if (Rnd.get(100) < 70) say(bot, Line.Joined, pauseMs = typing())
++            } else {
++                bot.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.YOU_DID_NOT_RESPOND_TO_S1_CLAN_INVITATION).addCharName(requestor))
++                requestor.sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_DID_NOT_RESPOND_TO_CLAN_INVITATION).addCharName(bot))
++                println("Autobots clans: ${bot.name} declined player ${requestor.name}'s clan ${clan.name} (score $score)")
++                if (Rnd.get(100) < 50) bot.tell(requestor.name, if (GroupChat.isRussian(requestor)) listOf("спс, но я пока без клана", "не, сорри").random()
++                        else listOf("thanks, but no", "sorry, not now").random())
++            }
++            bot.request.onRequestResponse()
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/ClanPool.kt b/src/main/kotlin/dev/l2j/autobots/population/group/ClanPool.kt
+new file mode 100644
+index 0000000..ea81432
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/ClanPool.kt
+@@ -0,0 +1,267 @@
++package dev.l2j.autobots.population.group
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.economy.Market
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.population.trade.Honesty
++import dev.l2j.autobots.population.trade.Loan
++import dev.l2j.autobots.population.trade.Promise
++import dev.l2j.autobots.population.trade.TradeWindow
++import dev.l2j.autobots.utils.distance
++import kotlinx.coroutines.launch
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.pledge.Clan
++import java.util.concurrent.ConcurrentHashMap
++
++/**
++ * Pooling adena in a clan (stage 4b). Once a day a clan picks a goal: the next kit piece of its strongest member
++ * online who can't afford it, or the next clan level (the leader pays the SP, the clan the adena). Members give a
++ * share of what they can spare through the trade window when they meet the recipient (in one town, or in one
++ * party), nothing is moved by hand. The recipient buys the piece on its next town trip; the leader levels the clan
++ * in town. A scamming leader may keep a level pool: the givers' liking and trust drop, and they leave.
++ * Gifts are logged in `autobot_clan_pool`.
++ */
++internal object ClanPool {
++    enum class Goal { Item, Level }
++
++    class Pool(val clanId: Int, val goal: Goal, val recipientId: Int, val itemId: Int, var need: Long, val started: Long) {
++        var collected = 0L
++        val givers = ConcurrentHashMap.newKeySet<Int>()
++    }
++
++    private const val POOL_EVERY_MS = 24 * 60 * 60 * 1000L
++    private const val NO_GOAL_RETRY_MS = 60 * 60 * 1000L
++    private const val POOL_LASTS_MS = 24 * 60 * 60 * 1000L
++    private const val MIN_GIFT = 100
++    private const val MEET_IN_TOWN = 2500
++    private const val MEET_NEARBY = 1500
++    private val LEVEL_SP = intArrayOf(30_000, 150_000)
++    private val LEVEL_ADENA = longArrayOf(650_000, 2_500_000)
++
++    private val pools = ConcurrentHashMap<Int, Pool>()
++    private val nextPool = ConcurrentHashMap<Int, Long>()
++    private val trading = ConcurrentHashMap.newKeySet<Int>()
++    private var tableReady = false
++    private var gifts = 0
++    private var given = 0L
++    private var bought = 0
++    private var levels = 0
++    private var kept = 0
++
++    private val enabled get() = AutobotData.settings.clanPoolEnabled && AutobotData.settings.socialTradeEnabled
++
++    fun active(clanId: Int): Pool? = pools[clanId]
++
++    /** Adena [bot] holds for its clan's level: kept out of its shopping (`Errands.reserve`). */
++    fun reserved(bot: Player): Int {
++        val pool = pools[bot.clanId] ?: return 0
++        return if (pool.goal == Goal.Level && pool.recipientId == bot.objectId) pool.collected.coerceAtMost(Int.MAX_VALUE.toLong()).toInt() else 0
++    }
++
++    fun forget(clanId: Int) {
++        pools.remove(clanId)
++        nextPool.remove(clanId)
++    }
++
++    fun summary() = "pools=${pools.size} gifts=$gifts given=$given funded=$bought levels=$levels kept=$kept"
++
++    fun tick(online: List<Autobot>) {
++        if (!enabled) return
++        val now = System.currentTimeMillis()
++        val byClan = online.filter { it.clanId != 0 && it.life != null }.groupBy { it.clanId }
++        for ((clanId, members) in byClan) {
++            val clan = members.first().clan ?: continue
++            if (!Clans.isBotClan(clan)) continue
++            val pool = pools[clanId]
++            if (pool == null) {
++                if (now >= (nextPool[clanId] ?: 0L)) start(clan, members, now)
++                continue
++            }
++            if (now - pool.started > POOL_LASTS_MS || clan.getClanMember(pool.recipientId) == null) {
++                finish(clan, pool, "expired with ${pool.collected}/${pool.need}")
++                continue
++            }
++            if (completeIfReady(clan, pool) || pool.collected >= pool.need) continue
++            val recipient = members.firstOrNull { it.objectId == pool.recipientId } ?: continue
++            for (giver in members) {
++                if (giver === recipient || giver.objectId in pool.givers || giver.objectId in trading || recipient.objectId in trading) continue
++                if (!meets(giver, recipient)) continue
++                val gift = share(giver, recipient, pool.need - pool.collected)
++                if (gift < MIN_GIFT) {
++                    pool.givers += giver.objectId
++                    continue
++                }
++                give(clan, pool, giver, recipient, gift)
++                break
++            }
++        }
++    }
++
++    /** The goal of the day: the clan level when the leader has the SP and the clan the money, else a kit piece. */
++    private fun start(clan: Clan, online: List<Autobot>, now: Long) {
++        // Nothing to pool for yet: look again in an hour, with other members online.
++        nextPool[clan.clanId] = now + NO_GOAL_RETRY_MS
++        if (online.size < 2) return
++        val leader = online.firstOrNull { it.objectId == clan.leaderId }
++        val reach = online.sumOf { spare(it) * percent(it, leader ?: it) / 100 }
++        if (leader != null && clan.level < LEVEL_SP.size && leader.sp >= LEVEL_SP[clan.level]) {
++            // A leader rich enough pays alone: a pool of nothing that completes on its next visit to town.
++            val need = (LEVEL_ADENA[clan.level] - leader.adena).coerceAtLeast(0)
++            if (need <= reach) {
++                open(clan, Pool(clan.clanId, Goal.Level, leader.objectId, 0, need, now), leader, "clan level ${clan.level + 1}")
++                return
++            }
++        }
++        // The strongest who can't afford its next piece and whom the clan can help.
++        for (bot in online.sortedByDescending { it.level }) {
++            val wish = Gear.wishes(bot).firstOrNull() ?: continue
++            val price = Market.npcPrice(wish.itemId)?.toLong() ?: continue
++            val need = price - Errands.spendable(bot)
++            val others = online.filter { it !== bot }.sumOf { spare(it) * percent(it, bot) / 100 }
++            if (need <= 0 || need > others) continue
++            val name = ItemTable.getInstance().getTemplate(wish.itemId)?.name ?: "item ${wish.itemId}"
++            open(clan, Pool(clan.clanId, Goal.Item, bot.objectId, wish.itemId, need, now), bot, name)
++            return
++        }
++    }
++
++    private fun open(clan: Clan, pool: Pool, recipient: Autobot, what: String) {
++        pools[clan.clanId] = pool
++        println("Autobots clans: ${clan.name} pools ${pool.need} adena for ${recipient.name}: $what")
++        val caller = clan.onlineMembers.filterIsInstance<Autobot>().firstOrNull { it.objectId == clan.leaderId } ?: recipient
++        ClanChat.poolCall(caller, recipient, pool.goal, what, pool.need)
++    }
++
++    /** What a member can give at all: its free adena, keeping what its own next piece costs. */
++    private fun spare(bot: Autobot): Long {
++        val own = Gear.wishes(bot).firstOrNull()?.let { Market.npcPrice(it.itemId) } ?: 0
++        return (Errands.spendable(bot) - own).toLong().coerceAtLeast(0)
++    }
++
++    /** Which part of it: by character and by how much it likes the recipient. */
++    private fun percent(giver: Player, recipient: Player): Long {
++        val base = when (Sociability.of(giver)) { Sociability.Loner -> 5; Sociability.Regular -> 10; Sociability.TeamPlayer -> 15 }
++        val liking = (Relations.affinity(giver, recipient) / 5).coerceIn(0, 10)
++        return (base + liking).toLong()
++    }
++
++    private fun share(giver: Autobot, recipient: Autobot, left: Long): Int =
++            minOf(spare(giver) * percent(giver, recipient) / 100, left, giver.adena.toLong()).toInt()
++
++    /** Close enough to trade: one party, a few steps apart, or both in the same town. */
++    private fun meets(a: Autobot, b: Autobot): Boolean {
++        if (!TradeWindow.canTrade(a) || !TradeWindow.canTrade(b) || a.isInCombat || b.isInCombat) return false
++        if (a.isInParty && a.party === b.party && distance(a, b) <= MEET_NEARBY) return true
++        if (distance(a, b) <= MEET_NEARBY) return true
++        return a.isInsideZone(ZoneId.TOWN) && b.isInsideZone(ZoneId.TOWN) && distance(a, b) <= MEET_IN_TOWN &&
++                MapRegionData.getInstance().getClosestTownName(a.x, a.y) == MapRegionData.getInstance().getClosestTownName(b.x, b.y)
++    }
++
++    private fun give(clan: Clan, pool: Pool, giver: Autobot, recipient: Autobot, gift: Int) {
++        trading += giver.objectId
++        trading += recipient.objectId
++        launchSafely {
++            try {
++                val adena = giver.inventory.adenaInstance ?: return@launchSafely
++                val outcome = TradeWindow.exchange(giver, recipient, listOf(adena to gift), emptyList(),
++                        listOf(Promise(Loan.ADENA, 0, gift)), maxDistance = MEET_IN_TOWN)
++                if (outcome != TradeWindow.Outcome.Done) return@launchSafely
++                pool.givers += giver.objectId
++                pool.collected += gift
++                gifts++
++                given += gift
++                Relations.adjust(recipient, giver.objectId, 5, 5)
++                Relations.adjust(giver, recipient.objectId, 2, 2)
++                log(clan, pool, giver, gift)
++                println("Autobots clans: ${giver.name} gave $gift to ${recipient.name} for ${clan.name}'s pool (${pool.collected}/${pool.need})")
++                ClanChat.gave(giver, recipient, gift)
++                if (pool.collected >= pool.need) completeIfReady(clan, pool)
++            } finally {
++                trading -= giver.objectId
++                trading -= recipient.objectId
++            }
++        }
++    }
++
++    /** Enough adena: the piece is bought on the next town trip, the clan level goes up in town. */
++    private fun completeIfReady(clan: Clan, pool: Pool): Boolean {
++        if (pool.collected < pool.need) return false
++        val recipient = clan.getClanMember(pool.recipientId)?.playerInstance as? Autobot ?: return false
++        when (pool.goal) {
++            Goal.Item -> {
++                bought++
++                ClanChat.thanks(recipient)
++                finish(clan, pool, "funded")
++            }
++            Goal.Level -> {
++                if (Honesty.of(recipient) == Honesty.Scammer) {
++                    // Keeps the money: everyone who gave remembers it.
++                    for (id in pool.givers) {
++                        val giver = clan.getClanMember(id)?.playerInstance as? Autobot ?: continue
++                        Relations.adjust(giver, recipient.objectId, -30, -40)
++                    }
++                    kept++
++                    finish(clan, pool, "kept by the leader")
++                    return true
++                }
++                val level = clan.level
++                val cost = LEVEL_ADENA.getOrNull(level) ?: return false.also { finish(clan, pool, "clan already level $level") }
++                // The leader's own adena moved since the call: the clan tops it up instead of failing at the master.
++                if (recipient.adena < cost) {
++                    pool.need = pool.collected + (cost - recipient.adena)
++                    return false
++                }
++                if (!recipient.isInsideZone(ZoneId.TOWN)) return false
++                if (!clan.levelUpClan(recipient)) {
++                    finish(clan, pool, "level up refused (sp ${recipient.sp}, adena ${recipient.adena})")
++                    return true
++                }
++                levels++
++                println("Autobots clans: ${clan.name} reached level ${level + 1}")
++                ClanChat.levelUp(recipient, level + 1)
++                finish(clan, pool, "clan level ${level + 1}")
++            }
++        }
++        return true
++    }
++
++    private fun finish(clan: Clan, pool: Pool, how: String) {
++        pools.remove(clan.clanId, pool)
++        nextPool[clan.clanId] = System.currentTimeMillis() + POOL_EVERY_MS
++        println("Autobots clans: ${clan.name} pool for ${clan.getClanMember(pool.recipientId)?.name ?: pool.recipientId} ended: $how")
++    }
++
++    private fun log(clan: Clan, pool: Pool, giver: Player, gift: Int) {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                if (!tableReady) {
++                    con.createStatement().use {
++                        it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_clan_pool (id INT UNSIGNED NOT NULL AUTO_INCREMENT, clan_id INT UNSIGNED NOT NULL, " +
++                                "goal VARCHAR(8) NOT NULL, item_id INT NOT NULL, recipient_id INT UNSIGNED NOT NULL, giver_id INT UNSIGNED NOT NULL, " +
++                                "amount INT NOT NULL, at BIGINT NOT NULL, PRIMARY KEY(id), KEY clan(clan_id))")
++                    }
++                    tableReady = true
++                }
++                con.prepareStatement("INSERT INTO autobot_clan_pool (clan_id, goal, item_id, recipient_id, giver_id, amount, at) VALUES (?,?,?,?,?,?,?)").use { ps ->
++                    ps.setInt(1, clan.clanId)
++                    ps.setString(2, pool.goal.name)
++                    ps.setInt(3, pool.itemId)
++                    ps.setInt(4, pool.recipientId)
++                    ps.setInt(5, giver.objectId)
++                    ps.setInt(6, gift)
++                    ps.setLong(7, System.currentTimeMillis())
++                    ps.executeUpdate()
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt
+index 04cddd1..6adf937 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Clans.kt
+@@ -2,108 +2,326 @@ package dev.l2j.autobots.population.group
+ 
+ import dev.l2j.autobots.Autobot
+ import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.dao.AutobotsDao
+ import dev.l2j.autobots.population.PopulationManager
++import net.sf.l2j.Config
++import net.sf.l2j.L2DatabaseFactory
+ import net.sf.l2j.commons.random.Rnd
+ import net.sf.l2j.gameserver.data.sql.ClanTable
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.enums.ZoneId
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.pledge.Clan
++import net.sf.l2j.gameserver.network.SystemMessageId
++import net.sf.l2j.gameserver.network.serverpackets.JoinPledge
++import net.sf.l2j.gameserver.network.serverpackets.PledgeShowInfoUpdate
++import net.sf.l2j.gameserver.network.serverpackets.PledgeShowMemberListAdd
++import net.sf.l2j.gameserver.network.serverpackets.PledgeShowMemberListAll
++import net.sf.l2j.gameserver.network.serverpackets.PledgeShowMemberListDelete
++import net.sf.l2j.gameserver.network.serverpackets.SystemMessage
++import net.sf.l2j.commons.math.MathUtil
++import java.util.concurrent.ConcurrentHashMap
+ import kotlin.math.abs
+ 
+ /**
+- * Bot clans (stage 4a). A bot with real friends founds a clan and names it; the leader invites people it likes and
+- * the invited decide for themselves, by liking, trust, same race, close level and a similar daily schedule.
+- * Membership is the core's own (the autobots table carries clanid and the clan roster unions both tables), so clans
+- * survive relogins and restarts. Reputation, crests, wars and inviting players come later, with clan raids.
++ * Bot clans (stages 4a and 4b, spec in docs/clans.md). A bot with a leader's character founds a clan once it knows
++ * somebody; the leader and its officers invite the people they know and recruit strangers around them and in shout,
++ * the way real clans grow. Every join and leave goes through the core's own checks and packets, so a player in the
++ * clan sees the roster change; membership is the core's (the autobots table carries clanid). A leader who quit the
++ * game hands the clan over, a clan nobody plays in any more is dissolved. Pooling adena is [ClanPool], chat
++ * [ClanChat].
+  */
+ internal object Clans {
+-    private const val MIN_LEVEL = 10
+-    private const val FRIENDS_TO_FOUND = 2
+     private const val FOUND_PERCENT = 20
+-    private const val MAX_MEMBERS = 12
+-    private const val INVITES_PER_TICK = 2
+-    private const val INVITE_MIN_AFFINITY = 25
+-    private const val ACCEPT_SCORE = 35
+-    private const val GREET_PERCENT = 30
++    private const val LEADER_KNOWS = 15
++    private const val FRIENDS_AFFINITY = 25
++    private const val INVITES_PER_TICK = 4
++    private const val KNOWN_AFFINITY = 10
++    private const val NEARBY = 1500
++    private const val ACCEPT_SCORE = 25
++    private const val REFUSAL_MS = 24 * 60 * 60 * 1000L
++    private const val RECRUIT_SHOUT_MS = 40 * 60 * 1000L
++    private const val HEARD_SHOUT_MS = 10 * 60 * 1000L
++    private const val OFFICERS = 2
++    const val OFFICER_GRADE = 5
++    private const val MEMBER_GRADE = 6
++    private const val OFFICER_AFFINITY = 15
+     private const val LEAVE_PERCENT = 20
+-    private const val LEAVE_PENALTY_MS = 24 * 60 * 60 * 1000L
++    private const val LEADER_GONE_DAYS = 7
++    private const val CLAN_GONE_DAYS = 14
++    const val MIN_JOIN_LEVEL = 10
+ 
+-    /** Every few minutes: found, invite, leave. */
++    private val settings get() = AutobotData.settings
++
++    /** "clanId:botId" -> until when that bot is not asked again by that clan. */
++    private val refusals = ConcurrentHashMap<String, Long>()
++    /** clanId -> when its recruiter may shout again. */
++    private val nextShout = ConcurrentHashMap<Int, Long>()
++    /** botId -> (clanId, when) of the last recruitment shout it heard. */
++    private val heardShout = ConcurrentHashMap<Int, Pair<Int, Long>>()
++
++    private var founded = 0
++    private var joined = 0
++    private var declined = 0
++    private var left = 0
++
++    /** Every few minutes: get acquainted, found, hand over, staff, recruit, leave, pool, then a summary line. */
+     fun tick(online: List<Autobot>) {
+-        if (!AutobotData.settings.clansEnabled) return
+-        found(online)
+-        invite(online)
+-        leave(online)
++        if (!settings.clansEnabled) return
++        try {
++            acquaint(online)
++            found(online)
++            for (clan in ClanTable.getInstance().clans.toList()) {
++                if (!isBotClan(clan)) continue
++                if (succession(clan)) continue
++                staff(clan)
++            }
++            recruit(online)
++            leave(online)
++            ClanPool.tick(online)
++        } catch (e: Exception) {
++            e.printStackTrace()
++        } finally {
++            summary(online)
++        }
+     }
+ 
+     /** A returning member greets the clan once in a while. */
+     fun onLogin(bot: Autobot) {
+         val clan = bot.clan ?: return
+-        if (Rnd.get(100) < GREET_PERCENT && clan.onlineMembersCount > 1)
+-            bot.clanSay(listOf("hi all", "привет всем", "о/", "hey").random())
++        if (Rnd.get(100) < 30 && clan.onlineMembersCount > 1) ClanChat.say(bot, ClanChat.Line.Hello)
+     }
+ 
+-    /** A sociable bot with friends and no clan starts its own. */
+-    private fun found(online: List<Autobot>) {
++    /** A leader is a character trait, like the temper: a few of the team players start clans. */
++    fun isLeaderType(bot: Player): Boolean =
++            Sociability.of(bot) == Sociability.TeamPlayer && Math.floorMod(bot.objectId * 7477 + 29, 100) < settings.clanLeaderPercent
++
++    /** Clans led by the population: a player's clan is the player's business (bots in it only come and go). */
++    fun isBotClan(clan: Clan): Boolean = PopulationManager.isMember(clan.leaderId)
++
++    /** Bots that hunt on one spot or stand in one town get to know each other a little; clan mates more. */
++    private fun acquaint(online: List<Autobot>) {
+         for (bot in online) {
+-            if (bot.clanId != 0 || bot.level < MIN_LEVEL) continue
+-            if (System.currentTimeMillis() < bot.clanCreateExpiryTime) continue
+-            val friends = Relations.relationsOf(bot).values.count { it.affinity >= Relations.FRIEND }
+-            if (friends < FRIENDS_TO_FOUND || Rnd.get(100) >= FOUND_PERCENT) continue
++            if (bot.life == null || bot.isDead) continue
++            for (other in bot.getKnownTypeInRadius(Autobot::class.java, 600)) {
++                if (other.life == null || bot.isInParty && bot.party === other.party) continue
++                if (Rnd.get(100) < 15) Relations.acquaint(bot, other.objectId, Relations.STRANGER_CAP)
++            }
++            val clan = bot.clan ?: continue
++            // Clan chat and the roster make mates familiar, slowly and only up to a point.
++            clan.onlineMembers.filter { it !== bot && it is Autobot }.shuffled().take(3).forEach {
++                if (Rnd.get(100) < 25) Relations.acquaint(bot, it.objectId, Relations.CLANMATE_CAP)
++            }
++        }
++    }
++
++    /** A leader type that knows somebody, or anyone sociable with real friends, starts a clan. One a tick at most. */
++    private fun found(online: List<Autobot>) {
++        for (bot in online.shuffled()) {
++            if (bot.clanId != 0 || bot.level < settings.clanFoundMinLevel || bot.life == null || bot.isInStoreMode) continue
++            if (System.currentTimeMillis() < bot.clanCreateExpiryTime || Sociability.of(bot) == Sociability.Loner) continue
++            val relations = Relations.relationsOf(bot).values
++            val staticLeader = StaticParties.groupOf(bot.objectId)?.let { g -> StaticParties.all().firstOrNull { it.id == g }?.leader == bot.objectId } == true
++            val canFound = isLeaderType(bot) && relations.any { it.affinity >= LEADER_KNOWS } ||
++                    relations.count { it.affinity >= FRIENDS_AFFINITY } >= 2 || staticLeader
++            if (!canFound || Rnd.get(100) >= FOUND_PERCENT) continue
+             val name = nameFor() ?: continue
+-            if (ClanTable.getInstance().createClan(bot, name) == null) continue
+-            println("Autobots clans: ${bot.name} id=${bot.objectId} (lv ${bot.level}) founded \"$name\"")
++            val clan = ClanTable.getInstance().createClan(bot, name) ?: continue
++            clan.setPriviledgesForRank(OFFICER_GRADE, Clan.CP_CL_JOIN_CLAN)
++            persist(bot)
++            founded++
++            println("Autobots clans: ${bot.name} id=${bot.objectId} (lv ${bot.level}) founded $name")
++            return
+         }
+     }
+ 
+-    /** A clan leader invites the person it likes most; not everyone says yes. */
+-    private fun invite(online: List<Autobot>) {
+-        val byId = online.associateBy { it.objectId }
+-        var invited = 0
+-        for (clan in ClanTable.getInstance().clans) {
+-            if (invited >= INVITES_PER_TICK) return
+-            if (clan.membersCount >= MAX_MEMBERS) continue
+-            val leader = clan.leader?.playerInstance as? Autobot ?: continue
+-            if (!byId.containsKey(leader.objectId)) continue
+-            val candidate = Relations.relationsOf(leader)
+-                    .filter { it.value.affinity >= INVITE_MIN_AFFINITY }
+-                    .mapNotNull { (id, rel) -> byId[id]?.to(rel) }
+-                    .filter { (bot, _) -> bot.clanId == 0 && bot.level >= MIN_LEVEL }
+-                    .maxByOrNull { (bot, rel) -> sympathy(leader, bot, rel.affinity, rel.trust) }
+-                    ?: continue
+-            val (bot, rel) = candidate
+-            val score = sympathy(leader, bot, rel.affinity, rel.trust)
+-            // The invited decides by how the leader looks to it; a borderline offer is a coin flip.
+-            if (score < ACCEPT_SCORE + Rnd.get(20)) {
+-                if (AutobotData.settings.groupLog) println("Autobots clans: ${bot.name} id=${bot.objectId} declined ${clan.name} (score $score)")
+-                continue
++    /** The leader online names its officers: the members it likes best get the right to invite. */
++    private fun staff(clan: Clan) {
++        val leader = clan.leader?.playerInstance as? Autobot ?: return
++        val officers = clan.members.count { it.objectId != clan.leaderId && it.powerGrade == OFFICER_GRADE }
++        if (officers >= OFFICERS) return
++        val pick = clan.members.filter { it.objectId != clan.leaderId && it.powerGrade != OFFICER_GRADE && it.isOnline && it.playerInstance is Autobot }
++                .map { it to Relations.affinity(leader, it.playerInstance!!) }
++                .filter { it.second >= OFFICER_AFFINITY }
++                .maxByOrNull { it.second }?.first ?: return
++        pick.powerGrade = OFFICER_GRADE
++        pick.playerInstance?.let { it.clanPrivileges = clan.getPriviledgesByRank(OFFICER_GRADE); it.broadcastUserInfo(); persist(it) }
++        println("Autobots clans: ${leader.name} made ${pick.name} an officer of ${clan.name}")
++    }
++
++    /** Who of the clan online may invite: the leader and the officers. */
++    fun recruiters(clan: Clan): List<Autobot> = clan.onlineMembers.filterIsInstance<Autobot>()
++            .filter { it.life != null && (it.objectId == clan.leaderId || (it.clanPrivileges and Clan.CP_CL_JOIN_CLAN) != 0) }
++
++    /**
++     * Each recruiter asks the people it knows, the bots around it and those who heard its shout; when nobody wants in
++     * it shouts to the region once in a while. The invited decide for themselves.
++     */
++    private fun recruit(online: List<Autobot>) {
++        var invites = 0
++        val now = System.currentTimeMillis()
++        val free = online.filter { it.clanId == 0 && it.level >= MIN_JOIN_LEVEL && it.life != null && !it.isInStoreMode && now >= it.clanJoinExpiryTime }
++        for (clan in ClanTable.getInstance().clans.toList().shuffled()) {
++            if (!isBotClan(clan) || clan.membersCount >= clan.getMaxNrOfMembers(0)) continue
++            for (recruiter in recruiters(clan)) {
++                if (invites >= INVITES_PER_TICK) return
++                val bot = free.filter { it.clanId == 0 && now >= (refusals["${clan.clanId}:${it.objectId}"] ?: 0L) && abs(it.level - recruiter.level) <= 15 }
++                        .filter {
++                            Relations.affinity(recruiter, it) >= KNOWN_AFFINITY || Relations.affinity(it, recruiter) >= KNOWN_AFFINITY ||
++                                    MathUtil.checkIfInRange(NEARBY, recruiter, it, false) ||
++                                    heardShout[it.objectId]?.let { h -> h.first == clan.clanId && now - h.second < HEARD_SHOUT_MS } == true
++                        }
++                        .maxByOrNull { sympathy(recruiter, it) } ?: continue
++                invites++
++                val score = sympathy(recruiter, bot)
++                // A borderline offer is a coin flip; a refusal is remembered for a day.
++                if (score < ACCEPT_SCORE + Rnd.get(20)) {
++                    refusals["${clan.clanId}:${bot.objectId}"] = now + REFUSAL_MS
++                    declined++
++                    if (settings.groupLog) println("Autobots clans: ${bot.name} declined ${clan.name} from ${recruiter.name} (score $score)")
++                    continue
++                }
++                if (!join(clan, recruiter, bot)) continue
++                joined++
++                println("Autobots clans: ${bot.name} id=${bot.objectId} (lv ${bot.level}) joined ${clan.name} via ${recruiter.name} " +
++                        "(${clan.membersCount} members, score $score)")
++                ClanChat.welcome(recruiter, bot)
++            }
++            if (clan.membersCount < clan.getMaxNrOfMembers(0) && now >= (nextShout[clan.clanId] ?: 0L)) {
++                val shouter = recruiters(clan).randomOrNull() ?: continue
++                nextShout[clan.clanId] = now + RECRUIT_SHOUT_MS + Rnd.get(0, 20) * 60_000L
++                ClanChat.recruitShout(shouter, clan)
++                val region = MapRegionData.getInstance().getMapRegion(shouter.x, shouter.y)
++                free.filter { MapRegionData.getInstance().getMapRegion(it.x, it.y) == region && Rnd.get(100) < 30 }
++                        .forEach { heardShout[it.objectId] = clan.clanId to now }
+             }
+-            clan.addClanMember(bot)
+-            invited++
+-            println("Autobots clans: ${bot.name} id=${bot.objectId} (lv ${bot.level}) joined ${clan.name} (${clan.membersCount} members)")
+-            if (Rnd.get(100) < 60) bot.clanSay(listOf("hi!", "glad to be here", "привет!", "рад быть с вами").random())
+         }
+     }
+ 
++    /** How much [bot] wants into [recruiter]'s clan: liking and trust both ways, race, level, schedule, character. */
++    fun sympathy(recruiter: Player, bot: Player): Int {
++        val affinity = maxOf(Relations.affinity(bot, recruiter), Relations.affinity(recruiter, bot))
++        var score = affinity + Relations.trust(bot, recruiter.objectId) / 2
++        if (recruiter.race == bot.race) score += 10
++        val gap = abs(recruiter.level - bot.level)
++        if (gap <= 5) score += 10 else if (gap <= 10) score += 4
++        val a = PopulationManager.wakeHour(recruiter.objectId)
++        val b = PopulationManager.wakeHour(bot.objectId)
++        if (a != null && b != null && abs(a - b) <= 2) score += 8
++        score += when (Sociability.of(bot)) { Sociability.Loner -> -15; Sociability.Regular -> 3; Sociability.TeamPlayer -> 10 }
++        // A clan means a party and help; past 20 a lonely bot wants one more.
++        if (bot.level >= 20) score += 5
++        if (Relations.affinity(bot, recruiter) <= Relations.AVOID) score -= 50
++        return score
++    }
++
++    /**
++     * [who] joins [clan] the way RequestAnswerJoinPledge does it: the core's checks (inviter's rights, penalties,
++     * the member limit of the clan level) and the packets everyone online gets.
++     */
++    fun join(clan: Clan, inviter: Player, who: Player): Boolean {
++        if (!clan.checkClanJoinCondition(inviter, who, 0)) return false
++        who.sendPacket(JoinPledge(clan.clanId))
++        who.pledgeType = 0
++        who.powerGrade = MEMBER_GRADE
++        clan.addClanMember(who)
++        who.clanPrivileges = clan.getPriviledgesByRank(who.powerGrade)
++        who.sendPacket(SystemMessageId.ENTERED_THE_CLAN)
++        clan.broadcastToOtherOnlineMembers(SystemMessage.getSystemMessage(SystemMessageId.S1_HAS_JOINED_CLAN).addCharName(who), who)
++        clan.broadcastToOtherOnlineMembers(PledgeShowMemberListAdd(who), who)
++        clan.broadcastToOnlineMembers(PledgeShowInfoUpdate(clan))
++        who.sendPacket(PledgeShowMemberListAll(clan, 0))
++        who.clanJoinExpiryTime = 0
++        who.broadcastUserInfo()
++        persist(who)
++        return true
++    }
++
++    /** [bot] leaves its clan like RequestWithdrawPledge: a join penalty and the roster updated for everyone. */
++    fun withdraw(bot: Autobot, why: String) {
++        val clan = bot.clan ?: return
++        if (clan.leaderId == bot.objectId || bot.isInCombat) return
++        ClanChat.say(bot, ClanChat.Line.Bye)
++        clan.removeClanMember(bot.objectId, System.currentTimeMillis() + Config.ALT_CLAN_JOIN_DAYS * 86_400_000L)
++        clan.broadcastToOnlineMembers(SystemMessage.getSystemMessage(SystemMessageId.S1_HAS_WITHDRAWN_FROM_THE_CLAN).addCharName(bot))
++        clan.broadcastToOnlineMembers(PledgeShowMemberListDelete(bot.name))
++        bot.sendPacket(SystemMessageId.YOU_HAVE_WITHDRAWN_FROM_CLAN)
++        persist(bot)
++        left++
++        println("Autobots clans: ${bot.name} left ${clan.name}: $why")
++    }
++
+     /** Nobody stays where the leader is disliked. */
+     private fun leave(online: List<Autobot>) {
+         for (bot in online) {
+             val clan = bot.clan ?: continue
+-            // The leader stays with its own clan; disbanding comes with clan features later.
+-            if (clan.leaderId == bot.objectId) continue
+-            if ((Relations.of(bot, clan.leaderId)?.affinity ?: 0) > Relations.AVOID || Rnd.get(100) >= LEAVE_PERCENT) continue
+-            clan.removeClanMember(bot.objectId, System.currentTimeMillis() + LEAVE_PENALTY_MS)
+-            println("Autobots clans: ${bot.name} id=${bot.objectId} left ${clan.name}")
++            if (clan.leaderId == bot.objectId || Rnd.get(100) >= LEAVE_PERCENT) continue
++            // A leader who kept the pooled adena lands here too: the givers' liking dropped by 40.
++            if ((Relations.of(bot, clan.leaderId)?.affinity ?: 0) <= Relations.AVOID) withdraw(bot, "dislikes the leader")
+         }
+     }
+ 
+-    /** How much [bot] fits [leader]'s clan: liking, trust, same race, close level, a similar daily schedule. */
+-    private fun sympathy(leader: Autobot, bot: Autobot, affinity: Int, trust: Int): Int {
+-        var score = affinity + trust / 2
+-        if (leader.race == bot.race) score += 10
+-        val gap = abs(leader.level - bot.level)
+-        if (gap <= 5) score += 10 else if (gap <= 10) score += 4
+-        val a = PopulationManager.wakeHour(leader.objectId)
+-        val b = PopulationManager.wakeHour(bot.objectId)
+-        if (a != null && b != null && abs(a - b) <= 2) score += 8
+-        return score
++    /**
++     * A leader who quit the game (no play for a week) hands the clan to the member who plays and is liked most; a clan
++     * where nobody played for two weeks is dissolved. @return true when the clan is gone.
++     */
++    private fun succession(clan: Clan): Boolean {
++        val leaderGone = PopulationManager.absentDays(clan.leaderId, LEADER_GONE_DAYS) ?: return false
++        if (leaderGone < LEADER_GONE_DAYS) return false
++        val heirs = clan.members.filter { it.objectId != clan.leaderId && (PopulationManager.absentDays(it.objectId, 1) ?: 0) == 0 }
++        if (heirs.isEmpty()) {
++            if (clan.members.all { (PopulationManager.absentDays(it.objectId, CLAN_GONE_DAYS) ?: 0) >= CLAN_GONE_DAYS }) {
++                dissolve(clan)
++                return true
++            }
++            return false
++        }
++        val heir = heirs.maxByOrNull { m ->
++            val liked = clan.onlineMembers.sumOf { o -> Relations.of(o, m.objectId)?.affinity ?: 0 }
++            (if (m.isOnline) 50 else 0) + m.level + liked
++        }!!
++        val old = clan.leaderName
++        val oldLeader = clan.leader?.playerInstance
++        clan.setNewLeader(heir)
++        oldLeader?.let { persist(it) }
++        heir.playerInstance?.let { persist(it) }
++        println("Autobots clans: ${clan.name} passed from $old (gone ${leaderGone}d) to ${heir.name}")
++        (heir.playerInstance as? Autobot)?.let { ClanChat.say(it, ClanChat.Line.NewLeader) }
++        return false
++    }
++
++    /** Nobody plays any more: the clan goes, and offline bot members lose the clan id in their own table too. */
++    private fun dissolve(clan: Clan) {
++        val size = clan.membersCount
++        ClanTable.getInstance().destroyClan(clan)
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("UPDATE autobots SET clanid=0, title='', clan_privs=0 WHERE clanid=?").use { ps ->
++                    ps.setInt(1, clan.clanId)
++                    ps.executeUpdate()
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++        ClanPool.forget(clan.clanId)
++        println("Autobots clans: ${clan.name} dissolved, nobody played for $CLAN_GONE_DAYS days ($size members)")
++    }
++
++    /**
++     * Stores a bot's clan id, grade and penalties right away: the core restores a clan from its members' rows, and a
++     * clan whose leader row still says "no clan" after a crash breaks the loading of every clan after it.
++     */
++    private fun persist(player: Player) {
++        if (player is Autobot) try { AutobotsDao.saveAutobot(player) } catch (e: Exception) { e.printStackTrace() }
++    }
++
++    private fun summary(online: List<Autobot>) {
++        val clans = ClanTable.getInstance().clans.filter { isBotClan(it) }
++        val leaders = online.count { it.clanId == 0 && it.level >= settings.clanFoundMinLevel && isLeaderType(it) }
++        println("Autobots clans summary: clans=${clans.size} members=${clans.sumOf { it.membersCount }} online=${online.size} " +
++                "onlineInClan=${online.count { it.clanId != 0 }} freeLeaders=$leaders founded=$founded joined=$joined declined=$declined " +
++                "left=$left biggest=${clans.maxOfOrNull { it.membersCount } ?: 0} ${ClanPool.summary()}")
+     }
+ 
+     private val PREFIX = listOf("Iron", "Silver", "Dark", "Red", "Wild", "Stone", "Night", "Storm", "White", "Blood",
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+index 24171bd..44b9abe 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/GroupFinder.kt
+@@ -33,6 +33,7 @@ import java.util.concurrent.ConcurrentHashMap
+  * what each member earns, see [PartySize]: a party short of its size takes lookers of its region in.
+  */
+ internal object GroupFinder {
++    private const val CLANMATE_BONUS = 20
+     const val FULL_FROM_LEVEL = 20
+     private const val FISTS_GROUP_MIN_LEVEL = 5
+     private const val MAX_LEVEL_SPREAD = 5
+@@ -216,10 +217,10 @@ internal object GroupFinder {
+     private fun isFree(bot: Autobot) = !StaticParties.reserved(bot.objectId) && !bot.isInParty && !bot.isDead && !bot.isInStoreMode && bot.life != null && bot.controller == null &&
+             bot.life?.activity.let { it != SessionPlan.Activity.Afk && it != SessionPlan.Activity.Home }
+ 
+-    /** Lookers around the leader's level it doesn't avoid, the ones it likes best first. */
++    /** Lookers around the leader's level it doesn't avoid, the ones it likes best first; clan mates count as liked. */
+     private fun fitting(leader: Autobot, pool: List<Autobot>) =
+             pool.filter { kotlin.math.abs(it.level - leader.level) <= MAX_LEVEL_SPREAD && Relations.affinity(leader, it) > Relations.AVOID }
+-                    .sortedByDescending { Relations.affinity(leader, it) }
++                    .sortedByDescending { Relations.affinity(leader, it) + if (leader.clanId != 0 && it.clanId == leader.clanId) CLANMATE_BONUS else 0 }
+ 
+     /**
+      * A full party: a tank and a healer or nothing, then a buffer and a spoiler if any are around (before the second
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
+index bba18a5..b8fa882 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/group/Relations.kt
+@@ -21,6 +21,10 @@ internal class Relation(var minutesTogether: Int = 0, var affinity: Int = 0, var
+ internal object Relations {
+     const val AVOID = -30
+     const val FRIEND = 60
++    /** How far seeing each other around (one spot, one town) goes without playing together. */
++    const val STRANGER_CAP = 10
++    /** How far being in one clan goes without playing together. */
++    const val CLANMATE_CAP = 30
+     /** How much party time alone can add to trust: "kept their word" (30 and up) still takes a real deal. */
+     private const val ACQUAINTED_TRUST = 15
+     private const val MAX_PER_BOT = 50
+@@ -66,6 +70,21 @@ internal object Relations {
+         }
+     }
+ 
++    /**
++     * Seen around or met in the clan: liking grows by one up to [cap], never above it and never over a dislike. Only a
++     * bot online has its memory loaded.
++     */
++    fun acquaint(bot: Autobot, otherId: Int, cap: Int) {
++        if (bot.objectId == otherId || !memory.containsKey(bot.objectId)) return
++        val known = memory[bot.objectId]?.get(otherId)
++        if (known != null && (known.affinity >= cap || known.affinity < 0)) return
++        relation(bot, otherId).apply {
++            affinity++
++            lastSeen = System.currentTimeMillis()
++            dirty = true
++        }
++    }
++
+     /** A party wipe or someone leaving the party in trouble: everybody likes the others a bit less. */
+     fun badTime(party: List<Player>, amount: Int) {
+         for (bot in party.filterIsInstance<Autobot>()) for (other in party) {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
+index e89e2b6..d70beed 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/llm/BotTalk.kt
+@@ -79,6 +79,21 @@ internal object BotTalk {
+         }
+     }
+ 
++    /** Clan chat that was no greeting, party or help call: a bot named in it answers, else one may, like in party chat. */
++    fun onClanChat(player: Player, clan: net.sf.l2j.gameserver.model.pledge.Clan, bots: List<Autobot>, text: String) {
++        if (!enabled || player is Autobot || bots.isEmpty()) return
++        val key = "clan:${clan.clanId}"
++        val named = bots.firstOrNull { text.contains(it.name, ignoreCase = true) }
++        if (named == null && Rnd.get(100) >= AutobotData.settings.llmPartyAnswerPercent) {
++            remember(key, LlmMessage("user", "${player.name}: $text"))
++            return
++        }
++        val speaker = named ?: pickTalkers(bots, 1).firstOrNull() ?: return
++        val situation = "clan chat of your clan ${clan.name} (${clan.membersCount} members, level ${clan.level}); ${player.name} is a clan mate; " +
++                "you are ${activity(speaker)}" + (if (clan.leaderId == speaker.objectId) ", you lead the clan" else "")
++        respond(speaker, player, key, "${player.name}: $text", situation, group = true, maySkip = named == null) { speaker.clanSay(it) }
++    }
++
+     private fun talkInParty(player: Player, party: Party, bots: List<Autobot>, text: String) {
+         if (!enabled) return
+         val named = bots.firstOrNull { text.contains(it.name, ignoreCase = true) }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt
+index 3087178..1f38a87 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/trade/TradeWindow.kt
+@@ -123,13 +123,13 @@ internal object TradeWindow {
+      * and cancels if it notices a swap; [a] trusts [b]'s side. Pauses are a player's clicks.
+      */
+     suspend fun exchange(a: Autobot, b: Autobot, aGives: List<Pair<ItemInstance, Int>>, bGives: List<Pair<ItemInstance, Int>>,
+-                         bExpects: List<Promise>, fast: Boolean = false): Outcome {
++                         bExpects: List<Promise>, fast: Boolean = false, maxDistance: Int = 1500): Outcome {
+         suspend fun pause(min: Long, max: Long) = delay(if (fast) 200 else Rnd.get(min, max))
+         fun failed(step: String): Outcome {
+             TradeLog.note(a, "trade with ${b.name} failed: $step")
+             return Outcome.Failed
+         }
+-        if (!approach(a, b)) return failed("too far (${distance(a, b).toInt()})")
++        if (!approach(a, b, maxDistance)) return failed("too far (${distance(a, b).toInt()})")
+         if (!open(a, b)) return failed("no window (busy=${!canTrade(a)}/${!canTrade(b)})")
+         try {
+             pause(1000, 2500)
