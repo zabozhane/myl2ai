@@ -1,8 +1,8 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index fda071b..f0e2eef 100644
+index e1f492d..8daf1d4 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -157,4 +157,15 @@
+@@ -177,4 +177,15 @@
    <llmBotSmallTalkPercent>15</llmBotSmallTalkPercent>
    <llmPartyAnswerPercent>60</llmPartyAnswerPercent>
    <llmLog>true</llmLog>
@@ -19,24 +19,24 @@ index fda071b..f0e2eef 100644
 +  <playerNoticeLog>true</playerNoticeLog>
  </settings>
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-index 86c59a2..58a01d9 100644
+index 64fc761..1bb1b8d 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-@@ -138,7 +138,8 @@ object AutobotsManager {
+@@ -174,7 +174,8 @@ object AutobotsManager {
              2 -> { // pm "
                  if(target == null) return false
                  val bot = activeBots.getOrElse(target) {null} ?: return false
--                if (!dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
+-                if (!dev.l2j.autobots.population.news.Rumors.onWhisper(chatter, bot, text) &&
 +                if (!dev.l2j.autobots.population.notice.PlayerNotice.onWhisper(chatter, bot, text) &&
-+                        !dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
++                        !dev.l2j.autobots.population.news.Rumors.onWhisper(chatter, bot, text) &&
+                         !dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
                          !dev.l2j.autobots.population.llm.Persuasion.onWhisper(chatter, bot, text) &&
                          !PlayerTrade.onWhisper(chatter, bot, text) && !GroupChat.onWhisper(chatter, bot, text)) BotTalk.onWhisper(chatter, bot, text)
- 
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index a346dff..72d5f1a 100644
+index 8a45b0a..0324de5 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -103,7 +103,12 @@ internal data class AutobotSettings(
+@@ -117,7 +117,12 @@ internal data class AutobotSettings(
          @JsonProperty("llmBotChatPerHour") var llmBotChatPerHour: Int = 40,
          @JsonProperty("llmBotSmallTalkPercent") var llmBotSmallTalkPercent: Int = 15,
          @JsonProperty("llmPartyAnswerPercent") var llmPartyAnswerPercent: Int = 60,
@@ -51,20 +51,20 @@ index a346dff..72d5f1a 100644
      @JsonIgnore private val mapper = XmlMapper(JacksonXmlModule().apply {
          setDefaultUseWrapper(false)}).registerKotlinModule().configure(MapperFeature.ACCEPT_CASE_INSENSITIVE_PROPERTIES, true)
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-index a07b859..2539157 100644
+index e9e93b7..c5161fe 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-@@ -113,6 +113,7 @@ internal object PopulationManager {
-                 RaidLog.summary(members.values.mapNotNull { active(it) }.distinctBy { it.objectId })
+@@ -115,6 +115,7 @@ internal object PopulationManager {
                  dev.l2j.autobots.population.group.StaticParties.summary()
                  dev.l2j.autobots.population.llm.Llm.summary()
+                 dev.l2j.autobots.population.news.ServerNews.summary()
 +                dev.l2j.autobots.population.notice.PlayerNotice.summary()
              }
              val online = members.values.mapNotNull { active(it) }.distinctBy { it.objectId }
              if(ticks % 4 == 0) dev.l2j.autobots.movement.MovementStatus.sample(online)
-@@ -121,6 +122,7 @@ internal object PopulationManager {
-             if (ticks % CLANS_EVERY_TICKS == 3) dev.l2j.autobots.population.group.Clans.tick(online)
-             if (ticks % GROUPS_EVERY_TICKS == 0) dev.l2j.autobots.population.llm.BotChatter.tick(online)
+@@ -125,6 +126,7 @@ internal object PopulationManager {
+             dev.l2j.autobots.population.news.ServerNews.tick()
+             if (ticks % GROUPS_EVERY_TICKS == 1) dev.l2j.autobots.population.news.Rumors.tick(online)
              dev.l2j.autobots.population.llm.ChatMemory.tick()
 +            dev.l2j.autobots.population.notice.PlayerNotice.tick()
              if (++ticks % SAVE_EVERY_TICKS == 0) {

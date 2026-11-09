@@ -34,6 +34,7 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git apply /patches/acis-382-clan-invite.patch \
  && git apply /patches/acis-382-clan-wars.patch \
  && git apply /patches/acis-382-duels.patch \
+ && git apply /patches/acis-382-news.patch \
  && git -C /autobots apply /patches/l2autobots-fixes.patch \
  && git -C /autobots apply /patches/l2autobots-autofarm.patch \
  && git -C /autobots apply /patches/l2autobots-craft.patch \
@@ -203,6 +204,8 @@ RUN cat /patches/acis-382-*.patch | grep '^+++ b/' | cut -c7- | sort -u | xargs 
  && git -C /autobots apply /patches/l2autobots-town-spot-arrival.patch \
  && git -C /autobots apply /patches/l2autobots-duels.patch \
  && git -C /autobots apply /patches/l2autobots-pocket-landing-walk.patch \
+ && git -C /autobots apply /patches/l2autobots-news.patch \
+ && git -C /autobots apply /patches/l2autobots-profession-without-quests.patch \
  && git -C /autobots apply /patches/l2autobots-player-notice.patch
 
 # The Kotlin module is compiled against the aCis Java sources and dropped into aCis_gameserver/lib,

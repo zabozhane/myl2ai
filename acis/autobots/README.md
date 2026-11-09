@@ -528,6 +528,24 @@ actual link rather than requiring an unrelated straight line to the destination 
     count) for bots and players in `autobot_duel_ratings`; gg lines, a shout every 3 wins in a row, a clan chat line
     after beating a 100+ stronger rating. `.duels` shows the top 10 and the player's own line.
     `Autobots duels summary` every 10 minutes.
+- `acis-382-news.patch` — core hooks for the server news: `RaidBoss`/`GrandBoss.doDie` (raid killed), the
+  categorized drop in `Monster.doItemDrop`, the PK and war-PvP branches of `Player.onKillUpdatePvPKarma`,
+  `ClanTable.storeClansWars`/`deleteClansWars` and `RequestSurrenderPledgeWar.surrender`, `_bbsnews` in
+  `CommunityBoard`. The community board is on (`EnableCommunityBoard = True`) and opens on `_bbsnews`.
+- `l2autobots-news.patch` — server news and rumors (`population/news/`, spec `docs/news.md`, `newsEnabled`,
+  `newsRumorsEnabled`, `newsRumorMinutes`, `newsRumorsPerHour`, `newsRareDropChance`, `newsLog`):
+  - `ServerNews`: raid bosses killed (with the party, clan and notable drops), rare drops from monsters (base chance
+    at most `newsRareDropChance` of 1000000, gear, jewels, recipes, enchant scrolls, spellbooks), PKs, wars
+    declared / mutual / surrendered / stopped and a battle score every 30 minutes (3+ kills in a mutual war). Bots
+    and players alike. The last 200 in memory, a week in `autobot_news`.
+  - `NewsBoard` (Alt+B): the feed with tabs (all, raids, drops, PK, wars) and pages, wars going on with the score
+    from `autobot_clan_wars`, PKs online.
+  - `Rumors`: every 30 s, in each region with a live player, one bot shouts fresh news (this region's first, raids
+    and wars from anywhere), as hearsay after 15 minutes; the raid killer or the PK victim online tells it
+    themselves; 0-3 others react. "что нового" / "новости" / "what's new" in shout, general chat or a whisper is
+    answered with the last news.
+  - `Autobots news:` lines and `Autobots news summary` every 10 minutes.
+
 - `l2autobots-player-notice.patch` — bots notice a real player and come up to them first (`population/notice/`, spec
   `docs/player-notice.md`, `playerNoticeEnabled`, `playerNoticeRange` 900, `playerNoticeEverySeconds` 90,
   `playerNoticePerHour` 12, `playerNoticeLog`). Every population tick each player at the keyboard
