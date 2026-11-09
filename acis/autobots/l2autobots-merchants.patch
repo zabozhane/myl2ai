@@ -1,0 +1,1207 @@
+diff --git a/data/autobots/config.xml b/data/autobots/config.xml
+index 859bb46..f093063 100644
+--- a/data/autobots/config.xml
++++ b/data/autobots/config.xml
+@@ -144,6 +144,13 @@
+   <newsRumorsPerHour>12</newsRumorsPerHour>
+   <newsRareDropChance>3000</newsRareDropChance>
+   <newsLog>true</newsLog>
++  <!-- Merchants (needs economyEnabled): traders of level 20+ are collectors (buy materials below the market, sell them on
++       to crafters) or resellers (buy what stores sell too cheap and put it up again); dwarf crafters take orders for
++       pieces nobody can get in town (30% up front, craftOrderHours to make it). Reputation in autobot_merchant_rep,
++       orders in autobot_craft_orders, docs/merchants.md. -->
++  <merchantsEnabled>true</merchantsEnabled>
++  <merchantLog>true</merchantLog>
++  <craftOrderHours>72</craftOrderHours>
+   <!-- Language models (stage 5), two tiers. Bots a real player can see (llmNearRange), shares a party with or
+        talked to in the last 10 minutes use the near model; all other bots use the far model. A tier that is off,
+        paused after 3 failed calls in a row (10 minutes) or over its limits gives no answer, and its bots decide and
+diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+index 420007d..155b5ca 100644
+--- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
++++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
+@@ -100,6 +100,9 @@ internal data class AutobotSettings(
+         @JsonProperty("newsRumorsPerHour") var newsRumorsPerHour: Int = 12,
+         @JsonProperty("newsRareDropChance") var newsRareDropChance: Int = 3000,
+         @JsonProperty("newsLog") var newsLog: Boolean = true,
++        @JsonProperty("merchantsEnabled") var merchantsEnabled: Boolean = true,
++        @JsonProperty("merchantLog") var merchantLog: Boolean = true,
++        @JsonProperty("craftOrderHours") var craftOrderHours: Int = 72,
+         @JsonProperty("llmNearProvider") var llmNearProvider: String = "openai",
+         @JsonProperty("llmNearModel") var llmNearModel: String = "gpt-5.4-mini",
+         @JsonProperty("llmNearBaseUrl") var llmNearBaseUrl: String = "",
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt b/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
+index 238d2a5..3470ac4 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/SessionPlan.kt
+@@ -40,13 +40,7 @@ internal class SessionPlan(private val bot: Autobot) {
+ 
+     private enum class Cause(val text: String) { Death("died"), LevelUp("new level"), TownTrip("goods to sell after a town trip") }
+ 
+-    private val baseStyle: Style = Random(bot.objectId * STYLE_SEED + 7L).nextInt(100).let {
+-        when {
+-            it < GRINDER_PERCENT -> Style.Grinder
+-            it < GRINDER_PERCENT + TRADER_PERCENT -> Style.Trader
+-            else -> Style.Casual
+-        }
+-    }
++    private val baseStyle: Style = baseStyleOf(bot.objectId)
+ 
+     fun style(context: Context): Style = if (context.isCrafter) Style.Trader else baseStyle
+ 
+@@ -218,6 +212,15 @@ internal class SessionPlan(private val bot: Autobot) {
+     private fun isNight(): Boolean = ZonedDateTime.now(ZoneId.of(AutobotData.settings.populationTimeZone)).hour in NIGHT_HOURS
+ 
+     companion object {
++        /** The style a character is born with, before crafting makes a trader of it; merchants are picked from it. */
++        fun baseStyleOf(objectId: Int): Style = Random(objectId * STYLE_SEED + 7L).nextInt(100).let {
++            when {
++                it < GRINDER_PERCENT -> Style.Grinder
++                it < GRINDER_PERCENT + TRADER_PERCENT -> Style.Trader
++                else -> Style.Casual
++            }
++        }
++
+         private const val STYLE_SEED = 1_000_033L
+         private const val DECISION = "session"
+         private const val PREPARE_AHEAD_MS = 90_000L
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+index 8b27a8d..81d0073 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/Gear.kt
+@@ -344,6 +344,8 @@ internal object Gear {
+         keep += CraftStock.keep(bot)
+         // Shop goods a profession quest asks for, like the Bone Arrows of the Test of the Lord.
+         keep += dev.l2j.autobots.population.quests.SecondClassQuests.boughtFor(bot)
++        // A merchant's goods and the pieces a crafter made to order.
++        keep += dev.l2j.autobots.population.merchant.Merchants.keep(bot)
+         // Borrowed gear and what it replaced are not the bot's to sell.
+         val lent = Loans.protectedObjects(bot)
+         return bot.inventory.items.filter {
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt
+index 21f7ae0..01304c0 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/MarketBook.kt
+@@ -163,7 +163,10 @@ internal object MarketBook {
+                 key.second > 0 -> before.owned - (owner.inventory.getItemByObjectId(key.second)?.count ?: 0)
+                 else -> owner.inventory.getInventoryItemCount(before.itemId, -1) - before.owned
+             }.coerceIn(0, before.count)
+-            if (sold > 0) recordSale(before.itemId, before.price, sold)
++            if (sold > 0) {
++                recordSale(before.itemId, before.price, sold)
++                dev.l2j.autobots.population.merchant.Merchants.onStoreSale(key.first, before.itemId, before.price, sold, key.second < 0)
++            }
+         }
+         listings.clear()
+         listings.putAll(seen)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
+index 479c719..b9ff144 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/StoreKeeper.kt
+@@ -92,7 +92,7 @@ internal object StoreKeeper {
+         return CraftPlanner.shoppingList(bot) + CraftPlanner.wantedRecipes(bot).associateWith { 1 }
+     }
+ 
+-    fun hasBusiness(bot: Autobot): Boolean = storeGoods(bot).isNotEmpty() || (CraftBook.isCrafter(bot) && Workshop.offer(bot).isNotEmpty()) || (bot.adena > 0 && wanted(bot).any { bidPrice(bot, it) in 1..bot.adena })
++    fun hasBusiness(bot: Autobot): Boolean = dev.l2j.autobots.population.merchant.Merchants.hasBusiness(bot) || storeGoods(bot).isNotEmpty() || (CraftBook.isCrafter(bot) && Workshop.offer(bot).isNotEmpty()) || (bot.adena > 0 && wanted(bot).any { bidPrice(bot, it) in 1..bot.adena })
+ 
+     /**
+      * What the bot asks for one piece: the market value, more from a greedy bot, below the shop price for what shops
+@@ -128,6 +128,8 @@ internal object StoreKeeper {
+     /** Opens a sell store if there is valuable surplus, otherwise a buy store if the bot wants something. */
+     fun open(bot: Autobot): Boolean {
+         if (!canOpenHere(bot)) return false
++        // Standing up for a customer's order: busy, as good as an open store. Collectors and resellers trade their own goods first.
++        if (dev.l2j.autobots.population.merchant.CraftOrders.isBusy(bot) || dev.l2j.autobots.population.merchant.Merchants.openStore(bot)) return true
+         // A crafter sometimes sits as a workshop first; it sells its goods or buys materials the other sessions.
+         val opened = if (CraftBook.isCrafter(bot) && Rnd.get(100) < WORKSHOP_PERCENT) Workshop.open(bot) || openSellStore(bot) || openBuyStore(bot)
+         else openSellStore(bot) || openBuyStore(bot) || (CraftBook.isCrafter(bot) && Workshop.open(bot))
+@@ -208,6 +210,7 @@ internal object StoreKeeper {
+     /** Closes the store and remembers what didn't sell, so it's offered cheaper next time. */
+     fun close(bot: Autobot) {
+         if (!bot.isInStoreMode) return
++        dev.l2j.autobots.population.merchant.Merchants.onStoreClosed(bot)
+         if (bot.storeType == StoreType.SELL) {
+             val memory = unsold.computeIfAbsent(bot.objectId) { ConcurrentHashMap() }
+             bot.sellList.items.forEach { memory.merge(it.item.itemId, 1, Int::plus) }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+index 1857d6d..6a8b234 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/TownTrip.kt
+@@ -147,6 +147,8 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+         SocialTrade.tradeInTown(bot)
+         // Workshop orders when cheaper than shops and stores, then the dwarf's own crafting.
+         Sourcing.orderCheapest(bot) { walkTo(it, "to a workshop or store") }
++        // Merchants' deals, and craft orders: picking up, getting a deposit back, ordering what nobody sells here.
++        dev.l2j.autobots.population.merchant.Merchants.inTown(bot) { walkTo(it, "for a merchant deal") }
+         Crafter.work(bot)
+         sellToNpc(junk())
+         // Skills before gear: a spellbook and the trainer's lesson come first, like for a player.
+@@ -203,7 +205,8 @@ internal class TownTrip(override val bot: Autobot, private val cautious: Boolean
+             val offers = Market.sellOffers(bot, itemId)
+             MarketBook.searched(bot, itemId)
+             // A store a bit over the limit is worth a word with its owner: bots haggle with each other.
+-            val offer = offers.firstOrNull { it.tradeItem.price <= limit }
++            // A trusted merchant gets a little more, a shady one has to be cheaper.
++            val offer = offers.firstOrNull { it.tradeItem.price <= dev.l2j.autobots.population.merchant.MerchantRep.limitFor(it.owner, limit) }
+                     ?: offers.firstOrNull { it.owner is Autobot && it.tradeItem.price < limit * MarketHaggle.REACH }
+ 
+             if(offer==null) { StoreAudit.attempt(if(offers.isEmpty()) "NoOffer" else "Price"); continue }
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftPlanner.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftPlanner.kt
+index 7e0ee3e..80e65b3 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftPlanner.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/CraftPlanner.kt
+@@ -95,7 +95,8 @@ internal object CraftPlanner {
+      * and what spoilers go looking for.
+      */
+     fun shoppingList(bot: Player): Map<Int, Int> {
+-        val wanted = HashMap<Int, Int>()
++        // What paid orders lack comes first.
++        val wanted = HashMap<Int, Int>(dev.l2j.autobots.population.merchant.CraftOrders.materialsFor(bot))
+         for (recipe in ranked(bot).take(RECIPES_TO_STOCK)) {
+             for (material in recipe.materials) {
+                 val need = material.value * CRAFTS_TO_STOCK - Gear.count(bot, material.id)
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Crafter.kt b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Crafter.kt
+index 89a51d0..ccbb8cc 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Crafter.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/economy/craft/Crafter.kt
+@@ -36,6 +36,8 @@ internal object Crafter {
+     suspend fun work(bot: Autobot) {
+         if (!CraftBook.canCraft(bot) || bot.isInStoreMode) return
+         learnRecipes(bot)
++        // Orders customers paid for come before crafting for the market.
++        if (CraftBook.isCrafter(bot)) dev.l2j.autobots.population.merchant.CraftOrders.work(bot)
+         if (CraftBook.isCrafter(bot)) {
+             buyMaterials(bot)
+         }
+@@ -131,7 +133,7 @@ internal object Crafter {
+     private fun fitsProduct(bot: Autobot, recipe: Recipe): Boolean =
+             bot.inventory.validateWeight(CraftPlanner.productWeight(recipe)) && bot.inventory.validateCapacityByItemId(recipe.product.id)
+ 
+-    private suspend fun waitForMp(bot: Autobot, mp: Int): Boolean {
++    suspend fun waitForMp(bot: Autobot, mp: Int): Boolean {
+         if (bot.maxMp < mp) return false
+         if (!bot.isSitting) bot.sitDown()
+         repeat(MAX_MP_WAIT_SECONDS) {
+@@ -147,7 +149,7 @@ internal object Crafter {
+     }
+ 
+     /** One craft on the bot itself, through the same maker the client's RequestRecipeItemMakeSelf uses. */
+-    private fun makeOne(bot: Autobot, recipe: Recipe): Boolean {
++    fun makeOne(bot: Autobot, recipe: Recipe): Boolean {
+         if (bot.isCrafting || bot.isInStoreMode) return false
+         val productId = recipe.product.id
+         val cost = CraftPlanner.craftCost(bot, recipe) ?: 0
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/merchant/CraftOrders.kt b/src/main/kotlin/dev/l2j/autobots/population/merchant/CraftOrders.kt
+new file mode 100644
+index 0000000..d66e032
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/merchant/CraftOrders.kt
+@@ -0,0 +1,429 @@
++package dev.l2j.autobots.population.merchant
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.AutobotsManager
++import dev.l2j.autobots.population.economy.Chatter
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.economy.Market
++import dev.l2j.autobots.population.economy.MarketBook
++import dev.l2j.autobots.population.economy.StoreKeeper
++import dev.l2j.autobots.population.economy.TradeTemper
++import dev.l2j.autobots.population.economy.craft.CraftBook
++import dev.l2j.autobots.population.economy.craft.CraftPlanner
++import dev.l2j.autobots.population.economy.craft.Crafter
++import dev.l2j.autobots.population.group.Relations
++import dev.l2j.autobots.population.trade.Honesty
++import dev.l2j.autobots.population.trade.Loan
++import dev.l2j.autobots.population.trade.Loans
++import dev.l2j.autobots.population.trade.Promise
++import dev.l2j.autobots.population.trade.SocialTrade
++import dev.l2j.autobots.population.trade.TradeWindow
++import kotlinx.coroutines.delay
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.commons.random.Rnd
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.model.item.Recipe
++import java.sql.Statement
++import java.util.concurrent.CopyOnWriteArrayList
++import java.util.concurrent.atomic.AtomicInteger
++
++/** A craft ordered from a dwarf: paid [deposit] up front, the rest of [price] on delivery. */
++internal class CraftOrder(val id: Int, val crafterId: Int, val customerId: Int, val itemId: Int, val recipeId: Int, val price: Long,
++                          val deposit: Long, val created: Long, val due: Long, @Volatile var state: State) {
++    enum class State { Open, Ready, Done, Refunded, Lost, Scam }
++
++    val isActive get() = state == State.Open || state == State.Ready
++    val itemName: String get() = ItemTable.getInstance().getTemplate(itemId)?.name ?: "item $itemId"
++}
++
++/**
++ * Crafting to order: a bot that can't get the next piece of its kit in town (no shop, no store, no materials for a
++ * workshop) asks a crafter around who knows the recipe. The crafter quotes the market value, a bit less from an
++ * easy-going one, takes 30% up front and finds the materials itself; the bot pays the rest when it picks the piece up.
++ * Scammers take the deposit and never craft; opportunists take their time. Stored in `autobot_craft_orders`.
++ */
++internal object CraftOrders {
++    private const val DEPOSIT_SHARE = 0.3
++    private const val MAX_OPEN_PER_CRAFTER = 3
++    private const val WISHES_TO_CONSIDER = 3
++    private const val MATERIAL_OVERPAY = 1.3
++    /** An opportunist starts on the order only after this share of the term. */
++    private const val OPPORTUNIST_DELAY = 0.6
++    private const val HOUR_MS = 3600_000L
++
++    private val orders = CopyOnWriteArrayList<CraftOrder>()
++    @Volatile private var loaded = false
++
++    private val placed = AtomicInteger()
++    private val done = AtomicInteger()
++    private val lateCount = AtomicInteger()
++    private val failed = AtomicInteger()
++    private val scams = AtomicInteger()
++
++    private val termMs get() = AutobotData.settings.craftOrderHours.coerceAtLeast(1) * HOUR_MS
++    /** Past the term, how long a deposit may still come back before everyone calls it lost. */
++    private val graceMs get() = termMs * 4 / 3
++
++    fun all(): List<CraftOrder> = orders
++
++    private fun ofCrafter(bot: Player) = orders.filter { it.crafterId == bot.objectId && it.isActive }
++    private fun ofCustomer(bot: Player) = orders.filter { it.customerId == bot.objectId && it.isActive }
++
++    /** Products a crafter holds for its customers: not for sale. */
++    fun reservedFor(bot: Player): Set<Int> = orders.filter { it.crafterId == bot.objectId && it.state == CraftOrder.State.Ready }.map { it.itemId }.toSet()
++
++    private fun recipeOf(order: CraftOrder): Recipe? = CraftBook.forProduct(order.itemId).firstOrNull { it.id == order.recipeId }
++
++    /** Materials a crafter still lacks for the orders it works on: first in its shopping list and its buy store. */
++    fun materialsFor(bot: Player): Map<Int, Int> {
++        if (!Merchants.enabled) return emptyMap()
++        val wanted = HashMap<Int, Int>()
++        for (order in ofCrafter(bot).filter { it.state == CraftOrder.State.Open && worksOn(bot, it) }) {
++            val recipe = recipeOf(order) ?: continue
++            for ((id, need) in missing(bot, recipe)) wanted.merge(id, need, Int::plus)
++        }
++        return wanted
++    }
++
++    /** What is missing for one craft, materials a known recipe makes from what is at hand taken as their own inputs. */
++    private fun missing(bot: Player, recipe: Recipe): Map<Int, Int> {
++        val result = HashMap<Int, Int>()
++        for (material in recipe.materials) {
++            val need = material.value - Gear.count(bot, material.id)
++            if (need <= 0) continue
++            val sub = CraftPlanner.knownRecipes(bot).firstOrNull { it.product.id == material.id }
++            if (sub != null && sub.product.value > 0) {
++                val crafts = (need + sub.product.value - 1) / sub.product.value
++                for (m in sub.materials) {
++                    val n = m.value * crafts - Gear.count(bot, m.id)
++                    if (n > 0) result.merge(m.id, n, Int::plus)
++                }
++            } else result.merge(material.id, need, Int::plus)
++        }
++        return result
++    }
++
++    private fun worksOn(bot: Player, order: CraftOrder): Boolean = when (Honesty.of(bot)) {
++        Honesty.Scammer -> false
++        Honesty.Opportunist -> System.currentTimeMillis() >= order.created + ((order.due - order.created) * OPPORTUNIST_DELAY).toLong()
++        Honesty.Honest -> true
++    }
++
++    // ---------------------------------------------------------------- the crafter's side
++
++    /** In town, before its own crafts: buys what its orders lack and crafts them. Called from `Crafter.work`. */
++    suspend fun work(bot: Autobot) {
++        if (!Merchants.enabled || bot.isInStoreMode) return
++        for (order in ofCrafter(bot)) {
++            if (order.state != CraftOrder.State.Open || !worksOn(bot, order)) continue
++            val recipe = recipeOf(order) ?: continue
++            if (hasProduct(bot, order)) {
++                ready(bot, order)
++                continue
++            }
++            buyMaterials(bot, recipe)
++            // Intermediates first (braided hemp, cokes...), then the piece itself; a failure burns the materials, the
++            // crafter tries again on its next visit.
++            repeat(4) {
++                if (hasProduct(bot, order) || bot.isDead || bot.isInStoreMode) return@repeat
++                val next = if (CraftPlanner.hasMaterials(bot, recipe)) recipe
++                else recipe.materials.filter { Gear.count(bot, it.id) < it.value }
++                        .firstNotNullOfOrNull { m -> CraftPlanner.knownRecipes(bot).firstOrNull { it.product.id == m.id && CraftPlanner.hasMaterials(bot, it) } }
++                        ?: return@repeat
++                if (bot.currentMp < next.mpCost && !Crafter.waitForMp(bot, next.mpCost)) return@repeat
++                if (!Crafter.makeOne(bot, next)) return@repeat
++                delay(Rnd.get(1500, 3000).toLong())
++            }
++            if (hasProduct(bot, order)) ready(bot, order)
++        }
++    }
++
++    private fun hasProduct(bot: Player, order: CraftOrder): Boolean =
++            bot.inventory.getItemsByItemId(order.itemId).any { !it.isEquipped } &&
++                    // Two orders of one item need two pieces.
++                    bot.inventory.getItemsByItemId(order.itemId).count { !it.isEquipped } > orders.count { it.crafterId == bot.objectId && it.itemId == order.itemId && it.state == CraftOrder.State.Ready }
++
++    private fun ready(bot: Autobot, order: CraftOrder) {
++        order.state = CraftOrder.State.Ready
++        save(order)
++        Merchants.log(bot, "order #${order.id} ${order.itemName} for ${nameOf(order.customerId)} is ready")
++        Merchants.botById(order.customerId)?.let { customer -> if (Rnd.get(100) < 50) bot.tell(customer.name, "${order.itemName} done, come pick it up") }
++    }
++
++    private suspend fun buyMaterials(bot: Autobot, recipe: Recipe) {
++        for ((itemId, need) in missing(bot, recipe)) {
++            var left = need
++            val most = (CraftBook.productValue(itemId) * MATERIAL_OVERPAY).toInt().coerceAtLeast(1)
++            for (offer in Market.sellOffers(bot, itemId).filter { it.tradeItem.price <= most }) {
++                if (left <= 0) break
++                val count = minOf(left, offer.tradeItem.count, Errands.spendable(bot) / offer.tradeItem.price.coerceAtLeast(1))
++                if (count <= 0) break
++                if (Market.buyFromStore(bot, offer, count)) left -= count
++            }
++            if (left <= 0) continue
++            val (shop, product) = Market.findProduct(bot, itemId) ?: continue
++            val count = minOf(left, Errands.spendable(bot) / Market.priceWithTax(shop, product).coerceAtLeast(1))
++            if (count > 0) Market.buyFromNpc(bot, shop, product, count)
++        }
++    }
++
++    // ---------------------------------------------------------------- the customer's side
++
++    /** In town: picks up what is ready, asks for a deposit back, or orders the next piece of its kit. */
++    suspend fun inTown(bot: Autobot, walkTo: suspend (Player) -> Boolean) {
++        if (!Merchants.enabled || bot.level < Merchants.MIN_LEVEL) return
++        if (!loaded) load()
++        for (order in ofCustomer(bot)) settle(bot, order, walkTo)
++        if (ofCustomer(bot).isEmpty()) place(bot, walkTo)
++    }
++
++    private fun crafterNear(bot: Player, order: CraftOrder): Autobot? {
++        val crafter = Merchants.botById(order.crafterId) ?: return null
++        return crafter.takeIf { it.isOnline && !it.isDead && dev.l2j.autobots.utils.distance(bot, it) <= Market.STORE_RADIUS }
++    }
++
++    private suspend fun settle(bot: Autobot, order: CraftOrder, walkTo: suspend (Player) -> Boolean) {
++        val now = System.currentTimeMillis()
++        val crafter = crafterNear(bot, order)
++        val overdue = now > order.due
++        when {
++            order.state == CraftOrder.State.Ready && crafter != null -> deliver(bot, crafter, order, overdue, walkTo)
++            overdue && Honesty.of(order.crafterId) == Honesty.Scammer -> scammed(bot, order)
++            overdue && crafter != null && order.state == CraftOrder.State.Open -> refund(bot, crafter, order, walkTo)
++        }
++    }
++
++    /** Crafters standing up for a customer, until when: their trading segment doesn't reopen the store meanwhile. */
++    private val busy = java.util.concurrent.ConcurrentHashMap<Int, Long>()
++    private const val BUSY_MS = 90_000L
++
++    fun isBusy(bot: Player): Boolean = (busy[bot.objectId] ?: 0L) > System.currentTimeMillis()
++
++    private suspend fun meet(bot: Autobot, crafter: Autobot, walkTo: suspend (Player) -> Boolean): Boolean {
++        // Customers find a crafter behind its store or idling in town, like players do; one on its way somewhere may be
++        // gone by the time they get there.
++        val idle = crafter.isInsideZone(net.sf.l2j.gameserver.enums.ZoneId.TOWN) && !crafter.isMoving && !crafter.isInCombat && crafter.activeSequence == null
++        if (!(crafter.isInStoreMode || idle) || crafter.isCrafting || crafter.activeTradeList != null || isBusy(crafter)) return false
++        if (!walkTo(crafter)) return false
++        // A crafter behind its store stands up for the deal; its trading segment opens the store again afterwards.
++        busy[crafter.objectId] = System.currentTimeMillis() + BUSY_MS
++        if (crafter.isInStoreMode) {
++            StoreKeeper.close(crafter)
++            delay(1500)
++        }
++        return true
++    }
++
++    private fun release(crafter: Player) {
++        busy.remove(crafter.objectId)
++    }
++
++    private suspend fun deliver(bot: Autobot, crafter: Autobot, order: CraftOrder, late: Boolean, walkTo: suspend (Player) -> Boolean) {
++        val rest = (order.price - order.deposit).toInt()
++        if (bot.adena < rest) {
++            Merchants.log(bot, "can't pay the rest $rest for order #${order.id} ${order.itemName} yet")
++            return
++        }
++        val item = crafter.inventory.getItemsByItemId(order.itemId).firstOrNull { !it.isEquipped } ?: run {
++            // Sold or lost after all: back to work.
++            order.state = CraftOrder.State.Open
++            save(order)
++            return
++        }
++        if (!meet(bot, crafter, walkTo)) return
++        val adena = bot.inventory.adenaInstance ?: return
++        val outcome = TradeWindow.exchange(bot, crafter, listOf(adena to rest), listOf(item to 1), listOf(Promise(Loan.ADENA, 0, rest)), maxDistance = Market.STORE_RADIUS)
++        release(crafter)
++        if (outcome != TradeWindow.Outcome.Done) {
++            Merchants.log(bot, "pick-up of order #${order.id} from ${crafter.name} failed: $outcome")
++            return
++        }
++        order.state = CraftOrder.State.Done
++        save(order)
++        MerchantRep.order(crafter.objectId, if (late) MerchantRep.Order.Late else MerchantRep.Order.OnTime)
++        Relations.adjust(bot, crafter.objectId, if (late) 2 else 5, 3)
++        Relations.adjust(crafter, bot.objectId, 3, 3)
++        MarketBook.recordSale(order.itemId, order.price.toInt(), 1)
++        (if (late) lateCount else done).incrementAndGet()
++        Merchants.log(bot, "picked up order #${order.id} ${order.itemName} from ${crafter.name}, paid ${order.price} in all" + if (late) " (late)" else "")
++        MerchantEvents.fire(MerchantEvents.Kind.OrderDone, crafter, crafter.name, bot.name, order.itemName, order.price)
++        bot.inventory.getItemsByItemId(order.itemId).firstOrNull { !it.isEquipped }?.let {
++            Gear.equip(bot, it)
++            Chatter.maybeSay(bot, Chatter.BOUGHT_UPGRADE, it.itemName)
++        }
++    }
++
++    private suspend fun refund(bot: Autobot, crafter: Autobot, order: CraftOrder, walkTo: suspend (Player) -> Boolean) {
++        if (!meet(bot, crafter, walkTo)) return
++        val adena = crafter.inventory.adenaInstance
++        val deposit = order.deposit.toInt()
++        val back = adena != null && adena.count >= deposit &&
++                TradeWindow.exchange(crafter, bot, listOf(adena to deposit), emptyList(), listOf(Promise(Loan.ADENA, 0, deposit)), maxDistance = Market.STORE_RADIUS) == TradeWindow.Outcome.Done
++        release(crafter)
++        if (!back) {
++            Merchants.log(bot, "${crafter.name} couldn't give back the deposit of order #${order.id} yet")
++            return
++        }
++        order.state = CraftOrder.State.Refunded
++        save(order)
++        MerchantRep.order(crafter.objectId, MerchantRep.Order.Refunded)
++        failed.incrementAndGet()
++        Merchants.log(bot, "got the deposit $deposit of order #${order.id} ${order.itemName} back from ${crafter.name}: not made in time")
++        MerchantEvents.fire(MerchantEvents.Kind.OrderFailed, crafter, crafter.name, bot.name, order.itemName, order.deposit)
++    }
++
++    private fun scammed(customer: Player, order: CraftOrder) {
++        order.state = CraftOrder.State.Scam
++        save(order)
++        val name = nameOf(order.crafterId)
++        MerchantRep.order(order.crafterId, MerchantRep.Order.Scam)
++        scams.incrementAndGet()
++        Merchants.log(customer, "order #${order.id} ${order.itemName}: $name kept the deposit ${order.deposit} and made nothing")
++        SocialTrade.scammed(customer, order.crafterId, name, "${order.itemName} order (${order.deposit}a up front)")
++        MerchantEvents.fire(MerchantEvents.Kind.OrderScam, Merchants.botById(order.crafterId), name, customer.name, order.itemName, order.deposit)
++    }
++
++    /** The bot can't get its next piece any other way: finds a crafter around who makes it and orders it. */
++    private suspend fun place(bot: Autobot, walkTo: suspend (Player) -> Boolean) {
++        val allowedGrade = Gear.gradeFor(bot.level).id
++        for (wish in Gear.wishes(bot).take(WISHES_TO_CONSIDER)) {
++            if (wish.template.crystalType.id > allowedGrade || Market.npcPrice(wish.itemId) != null) continue
++            val recipes = CraftBook.forProduct(wish.itemId)
++            if (recipes.isEmpty()) continue
++            // A store, a workshop or its own craft it can afford: the usual errands take care of it.
++            val routes = dev.l2j.autobots.population.economy.craft.Sourcing.routes(bot, wish.itemId)
++            if (routes.any { it.cost <= Errands.spendable(bot) }) continue
++            val offers = crafters(bot, recipes).map { (crafter, recipe) -> Triple(crafter, recipe, quote(crafter, wish.itemId)) }
++                    .filter { (_, _, price) -> price in 1..Errands.spendable(bot).toLong() }
++                    // Reputation counts as much as the price: a stranger has to be quite a bit cheaper.
++                    .sortedBy { (crafter, _, price) -> price / (0.5 + MerchantRep.score(crafter) / 100) }
++            val (crafter, recipe, price) = offers.firstOrNull() ?: continue
++            if (order(bot, crafter, recipe, wish.itemId, price, walkTo)) return
++        }
++    }
++
++    private fun crafters(bot: Autobot, recipes: List<Recipe>): List<Pair<Autobot, Recipe>> =
++            bot.getKnownTypeInRadius(Autobot::class.java, Market.STORE_RADIUS)
++                    .filter { it !== bot && it.isOnline && !it.isDead && Merchants.role(it) == MerchantRole.Crafter }
++                    .filter { ofCrafter(it).size < MAX_OPEN_PER_CRAFTER && MerchantRep.score(it) >= MerchantRep.MIN_FOR_ORDERS }
++                    .filter { Relations.trust(bot, it.objectId) > Relations.AVOID }
++                    .mapNotNull { crafter -> recipes.firstOrNull { crafter.dwarvenRecipeBook.contains(it) && it.level <= CraftBook.skillLevel(crafter) }?.let { crafter to it } }
++
++    /** What a crafter asks for a piece: its market value, somewhat less from an easy-going one. */
++    fun quote(crafter: Player, itemId: Int): Long = (MarketBook.value(itemId) * (0.85 + 0.15 * TradeTemper.greed(crafter))).toLong()
++
++    private suspend fun order(bot: Autobot, crafter: Autobot, recipe: Recipe, itemId: Int, price: Long, walkTo: suspend (Player) -> Boolean): Boolean {
++        val deposit = (price * DEPOSIT_SHARE).toLong().coerceAtLeast(1)
++        if (!meet(bot, crafter, walkTo)) return false
++        val adena = bot.inventory.adenaInstance ?: return false
++        val name = ItemTable.getInstance().getTemplate(itemId)?.name ?: return false
++        bot.tell(crafter.name, "can you make $name? ${deposit}a up front")
++        delay(Rnd.get(1500, 4000).toLong())
++        val outcome = TradeWindow.exchange(bot, crafter, listOf(adena to deposit.toInt()), emptyList(), listOf(Promise(Loan.ADENA, 0, deposit.toInt())), maxDistance = Market.STORE_RADIUS)
++        release(crafter)
++        if (outcome != TradeWindow.Outcome.Done) {
++            Merchants.log(bot, "order of $name from ${crafter.name} failed: $outcome")
++            return false
++        }
++        val now = System.currentTimeMillis()
++        val order = insert(CraftOrder(0, crafter.objectId, bot.objectId, itemId, recipe.id, price, deposit, now, now + termMs, CraftOrder.State.Open)) ?: return false
++        orders += order
++        placed.incrementAndGet()
++        crafter.tell(bot.name, "ok, ${price}a in all, give me a couple of days")
++        Merchants.log(bot, "ordered #${order.id} $name from ${crafter.name} (rep ${"%.1f".format(MerchantRep.score(crafter))}, ${Honesty.of(crafter)}) for $price, paid $deposit up front")
++        return true
++    }
++
++    // ---------------------------------------------------------------- upkeep
++
++    /** Every 10 minutes: deposits nobody gave back in time are lost; a scammer's customer online complains. */
++    fun expire() {
++        val now = System.currentTimeMillis()
++        for (order in orders.filter { it.isActive && now > it.due }) {
++            val scammer = Honesty.of(order.crafterId) == Honesty.Scammer
++            val customer = Merchants.botById(order.customerId)?.takeIf { it.isOnline }
++            when {
++                scammer && customer != null -> scammed(customer, order)
++                now > order.due + graceMs -> {
++                    order.state = if (scammer) CraftOrder.State.Scam else CraftOrder.State.Lost
++                    save(order)
++                    MerchantRep.order(order.crafterId, if (scammer) MerchantRep.Order.Scam else MerchantRep.Order.Lost)
++                    (if (scammer) scams else failed).incrementAndGet()
++                    Merchants.log("order #${order.id} ${order.itemName} of ${nameOf(order.customerId)} from ${nameOf(order.crafterId)}: deposit ${order.deposit} lost")
++                    MerchantEvents.fire(if (scammer) MerchantEvents.Kind.OrderScam else MerchantEvents.Kind.OrderFailed,
++                            Merchants.botById(order.crafterId), nameOf(order.crafterId), nameOf(order.customerId), order.itemName, order.deposit)
++                }
++            }
++        }
++        orders.removeIf { !it.isActive }
++    }
++
++    fun summary(): String {
++        val active = orders.filter { it.isActive }
++        return "orders open=${active.count { it.state == CraftOrder.State.Open }} ready=${active.count { it.state == CraftOrder.State.Ready }} " +
++                "placed=${placed.getAndSet(0)} done=${done.getAndSet(0)} late=${lateCount.getAndSet(0)} failed=${failed.getAndSet(0)} scams=${scams.getAndSet(0)}"
++    }
++
++    private fun nameOf(objectId: Int): String = Merchants.botById(objectId)?.name ?: Loans.nameOf(objectId) ?: "id $objectId"
++
++    // ---------------------------------------------------------------- storage
++
++    @Synchronized
++    fun load() {
++        if (loaded) return
++        loaded = true
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.createStatement().use {
++                    it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_craft_orders (id INT UNSIGNED NOT NULL AUTO_INCREMENT, crafter_id INT UNSIGNED NOT NULL, " +
++                            "customer_id INT UNSIGNED NOT NULL, item_id INT NOT NULL, recipe_id INT NOT NULL, price BIGINT NOT NULL, deposit BIGINT NOT NULL, " +
++                            "created BIGINT NOT NULL, due BIGINT NOT NULL, state VARCHAR(8) NOT NULL, PRIMARY KEY(id), KEY(state))")
++                }
++                con.prepareStatement("SELECT id, crafter_id, customer_id, item_id, recipe_id, price, deposit, created, due, state FROM autobot_craft_orders WHERE state IN ('Open','Ready')").use { ps ->
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) orders += CraftOrder(rs.getInt(1), rs.getInt(2), rs.getInt(3), rs.getInt(4), rs.getInt(5), rs.getLong(6), rs.getLong(7),
++                                rs.getLong(8), rs.getLong(9), CraftOrder.State.valueOf(rs.getString(10)))
++                    }
++                }
++            }
++            Merchants.log("loaded ${orders.size} open craft orders")
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++
++    private fun insert(order: CraftOrder): CraftOrder? {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("INSERT INTO autobot_craft_orders (crafter_id, customer_id, item_id, recipe_id, price, deposit, created, due, state) VALUES (?,?,?,?,?,?,?,?,?)",
++                        Statement.RETURN_GENERATED_KEYS).use { ps ->
++                    ps.setInt(1, order.crafterId); ps.setInt(2, order.customerId); ps.setInt(3, order.itemId); ps.setInt(4, order.recipeId)
++                    ps.setLong(5, order.price); ps.setLong(6, order.deposit); ps.setLong(7, order.created); ps.setLong(8, order.due); ps.setString(9, order.state.name)
++                    ps.executeUpdate()
++                    ps.generatedKeys.use { keys ->
++                        if (keys.next()) return CraftOrder(keys.getInt(1), order.crafterId, order.customerId, order.itemId, order.recipeId, order.price,
++                                order.deposit, order.created, order.due, order.state)
++                    }
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++        return null
++    }
++
++    private fun save(order: CraftOrder) {
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("UPDATE autobot_craft_orders SET state=? WHERE id=?").use { ps ->
++                    ps.setString(1, order.state.name); ps.setInt(2, order.id); ps.executeUpdate()
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/merchant/MerchantRep.kt b/src/main/kotlin/dev/l2j/autobots/population/merchant/MerchantRep.kt
+new file mode 100644
+index 0000000..ae472ec
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/merchant/MerchantRep.kt
+@@ -0,0 +1,147 @@
++package dev.l2j.autobots.population.merchant
++
++import net.sf.l2j.L2DatabaseFactory
++import net.sf.l2j.gameserver.model.actor.Player
++import java.util.concurrent.ConcurrentHashMap
++import kotlin.math.pow
++
++/**
++ * What the town says about a merchant, 0 to 100: fair prices and orders kept raise it, overpricing, broken orders and
++ * scams lower it. Unlike the private trust between two characters (`Relations.trust`), everybody knows it. It drifts
++ * back to [NEUTRAL] by 5% of the gap a day, so an old story fades. Stored in `autobot_merchant_rep`.
++ */
++internal object MerchantRep {
++    const val NEUTRAL = 50.0
++    /** Below this nobody orders from a crafter. */
++    const val MIN_FOR_ORDERS = 30.0
++    const val TRUSTED = 70.0
++    const val SHADY = 25.0
++    private const val DAY_MS = 24 * 3600_000L
++    private const val DAILY_DRIFT = 0.95
++
++    class Rep(var score: Double = NEUTRAL, var deals: Int = 0, var ordersDone: Int = 0, var ordersFailed: Int = 0, var scams: Int = 0,
++              var updated: Long = System.currentTimeMillis()) {
++        var dirty = false
++        // Small gains from everyday deals are capped per day: a store can't farm reputation.
++        var dayStart = 0L
++        var dayGain = 0.0
++    }
++
++    private val reps = ConcurrentHashMap<Int, Rep>()
++    @Volatile private var loaded = false
++
++    fun of(objectId: Int): Rep {
++        if (!loaded) load()
++        val rep = reps.computeIfAbsent(objectId) { Rep() }
++        drift(rep)
++        return rep
++    }
++
++    fun ensureLoaded() {
++        if (!loaded) load()
++    }
++
++    fun score(player: Player): Double = of(player.objectId).score
++
++    private fun drift(rep: Rep) {
++        val now = System.currentTimeMillis()
++        val days = (now - rep.updated).toDouble() / DAY_MS
++        if (days < 0.01) return
++        rep.score = NEUTRAL + (rep.score - NEUTRAL) * DAILY_DRIFT.pow(days)
++        rep.updated = now
++        rep.dirty = true
++    }
++
++    /** An everyday deal: [points] count only up to [dailyCap] a day in total. */
++    fun deal(objectId: Int, points: Double, dailyCap: Double) {
++        val rep = of(objectId)
++        val now = System.currentTimeMillis()
++        if (now - rep.dayStart > DAY_MS) {
++            rep.dayStart = now
++            rep.dayGain = 0.0
++        }
++        rep.deals++
++        val applied = if (points > 0) points.coerceAtMost(dailyCap - rep.dayGain).coerceAtLeast(0.0) else points
++        if (points > 0) rep.dayGain += applied
++        change(rep, applied)
++    }
++
++    enum class Order(val points: Double) { OnTime(5.0), Late(2.0), Refunded(-5.0), Lost(-8.0), Scam(-25.0) }
++
++    fun order(objectId: Int, outcome: Order) {
++        val rep = of(objectId)
++        when (outcome) {
++            Order.OnTime, Order.Late -> rep.ordersDone++
++            Order.Refunded, Order.Lost -> rep.ordersFailed++
++            Order.Scam -> rep.scams++
++        }
++        change(rep, outcome.points)
++        // Rare and worth keeping: stored right away, not with the ten-minute batch.
++        save()
++    }
++
++    private fun change(rep: Rep, points: Double) {
++        rep.score = (rep.score + points).coerceIn(0.0, 100.0)
++        rep.updated = System.currentTimeMillis()
++        rep.dirty = true
++    }
++
++    /**
++     * The most a buyer pays in [owner]'s store against its own [limit]: a bit more at a trusted merchant, a good deal
++     * less at a shady one. Characters nobody talks about (players, bots that never traded) get the limit as it is.
++     */
++    fun limitFor(owner: Player, limit: Int): Int {
++        if (!Merchants.enabled) return limit
++        val rep = reps[owner.objectId] ?: return limit
++        return when {
++            rep.score >= TRUSTED -> (limit * 1.05).toInt()
++            rep.score < SHADY -> (limit * 0.85).toInt()
++            else -> limit
++        }
++    }
++
++    fun average(ids: Collection<Int>): Double = ids.mapNotNull { reps[it]?.score }.takeIf { it.isNotEmpty() }?.average() ?: NEUTRAL
++
++    @Synchronized
++    private fun load() {
++        if (loaded) return
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.createStatement().use {
++                    it.executeUpdate("CREATE TABLE IF NOT EXISTS autobot_merchant_rep (bot_id INT UNSIGNED NOT NULL, score DOUBLE NOT NULL, " +
++                            "deals INT NOT NULL, orders_done INT NOT NULL, orders_failed INT NOT NULL, scams INT NOT NULL, updated BIGINT NOT NULL, PRIMARY KEY(bot_id))")
++                }
++                con.prepareStatement("SELECT bot_id, score, deals, orders_done, orders_failed, scams, updated FROM autobot_merchant_rep").use { ps ->
++                    ps.executeQuery().use { rs ->
++                        while (rs.next()) reps[rs.getInt(1)] = Rep(rs.getDouble(2), rs.getInt(3), rs.getInt(4), rs.getInt(5), rs.getInt(6), rs.getLong(7))
++                    }
++                }
++            }
++            Merchants.log("loaded ${reps.size} reputations")
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++        loaded = true
++    }
++
++    fun save() {
++        if (!loaded) return
++        val dirty = reps.entries.filter { it.value.dirty }
++        if (dirty.isEmpty()) return
++        try {
++            L2DatabaseFactory.getInstance().connection.use { con ->
++                con.prepareStatement("REPLACE INTO autobot_merchant_rep (bot_id, score, deals, orders_done, orders_failed, scams, updated) VALUES (?,?,?,?,?,?,?)").use { ps ->
++                    for ((id, r) in dirty) {
++                        r.dirty = false
++                        ps.setInt(1, id); ps.setDouble(2, r.score); ps.setInt(3, r.deals); ps.setInt(4, r.ordersDone)
++                        ps.setInt(5, r.ordersFailed); ps.setInt(6, r.scams); ps.setLong(7, r.updated)
++                        ps.addBatch()
++                    }
++                    ps.executeBatch()
++                }
++            }
++        } catch (e: Exception) {
++            e.printStackTrace()
++        }
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/merchant/Merchants.kt b/src/main/kotlin/dev/l2j/autobots/population/merchant/Merchants.kt
+new file mode 100644
+index 0000000..4625b18
+--- /dev/null
++++ b/src/main/kotlin/dev/l2j/autobots/population/merchant/Merchants.kt
+@@ -0,0 +1,401 @@
++package dev.l2j.autobots.population.merchant
++
++import dev.l2j.autobots.Autobot
++import dev.l2j.autobots.AutobotData
++import dev.l2j.autobots.AutobotsManager
++import dev.l2j.autobots.CoScopes
++import dev.l2j.autobots.population.SessionPlan
++import dev.l2j.autobots.population.economy.Chatter
++import dev.l2j.autobots.population.economy.Errands
++import dev.l2j.autobots.population.economy.Gear
++import dev.l2j.autobots.population.economy.Market
++import dev.l2j.autobots.population.economy.MarketBook
++import dev.l2j.autobots.population.economy.StoreKeeper
++import dev.l2j.autobots.population.economy.TradeTemper
++import dev.l2j.autobots.population.economy.craft.CraftBook
++import dev.l2j.autobots.population.economy.craft.CraftPlanner
++import dev.l2j.autobots.utils.Klock
++import net.sf.l2j.gameserver.data.ItemTable
++import net.sf.l2j.gameserver.data.xml.MapRegionData
++import net.sf.l2j.gameserver.enums.actors.StoreType
++import net.sf.l2j.gameserver.model.actor.Player
++import net.sf.l2j.gameserver.network.serverpackets.PrivateStoreMsgBuy
++import net.sf.l2j.gameserver.network.serverpackets.PrivateStoreMsgSell
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.CopyOnWriteArrayList
++import java.util.concurrent.atomic.AtomicInteger
++import java.util.concurrent.atomic.AtomicLong
++
++/** A merchant's trade, fixed for life by the object id like the rest of its character. */
++internal enum class MerchantRole {
++    None,
++    /** Bids on materials and recipes below the market and sells them on to crafters. */
++    Collector,
++    /** Buys what other stores sell too cheap and puts it up again at the market price. */
++    Reseller,
++    /** A dwarf crafter: also takes orders for things nobody can get in town (CraftOrders). */
++    Crafter
++}
++
++/** What other stages may listen to (rumors, stage 7): orders kept and broken, a big resale. */
++internal object MerchantEvents {
++    enum class Kind { OrderDone, OrderScam, OrderFailed, BigFlip }
++
++    fun interface Listener {
++        fun on(kind: Kind, merchant: Player?, merchantName: String, other: String, what: String, adena: Long)
++    }
++
++    val listeners = CopyOnWriteArrayList<Listener>()
++
++    fun fire(kind: Kind, merchant: Player?, merchantName: String, other: String, what: String, adena: Long) {
++        listeners.forEach {
++            try {
++                it.on(kind, merchant, merchantName, other, what, adena)
++            } catch (e: Exception) {
++                e.printStackTrace()
++            }
++        }
++    }
++}
++
++/**
++ * Bots that live off trading. A trader (session style, `SessionPlan.Style.Trader`) of level 20+ that is not a dwarf
++ * crafter is a collector or a reseller; crafters take orders. Their goods have a cost: what they paid for them, which
++ * their stores never go below. Goods are kept out of the usual surplus (no NPC sale) while the bag is light and for
++ * three days at most, then they are ordinary loot again.
++ */
++internal object Merchants {
++    const val MIN_LEVEL = 20
++    private const val COLLECTOR_MIN_SHARE = 0.55
++    private const val COLLECTOR_MAX_SHARE = 0.75
++    private const val COLLECTOR_BUDGET = 0.6
++    private const val COLLECTOR_MARKUP = 1.15
++    private const val RESELL_BELOW = 0.7
++    private const val RESELLER_MARKUP = 1.2
++    private const val RESELLER_BUDGET = 0.5
++    private const val RESELLER_BUYS = 3
++    private const val MIN_FLIP_VALUE = 1000
++    private const val MIN_FLIP_PROFIT = 500
++    private const val BIG_FLIP = 100_000L
++    private const val MIN_FLIP_BUDGET = 50_000
++    private const val STOCK_KEEP_MS = 3 * 24 * 3600_000L
++    private const val STOCK_MAX_LOAD = 50
++    private const val MAX_STACK_BID = 50
++    private const val MAX_TITLE = 29
++    private const val SUMMARY_MS = 600_000L
++    private const val SHOP_CAP = 0.95
++
++    val enabled get() = AutobotData.settings.economyEnabled && AutobotData.settings.merchantsEnabled
++
++    /** What one piece of a merchant's goods cost it, and since when it holds them. */
++    class Stock(var count: Int, var cost: Int, val since: Long)
++
++    private val stock = ConcurrentHashMap<Int, ConcurrentHashMap<Int, Stock>>()
++    /** A buy store a collector opened: inventory counts and bids at opening, to learn what it bought. */
++    private class BuyStore(val before: Map<Int, Int>, val bids: Map<Int, Int>)
++    private val buyStores = ConcurrentHashMap<Int, BuyStore>()
++
++    private val bought = AtomicInteger()
++    private val boughtAdena = AtomicLong()
++    private val sold = AtomicInteger()
++    private val profit = AtomicLong()
++    private val flips = AtomicInteger()
++
++    init {
++        Klock.start("merchants", SUMMARY_MS, SUMMARY_MS, CoScopes.generalScope) {
++            if (enabled) {
++                MerchantRep.save()
++                CraftOrders.expire()
++                summary()
++            }
++        }
++        MerchantRep.ensureLoaded()
++        CraftOrders.load()
++    }
++
++    fun botById(objectId: Int): Autobot? = net.sf.l2j.gameserver.model.World.getInstance().getPlayer(objectId) as? Autobot
++
++    fun role(bot: Player): MerchantRole {
++        if (!enabled || bot !is Autobot || bot.life == null || bot.level < MIN_LEVEL) return MerchantRole.None
++        if (CraftBook.isCrafter(bot)) return MerchantRole.Crafter
++        if (SessionPlan.baseStyleOf(bot.objectId) != SessionPlan.Style.Trader) return MerchantRole.None
++        return if (Math.floorMod(bot.objectId * 31 + 5, 2) == 0) MerchantRole.Collector else MerchantRole.Reseller
++    }
++
++    fun log(message: String) {
++        if (AutobotData.settings.merchantLog) println("Autobots merchants: $message")
++    }
++
++    fun log(bot: Player, message: String) = log("${bot.name} id=${bot.objectId} (lv ${bot.level}, ${role(bot)}, rep ${"%.1f".format(MerchantRep.score(bot))}): $message")
++
++    // ---------------------------------------------------------------- goods
++
++    private fun goodsOf(bot: Player): ConcurrentHashMap<Int, Stock> = stock.computeIfAbsent(bot.objectId) { ConcurrentHashMap() }
++
++    private fun addStock(bot: Player, itemId: Int, count: Int, cost: Int) {
++        val goods = goodsOf(bot)
++        val old = goods[itemId]
++        if (old == null) goods[itemId] = Stock(count, cost, System.currentTimeMillis())
++        else {
++            old.cost = ((old.cost.toLong() * old.count + cost.toLong() * count) / (old.count + count)).toInt()
++            old.count += count
++        }
++    }
++
++    /** Goods still held: what is left in the bag, while it is light and the goods are fresh. */
++    private fun liveStock(bot: Player): Map<Int, Stock> {
++        val goods = stock[bot.objectId] ?: return emptyMap()
++        val now = System.currentTimeMillis()
++        goods.entries.removeIf { (itemId, s) ->
++            s.count = minOf(s.count, Gear.count(bot, itemId))
++            s.count <= 0 || now - s.since > STOCK_KEEP_MS
++        }
++        if (Errands.loadPercent(bot) >= STOCK_MAX_LOAD) return emptyMap()
++        return goods
++    }
++
++    /** Item ids the usual surplus must leave alone: a merchant's goods and an order made for a customer. */
++    fun keep(bot: Player): Set<Int> {
++        if (!enabled) return emptySet()
++        return liveStock(bot).keys + CraftOrders.reservedFor(bot)
++    }
++
++    fun hasBusiness(bot: Autobot): Boolean = when (role(bot)) {
++        MerchantRole.Collector -> liveStock(bot).isNotEmpty() || collectorBids(bot).isNotEmpty()
++        // A reseller with money goes looking for bargains even with nothing to sell.
++        MerchantRole.Reseller -> liveStock(bot).isNotEmpty() || Errands.spendable(bot) >= MIN_FLIP_BUDGET
++        else -> false
++    }
++
++    // ---------------------------------------------------------------- stores
++
++    /** Opens a merchant's store in town. @return true if one was opened; false lets the usual stores try. */
++    fun openStore(bot: Autobot): Boolean {
++        val role = role(bot)
++        if (role != MerchantRole.Collector && role != MerchantRole.Reseller) return false
++        settleBuyStore(bot)
++        if (openSellStore(bot, role)) return true
++        return role == MerchantRole.Collector && openBuyStore(bot)
++    }
++
++    /** What a collector bids on: materials crafters look for and things bots want that no shop sells. */
++    private fun collectorBids(bot: Autobot): Map<Int, Int> {
++        val wanted = LinkedHashSet<Int>()
++        wanted += CraftPlanner.wantedMaterials()
++        wanted += CraftPlanner.demand().entries.sortedByDescending { it.value }.map { it.key }.filter { Market.npcPrice(it) == null }
++        val greed = TradeTemper.greed(bot)
++        val share = COLLECTOR_MAX_SHARE - (COLLECTOR_MAX_SHARE - COLLECTOR_MIN_SHARE) * greed
++        val bids = LinkedHashMap<Int, Int>()
++        for (itemId in wanted) {
++            val template = ItemTable.getInstance().getTemplate(itemId) ?: continue
++            if (!template.isTradable || template.isQuestItem) continue
++            val bid = (MarketBook.value(itemId) * share).toInt()
++            // Never worse for the seller than the shop: that's why anyone would come.
++            if (bid <= Market.npcSellPrice(itemId)) continue
++            bids[itemId] = bid
++        }
++        return bids
++    }
++
++    private fun openBuyStore(bot: Autobot): Boolean {
++        var budget = (Errands.spendable(bot) * COLLECTOR_BUDGET).toLong()
++        val list = bot.buyList
++        list.clear()
++        val bids = HashMap<Int, Int>()
++        for ((itemId, bid) in collectorBids(bot)) {
++            if (list.items.size >= bot.privateBuyStoreLimit) break
++            val template = ItemTable.getInstance().getTemplate(itemId) ?: continue
++            val count = if (template.isStackable) (budget / bid).coerceAtMost(MAX_STACK_BID.toLong()).toInt() else if (budget >= bid) 1 else 0
++            if (count <= 0) continue
++            list.addItemByItemId(itemId, count, bid)
++            bids[itemId] = bid
++            budget -= bid.toLong() * count
++        }
++        if (list.items.isEmpty()) return false
++        list.title = title("WTB mats:", list.items.first().item.name)
++        buyStores[bot.objectId] = BuyStore(bids.keys.associateWith { Gear.count(bot, it) }, bids)
++        bot.sitDown()
++        bot.storeType = StoreType.BUY
++        bot.broadcastUserInfo()
++        bot.broadcastPacket(PrivateStoreMsgBuy(bot))
++        log(bot, "opened buy store: " + list.items.joinToString { "${it.count}x ${it.item.name} @${it.price}" })
++        advertise(bot, "WTB mats ${list.items.take(3).joinToString { it.item.name }}, better than NPC")
++        return true
++    }
++
++    /** Sells its goods: never below what they cost plus the markup, around the market price otherwise. */
++    private fun openSellStore(bot: Autobot, role: MerchantRole): Boolean {
++        val goods = liveStock(bot)
++        if (goods.isEmpty()) return false
++        val greed = TradeTemper.greed(bot)
++        val list = bot.sellList
++        list.clear()
++        list.isPackaged = false
++        for ((itemId, s) in goods.entries.sortedByDescending { (id, s) -> MarketBook.value(id).toLong() * s.count }) {
++            if (list.items.size >= bot.privateSellStoreLimit) break
++            val item = bot.inventory.getItemByItemId(itemId)?.takeIf { !it.isEquipped && it.isTradable } ?: continue
++            val price = askingPrice(role, greed, itemId, s.cost)
++            list.addItem(item.objectId, minOf(s.count, item.count), price)
++        }
++        if (list.items.isEmpty()) return false
++        list.title = title("WTS", list.items.first().item.name)
++        bot.sitDown()
++        bot.storeType = StoreType.SELL
++        bot.broadcastUserInfo()
++        bot.broadcastPacket(PrivateStoreMsgSell(bot))
++        log(bot, "opened sell store: " + list.items.joinToString { "${it.count}x ${it.item.name} @${it.price} (cost ${goods[it.item.itemId]?.cost})" })
++        val first = list.items.first()
++        advertise(bot, "WTS ${first.item.name} ${first.price}a" + if (list.items.size > 1) " and more" else "")
++        return true
++    }
++
++    fun askingPrice(role: MerchantRole, greed: Double, itemId: Int, cost: Int): Int {
++        val value = MarketBook.value(itemId)
++        val (share, markup) = if (role == MerchantRole.Reseller) (1.0 + 0.15 * greed) to RESELLER_MARKUP else (0.95 + 0.15 * greed) to COLLECTOR_MARKUP
++        val price = maxOf((value * share).toInt(), (cost * markup).toInt(), Market.npcSellPrice(itemId) + 1)
++        // What a town shop sells nobody buys in a store for more than the shop asks.
++        val shop = Market.npcPrice(itemId) ?: return price
++        return minOf(price, (shop * SHOP_CAP).toInt())
++    }
++
++    /** A collector's buy store closed or ran out: what came in since it opened is now stock at the bid paid. */
++    private fun settleBuyStore(bot: Autobot) {
++        val store = buyStores.remove(bot.objectId) ?: return
++        for ((itemId, before) in store.before) {
++            val got = Gear.count(bot, itemId) - before
++            if (got <= 0) continue
++            val bid = store.bids[itemId] ?: continue
++            addStock(bot, itemId, got, bid)
++            bought.addAndGet(got)
++            boughtAdena.addAndGet(bid.toLong() * got)
++            log(bot, "bought ${got}x ${ItemTable.getInstance().getTemplate(itemId)?.name} in its buy store @$bid")
++        }
++    }
++
++    /** Called when any population store closes, before its lists are cleared. */
++    fun onStoreClosed(bot: Autobot) {
++        if (!enabled) return
++        if (bot.storeType == StoreType.BUY || buyStores.containsKey(bot.objectId)) settleBuyStore(bot)
++    }
++
++    /**
++     * A sale the market book saw in a store: merchants who sell at a fair price and buy at a decent one earn a
++     * name for it, overpricing costs some of it.
++     */
++    fun onStoreSale(ownerId: Int, itemId: Int, unitPrice: Int, count: Int, buyStore: Boolean) {
++        if (!enabled) return
++        val owner = Merchants.botById(ownerId) ?: return
++        val role = role(owner)
++        if (role == MerchantRole.None) return
++        val value = MarketBook.value(itemId).coerceAtLeast(1)
++        if (buyStore) {
++            if (unitPrice >= value * 0.6) MerchantRep.deal(ownerId, 0.3, 3.0)
++            return
++        }
++        when {
++            unitPrice <= value * 1.1 -> MerchantRep.deal(ownerId, 0.5, 5.0)
++            unitPrice > value * 1.4 -> MerchantRep.deal(ownerId, -0.5, 0.0)
++            else -> MerchantRep.deal(ownerId, 0.0, 0.0)
++        }
++        val s = stock[ownerId]?.get(itemId) ?: return
++        sold.addAndGet(count)
++        profit.addAndGet((unitPrice - s.cost).toLong() * count)
++        s.count -= count
++    }
++
++    // ---------------------------------------------------------------- in town
++
++    /**
++     * A merchant's round in town, between the usual errands: a collector sells its goods to crafters' buy stores that
++     * pay over its cost, a reseller buys what sells too cheap around. Customers and crafters settle their orders.
++     */
++    suspend fun inTown(bot: Autobot, walkTo: suspend (Player) -> Boolean) {
++        if (!enabled || bot.isInStoreMode) return
++        when (role(bot)) {
++            MerchantRole.Collector -> sellToBuyStores(bot, walkTo)
++            MerchantRole.Reseller -> {
++                sellToBuyStores(bot, walkTo)
++                flip(bot, walkTo)
++            }
++            else -> {}
++        }
++        CraftOrders.inTown(bot, walkTo)
++    }
++
++    private suspend fun sellToBuyStores(bot: Autobot, walkTo: suspend (Player) -> Boolean) {
++        for ((itemId, s) in liveStock(bot).entries.toList()) {
++            val offer = Market.buyOffers(bot, itemId).firstOrNull { it.owner !== bot && it.tradeItem.price >= s.cost * COLLECTOR_MARKUP } ?: continue
++            if (!walkTo(offer.owner)) continue
++            val item = bot.inventory.getItemByItemId(itemId)?.takeIf { !it.isEquipped } ?: continue
++            val count = minOf(s.count, item.count, offer.tradeItem.count)
++            if (count <= 0 || !Market.sellToStore(bot, offer, item, count)) continue
++            s.count -= count
++            sold.addAndGet(count)
++            profit.addAndGet((offer.tradeItem.price - s.cost).toLong() * count)
++            log(bot, "sold ${count}x ${item.itemName} to the buy store of ${offer.owner.name} @${offer.tradeItem.price} (cost ${s.cost})")
++        }
++    }
++
++    /** Buys what stores around sell well under the market: a novice's mistake or a price cut after days unsold. */
++    private suspend fun flip(bot: Autobot, walkTo: suspend (Player) -> Boolean) {
++        var budget = (Errands.spendable(bot) * RESELLER_BUDGET).toLong()
++        var buys = 0
++        val greed = TradeTemper.greed(bot)
++        val bargains = Market.storesNear(bot)
++                .filter { it.storeType == StoreType.SELL && role(it) != MerchantRole.Reseller }
++                .flatMap { owner -> owner.sellList.items.map { dev.l2j.autobots.population.economy.StoreOffer(owner, it) } }
++                .mapNotNull { offer ->
++                    val itemId = offer.tradeItem.item.itemId
++                    val value = MarketBook.value(itemId)
++                    val price = offer.tradeItem.price
++                    if (value < MIN_FLIP_VALUE || price > value * RESELL_BELOW || price <= Market.npcSellPrice(itemId) || !offer.tradeItem.item.isTradable) null
++                    else {
++                        val gain = askingPrice(MerchantRole.Reseller, greed, itemId, price) - price
++                        if (gain < MIN_FLIP_PROFIT) null else offer to gain
++                    }
++                }
++                .sortedByDescending { (offer, gain) -> gain.toLong() * offer.tradeItem.count }
++        if (AutobotData.settings.merchantLog) log(bot, "looks for bargains: ${bargains.size} found, budget $budget")
++        for ((offer, gain) in bargains) {
++            if (buys >= RESELLER_BUYS) break
++            val price = offer.tradeItem.price
++            val count = minOf(offer.tradeItem.count.toLong(), budget / price.coerceAtLeast(1)).toInt()
++            if (count <= 0) continue
++            if (!walkTo(offer.owner)) continue
++            val itemId = offer.tradeItem.item.itemId
++            if (!Market.buyFromStore(bot, offer, count)) continue
++            buys++
++            budget -= price.toLong() * count
++            addStock(bot, itemId, count, price)
++            bought.addAndGet(count)
++            boughtAdena.addAndGet(price.toLong() * count)
++            flips.incrementAndGet()
++            log(bot, "bought ${count}x ${offer.tradeItem.item.name} from ${offer.owner.name} @$price to resell (market ${MarketBook.value(itemId)}, +$gain each)")
++            if (gain.toLong() * count >= BIG_FLIP)
++                MerchantEvents.fire(MerchantEvents.Kind.BigFlip, bot, bot.name, offer.owner.name, offer.tradeItem.item.name, gain.toLong() * count)
++        }
++    }
++
++    // ---------------------------------------------------------------- talk
++
++    fun advertise(bot: Autobot, text: String) {
++        val rep = MerchantRep.of(bot.objectId)
++        val tag = if (rep.score >= MerchantRep.TRUSTED) (if (rep.ordersDone > 0) ", trusted, ${rep.ordersDone} orders done" else ", trusted") else ""
++        Chatter.advertise(bot, "$text$tag, ${MapRegionData.getInstance().getClosestTownName(bot.x, bot.y)}")
++    }
++
++    private fun title(kind: String, first: String): String = "$kind $first".take(MAX_TITLE)
++
++    private fun summary() {
++        if (!AutobotData.settings.merchantLog) return
++        val online = AutobotsManager.activeBots.values.filter { it.isOnline && it.life != null }
++        val roles = online.groupingBy { role(it) }.eachCount()
++        val merchants = online.filter { role(it) != MerchantRole.None }
++        val stores = merchants.count { it.isInStoreMode }
++        val held = merchants.sumOf { m -> liveStock(m).values.sumOf { it.count } }
++        println("Autobots merchants summary: collectors=${roles[MerchantRole.Collector] ?: 0} resellers=${roles[MerchantRole.Reseller] ?: 0} " +
++                "crafters=${roles[MerchantRole.Crafter] ?: 0} stores=$stores held=$held bought=${bought.getAndSet(0)} boughtAdena=${boughtAdena.getAndSet(0)} " +
++                "sold=${sold.getAndSet(0)} profit=${profit.getAndSet(0)} flips=${flips.getAndSet(0)} ${CraftOrders.summary()} " +
++                "avgRep=${"%.1f".format(MerchantRep.average(merchants.map { it.objectId }))}")
++    }
++}
+diff --git a/src/main/kotlin/dev/l2j/autobots/population/trade/Traits.kt b/src/main/kotlin/dev/l2j/autobots/population/trade/Traits.kt
+index 48a9e3a..99d9838 100644
+--- a/src/main/kotlin/dev/l2j/autobots/population/trade/Traits.kt
++++ b/src/main/kotlin/dev/l2j/autobots/population/trade/Traits.kt
+@@ -13,8 +13,11 @@ internal enum class Honesty {
+     Scammer;
+ 
+     companion object {
+-        fun of(bot: Player): Honesty {
+-            val roll = Math.floorMod(bot.objectId * 193 + 71, 100)
++        fun of(bot: Player): Honesty = of(bot.objectId)
++
++        /** The same for someone offline, by the object id alone. */
++        fun of(objectId: Int): Honesty {
++            val roll = Math.floorMod(objectId * 193 + 71, 100)
+             val settings = AutobotData.settings
+             return when {
+                 roll < settings.scammerPercent -> Scammer

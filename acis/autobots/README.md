@@ -248,6 +248,33 @@ Everything is applied at image build time in `acis/Dockerfile`; the upstream tre
     (a thing it doesn't want is accepted only as a gift). Items are found by the words of their name, or "оружие" /
     "броня" for the best spare piece.
   - `Autobots trade summary:` every 10 minutes: deals by kind, open and defaulted loans, scammers online.
+- `l2autobots-merchants.patch` - merchants with a character (`docs/merchants.md`), new code in `population/merchant/`,
+  `merchantsEnabled`, `merchantLog`, `craftOrderHours` in `config.xml`.
+  - `MerchantRole` (level 20+, by object id): traders (`SessionPlan.baseStyleOf` is `Trader`) are collectors or
+    resellers half and half; dwarf crafters take orders. A merchant's goods have a cost (what it paid) and are kept
+    out of `Gear.surplus` for 3 days while the bag is under 50%.
+  - Collector: its store session is a buy store "WTB mats: ..." for what crafters lack (`CraftPlanner.wantedMaterials`)
+    and what bots want that no shop sells, at 55-75% of `MarketBook.value` by greed but always over the NPC price;
+    what came in (inventory against the opening counts) becomes goods at the bid. In town it sells goods to buy stores
+    paying cost +15%, the rest in its sell store at 95-110% of the market, never under cost +15%.
+  - Reseller: in town buys up to 3 listings priced under 70% of the market (not from another reseller) with half of
+    its free adena and puts them up at 100-115% of the market, never under cost +20%. Items a town shop sells are
+    never asked above 95% of the shop price.
+  - `CraftOrders` (`autobot_craft_orders`): a bot of 20+ whose next kit piece has a recipe, no shop and no affordable
+    store, workshop or own craft asks a crafter around who knows the recipe (under 3 open orders, reputation 30+,
+    trust above -30; best by price against reputation). Price: market value x 0.85-1.0 by the crafter's greed, 30% up
+    front through the trade window. The crafter (`Crafter.work`) buys the order's materials first (stores up to 130%
+    of value, shops), crafts intermediates and the piece, and keeps it. The customer picks it up in town for the rest
+    and wears it. Past `craftOrderHours`: a scammer's customer complains (`SocialTrade.scammed`), an honest crafter
+    gives the deposit back when they meet, and after 4/3 of the term more the deposit is lost. Opportunists start only
+    after 60% of the term. A crafter in a store closes it for the deal; its trading segment opens it again.
+  - `MerchantRep` (`autobot_merchant_rep`): 0-100 from 50, back to 50 by 5% of the gap a day. Store sales at up to
+    110% of the market +0.5 (5 a day), over 140% -0.5, buy store purchases at 60%+ of the market +0.3 (3 a day),
+    orders on time +5, late +2, refunded -5, lost -8, scam -25. Buyers in `TownTrip` pay 5% over their limit at a
+    trusted merchant (70+) and only 85% of it at a shady one (under 25); ads of trusted merchants say so.
+  - `MerchantEvents` (orders done, failed, scams, resales worth 100k+) for other stages such as rumors.
+  - `Autobots merchants:` lines and `Autobots merchants summary:` every 10 minutes: roles online, stores, goods held,
+    bought, sold, profit, flips, orders and the average reputation.
 - `build.gradle.kts` - compiles only the Kotlin module against aCis Java sources and copies the jar plus its
   runtime deps into `aCis_gameserver/lib`, so the stock ant build compiles and ships them.
 
