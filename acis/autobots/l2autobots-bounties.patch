@@ -1,11 +1,11 @@
 diff --git a/data/autobots/config.xml b/data/autobots/config.xml
-index e1f492d..f65b9c9 100644
+index 489d82c..859bb46 100644
 --- a/data/autobots/config.xml
 +++ b/data/autobots/config.xml
-@@ -55,6 +55,14 @@
-   <clanWarsEnabled>true</clanWarsEnabled>
-   <clanWarPkEnabled>true</clanWarPkEnabled>
-   <clanWarLog>true</clanWarLog>
+@@ -69,6 +69,14 @@
+   <mentorMaxBonds>10</mentorMaxBonds>
+   <mentorBotChancePercent>10</mentorBotChancePercent>
+   <mentorMinutes>30</mentorMinutes>
 +  <!-- Bounties on PKers (docs/bounties.md): a PK puts a price on the killer's head, bountyPerLevel x its level from the
 +       guards per PK (at most 5) plus a share of a bot victim's adena. Up to bountyHunters bots nearby go after the PKer;
 +       whoever kills it while it has karma (bot or player) gets the money. Lifted when the karma is gone or after 3
@@ -18,21 +18,21 @@ index e1f492d..f65b9c9 100644
         shout for missing members and answer players who look for a group in chat. At most this percent of the
         online population plays in parties; the rest hunt alone. groupLog prints every formed party. -->
 diff --git a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
-index 64fc761..9d692e5 100644
+index 5c9c79b..90879a7 100644
 --- a/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/AutobotsManager.kt
 @@ -174,7 +174,8 @@ object AutobotsManager {
              2 -> { // pm "
                  if(target == null) return false
                  val bot = activeBots.getOrElse(target) {null} ?: return false
--                if (!dev.l2j.autobots.population.news.Rumors.onWhisper(chatter, bot, text) &&
+-                if (!dev.l2j.autobots.population.group.Mentors.onWhisper(chatter, bot, text) &&
 +                if (!dev.l2j.autobots.population.group.Bounties.onWhisper(chatter, bot, text) &&
-+                        !dev.l2j.autobots.population.news.Rumors.onWhisper(chatter, bot, text) &&
++                        !dev.l2j.autobots.population.group.Mentors.onWhisper(chatter, bot, text) &&
+                         !dev.l2j.autobots.population.notice.PlayerNotice.onWhisper(chatter, bot, text) &&
+                         !dev.l2j.autobots.population.news.Rumors.onWhisper(chatter, bot, text) &&
                          !dev.l2j.autobots.population.group.ClanChat.onWhisper(chatter, bot, text) &&
-                         !dev.l2j.autobots.population.llm.Persuasion.onWhisper(chatter, bot, text) &&
-                         !PlayerTrade.onWhisper(chatter, bot, text) && !GroupChat.onWhisper(chatter, bot, text)) BotTalk.onWhisper(chatter, bot, text)
 diff --git a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
-index f89b588..c2729e6 100644
+index e53b251..9efb128 100644
 --- a/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/behaviors/CombatBehavior.kt
 @@ -271,7 +271,7 @@ internal abstract class CombatBehavior(val player: Player, var combatPreferences
@@ -55,13 +55,13 @@ index f89b588..c2729e6 100644
          
          return when(combatPreferences.attackPlayerType){
 diff --git a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-index 8a45b0a..189ee4d 100644
+index a94cbea..420007d 100644
 --- a/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/config/AutobotSettings.kt
-@@ -51,6 +51,10 @@ internal data class AutobotSettings(
-         @JsonProperty("clanWarsEnabled") var clanWarsEnabled: Boolean = true,
-         @JsonProperty("clanWarPkEnabled") var clanWarPkEnabled: Boolean = true,
-         @JsonProperty("clanWarLog") var clanWarLog: Boolean = true,
+@@ -60,6 +60,10 @@ internal data class AutobotSettings(
+         @JsonProperty("mentorMaxBonds") var mentorMaxBonds: Int = 10,
+         @JsonProperty("mentorBotChancePercent") var mentorBotChancePercent: Int = 10,
+         @JsonProperty("mentorMinutes") var mentorMinutes: Int = 30,
 +        @JsonProperty("bountiesEnabled") var bountiesEnabled: Boolean = true,
 +        @JsonProperty("bountyHunters") var bountyHunters: Int = 3,
 +        @JsonProperty("bountyPerLevel") var bountyPerLevel: Int = 1000,
@@ -83,10 +83,10 @@ index d49488a..0ddcb35 100644
          try {
              val by = when {
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-index aeef07f..8c0380d 100644
+index 8041721..9eabd41 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/LifeBehavior.kt
-@@ -682,6 +682,12 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -684,6 +684,12 @@ internal class LifeBehavior(private val bot: Autobot) {
              return
          }
  
@@ -99,7 +99,7 @@ index aeef07f..8c0380d 100644
          // A party leader may take the party to a raid boss instead of its spot.
          if (bot.isInParty && bot.party.leader === bot) {
              RaidPlanner.consider(bot)
-@@ -933,6 +939,34 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -935,6 +941,34 @@ internal class LifeBehavior(private val bot: Autobot) {
          if (gatekeeperFailed && distance(bot.location(), target.location) > MAX_TRAVEL_ON_FOOT) abandon(target)
      }
  
@@ -134,7 +134,7 @@ index aeef07f..8c0380d 100644
      /** The leader on its way to a raid boss: a gatekeeper from town, then on foot, one leg at a time. */
      private suspend fun travelToRaid(destination: Location, inTown: Boolean) {
          if (bot.isSitting) {
-@@ -993,6 +1027,10 @@ internal class LifeBehavior(private val bot: Autobot) {
+@@ -995,6 +1029,10 @@ internal class LifeBehavior(private val bot: Autobot) {
          private const val DEADLY_SPOT_RADIUS = 5000
          private const val PARTY_LEG = 2000.0
          private const val PARTY_LEG_ARRIVAL = 150
@@ -146,17 +146,17 @@ index aeef07f..8c0380d 100644
          private const val MIN_WALK_SAVED_BY_TELEPORT = 12000
          // About 20 seconds at the default think interval.
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-index e9e93b7..19f5025 100644
+index 05f5d70..4b1ff53 100644
 --- a/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
 +++ b/src/main/kotlin/dev/l2j/autobots/population/PopulationManager.kt
-@@ -120,6 +120,7 @@ internal object PopulationManager {
+@@ -122,6 +122,7 @@ internal object PopulationManager {
              if(ticks % 4 == 0) dev.l2j.autobots.movement.MovementStatus.sample(online)
              if (ticks % GROUPS_EVERY_TICKS == 0) { dev.l2j.autobots.population.group.StaticParties.tick(online,now);GroupFinder.tick(online) }
              if (ticks % GROUPS_EVERY_TICKS == 1) SocialTrade.tick(online)
 +            if (ticks % GROUPS_EVERY_TICKS == 1) dev.l2j.autobots.population.group.Bounties.tick(online)
              if (ticks % CLANS_EVERY_TICKS == 3) dev.l2j.autobots.population.group.Clans.tick(online)
+             if (ticks % GROUPS_EVERY_TICKS == 1) dev.l2j.autobots.population.group.Mentors.tick(online)
              if (ticks % GROUPS_EVERY_TICKS == 0) dev.l2j.autobots.population.llm.BotChatter.tick(online)
-             dev.l2j.autobots.population.news.ServerNews.tick()
 diff --git a/src/main/kotlin/dev/l2j/autobots/population/group/Bounties.kt b/src/main/kotlin/dev/l2j/autobots/population/group/Bounties.kt
 new file mode 100644
 index 0000000..99caab3
